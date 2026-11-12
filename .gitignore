@@ -6,3 +6,5 @@ game/
 # Upstream clones
 third_party/
 build/
+# Recompiled output (derived from game code)
+ppc/

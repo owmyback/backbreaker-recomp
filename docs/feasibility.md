@@ -23,3 +23,29 @@ Risk: Euphoria physics floating-point sensitivity.
 1. Clone XenonRecomp into third_party/, install clang, build
 2. Run XenonAnalyse on game/extracted/default.pe, write TOML config, run XenonRecomp
 3. Measure how many functions translate without manual fixes
+
+# Recompiler run - 2026-11-12
+
+## Tooling
+- XenonRecomp @ ddd128b built with clang 22.1.8 (third_party/, gitignored)
+- XenonAnalyse found 0 jump tables: its patterns expect `lis/addi/rlwinm/lwzx` and no nops;
+  Backbreaker emits `lis/rlwinm/addi/lwzx` and pads with nops.
+- Replaced with `tools/find_switch_tables.py`: 431 switch tables (265 word, 122 byte, 44 halfword),
+  all labels verified inside their function. Bounds checks can be up to ~80 instructions back.
+- 50 switches live in leaf functions with no .pdata entry; XenonRecomp cut those functions short
+  (998 "jump outside function" errors). `tools/leaf_functions.py` emits 48 explicit `functions`
+  entries bounded by surrounding `bl` targets -> 0 errors.
+- Save/restore helpers located by byte pattern (unique hits), see config/backbreaker.toml.
+
+## Result
+- 30,191 functions recompiled into 116 C++ files (153 MB); all 116 compile with clang -O2 (~23 s on 16 threads)
+- 12,507 instructions XenonRecomp doesn't implement, 62 distinct mnemonics, in 1,120 functions (3.7%):
+  - update-form loads/stores: lhzu stfsu lfsu sthu lbzux stbux lwzux stdux ...  (simple)
+  - integer carry ops: addc addme subfze eqv; CR ops: cror crorc; branches: bdzf bdnzt
+  - VMX halfword/saturating integer ops: vslh vsrah vsubshs vaddsws vspltish vmaxsh vminsh vpk*...
+  - plus 39 `vcmpgtuh.` with record bit
+  These are all well-defined PowerPC/VMX ops; each needs a few lines in XenonRecomp/recompiler.cpp.
+
+## Not done yet
+- longjmp/setjmp addresses
+- No runtime: nothing links or runs yet (kernel, GPU, audio, input all missing)
