@@ -1,5 +1,7 @@
 import sys,struct,os
+# Usage: xdvdfs.py <iso> <outdir> [file ...]   (no files listed: list only; '--all': extract everything)
 iso=open(sys.argv[1],'rb'); out=sys.argv[2]; want=[w.lower() for w in sys.argv[3:]]
+extract_all = want == ['--all']
 SEC=2048; MAG=b'MICROSOFT*XBOX*MEDIA'
 base=None
 for off in (0x0,0xFD90000,0x2080000,0x18300000):
@@ -23,5 +25,12 @@ def walk(sec,size,path):
         if r: stack.append(r)
 for p,s,z in walk(rs,rz,''):
     print(f'{z:>12} {p}')
-    if p.lower().lstrip('/') in want:
+    if extract_all:
+        dst=os.path.join(out,p.lstrip('/')); os.makedirs(os.path.dirname(dst),exist_ok=True)
+        iso.seek(base+s*SEC)
+        with open(dst,'wb') as f:
+            left=z
+            while left:
+                chunk=iso.read(min(left,1<<24)); f.write(chunk); left-=len(chunk)
+    elif p.lower().lstrip('/') in want:
         iso.seek(base+s*SEC); open(os.path.join(out,os.path.basename(p)),'wb').write(iso.read(z))

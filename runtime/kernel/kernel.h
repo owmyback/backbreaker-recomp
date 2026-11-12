@@ -10,6 +10,9 @@ namespace kernel
     void loadXexHeader(const std::string& path);
     uint32_t moduleHandle();
 
+    // Map guest devices (game:, d:, cache:) to host directories.
+    void initFileSystem(const std::string& discRoot, const std::string& cacheRoot);
+
     // Patch variable and function-pointer import slots in the loaded image.
     void patchImports();
 

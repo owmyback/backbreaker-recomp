@@ -108,6 +108,7 @@ int main(int argc, char** argv)
     buildFunctionTable();
     kernel::loadXexHeader(xex);
     kernel::patchImports();
+    kernel::initFileSystem("game/disc", "game/cache");
 
     static PPCContext ctx{};
     ctx.fpscr.loadFromHost();
