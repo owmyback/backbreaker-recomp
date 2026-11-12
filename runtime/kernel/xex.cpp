@@ -56,6 +56,13 @@ namespace kernel
     }
 
     uint32_t moduleHandle() { return g_ldr; }
+
+    uint32_t xexHeaderField(uint32_t key)
+    {
+        uint32_t out = 0;
+        findOptionalHeader(g_header, key, out);
+        return out;
+    }
 }
 
 // void* RtlImageXexHeaderField(void* XexHeaderBase, u32 ImageField)

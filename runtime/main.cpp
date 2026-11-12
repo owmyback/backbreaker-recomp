@@ -4,9 +4,11 @@
 
 #include "kernel/kernel.h"
 #include "kernel/objects.h"
+#include "gpu/gpu.h"
 #include "log.h"
 #include "memory.h"
 
+#include <atomic>
 #include <csignal>
 #include <cstring>
 #include <execinfo.h>
@@ -22,6 +24,10 @@ namespace
 {
     void crashHandler(int sig, siginfo_t* si, void* uctx)
     {
+        // Only the first crashing thread reports; others wait to be torn down with the process.
+        static std::atomic<bool> crashing{false};
+        if (crashing.exchange(true))
+            for (;;) pause();
         auto* uc = (ucontext_t*)uctx;
         uintptr_t fault = (uintptr_t)si->si_addr;
         uintptr_t rip = uc->uc_mcontext.gregs[REG_RIP];
@@ -36,7 +42,23 @@ namespace
         int n = backtrace(frames, 48);
         std::fprintf(stderr, "---- host backtrace (sub_XXXXXXXX = guest function) ----\n");
         backtrace_symbols_fd(frames, n, STDERR_FILENO);
-        kernel::printTrace();
+
+        kernel::GuestThread* gt = kernel::currentThread();
+        if (kernel::Thread* th = kernel::currentThreadObject(); th && th->ctx)
+        {
+            PPCContext& c = *th->ctx;
+            std::fprintf(stderr, "---- guest registers, thread %u ----\n", gt ? gt->id : 0);
+            PPCRegister* r[] = { &c.r3, &c.r4, &c.r5, &c.r6, &c.r7, &c.r8, &c.r9, &c.r10, &c.r11, &c.r12 };
+            for (int i = 0; i < 10; i++)
+                std::fprintf(stderr, "  r%-2d %08X%s", i + 3, r[i]->u32, i % 5 == 4 ? "\n" : "");
+            PPCRegister* nv[] = { &c.r24, &c.r25, &c.r26, &c.r27, &c.r28, &c.r29, &c.r30, &c.r31 };
+            for (int i = 0; i < 8; i++)
+                std::fprintf(stderr, "  r%-2d %08X%s", i + 24, nv[i]->u32, i % 4 == 3 ? "\n" : "");
+            std::fprintf(stderr, "  r1  %08X  r13 %08X  lr  %08X\n", c.r1.u32, c.r13.u32, uint32_t(c.lr));
+        }
+        kernel::printScopes(gt);
+        if (gt) kernel::printTrace(gt->id, 24);
+        kernel::printTrace(0, 12);
         kernel::printSummary();
         _exit(128 + sig);
     }
@@ -44,7 +66,12 @@ namespace
     void timeoutHandler(int)
     {
         std::fprintf(stderr, "\n==== timeout reached ====\n");
-        kernel::printTrace();
+        for (kernel::GuestThread* t : kernel::allThreads())
+        {
+            std::fprintf(stderr, "\n#### thread %u\n", t->id);
+            kernel::printScopes(t);
+            kernel::printTrace(t->id, 4);
+        }
         kernel::printSummary();
         _exit(124);
     }
@@ -78,9 +105,24 @@ namespace
         info("loaded %s at %08llX (0x%zX bytes)", path.c_str(), PPC_IMAGE_BASE, size);
     }
 
+    // Every slot without a recompiled function points here, so a bad indirect call reports
+    // its target (bctr/bctrl jump through ctr) instead of jumping to a null host address.
+    PPC_FUNC(missingFunction)
+    {
+        std::fprintf(stderr, "\n==== indirect call to guest %08X: no recompiled function there (caller lr %08X) ====\n",
+                     ctx.ctr.u32, uint32_t(ctx.lr));
+        kernel::GuestThread* gt = kernel::currentThread();
+        kernel::printScopes(gt);
+        if (gt) kernel::printTrace(gt->id, 16);
+        kernel::printSummary();
+        _exit(3);
+    }
+
     void buildFunctionTable()
     {
         uint8_t* base = mem::base;
+        for (uint64_t a = PPC_CODE_BASE; a < PPC_CODE_BASE + PPC_CODE_SIZE; a += 4)
+            PPC_LOOKUP_FUNC(base, a) = missingFunction;
         size_t n = 0;
         for (PPCFuncMapping* m = PPCFuncMappings; m->host; m++, n++)
             PPC_LOOKUP_FUNC(base, m->guest) = m->host;
@@ -115,6 +157,7 @@ int main(int argc, char** argv)
     kernel::GuestThread* mainThread = kernel::createGuestThread(ctx, 0x100000);
     kernel::setCurrentThread(mainThread);
     kernel::adoptCurrentThread(mainThread, &ctx);
+    gpu::init();
 
     if (timeout > 0)
         alarm(timeout);

@@ -98,10 +98,11 @@ GUEST_IMPORT(XGetGameRegion) { ctx.r3.u64 = 0x00FF; } // North America
 GUEST_IMPORT(XGetAVPack) { ctx.r3.u64 = 8; }          // HDMI
 GUEST_IMPORT(KeGetCurrentProcessType) { ctx.r3.u64 = 1; } // title process
 
-// void XGetVideoMode(XVIDEO_MODE* Mode)
-GUEST_IMPORT(XGetVideoMode)
+namespace kernel
 {
-    uint32_t m = ctx.r3.u32;
+    // XVIDEO_MODE as reported by XGetVideoMode / VdQueryVideoMode
+    void fillVideoMode(uint32_t m)
+    {
     memset(host(m), 0, 0x30);
     write32(m + 0x00, 1280);  // DisplayWidth
     write32(m + 0x04, 720);   // DisplayHeight
@@ -111,16 +112,54 @@ GUEST_IMPORT(XGetVideoMode)
     uint32_t hz = 0x42700000; // 60.0f
     write32(m + 0x14, hz);    // RefreshRate
     write32(m + 0x18, 8);     // VideoStandard (NTSC-M)
+    }
 }
+
+// void XGetVideoMode(XVIDEO_MODE* Mode)
+GUEST_IMPORT(XGetVideoMode) { kernel::fillVideoMode(ctx.r3.u32); }
 
 // void XamGetSystemVersion() -> packed 2.0.17559.0
 GUEST_IMPORT(XamGetSystemVersion) { ctx.r3.u64 = (2u << 28) | (0u << 24) | (17559u << 8); }
 
 // NTSTATUS ExGetXConfigSetting(u16 Category, u16 Setting, void* Buffer, u16 Size, u16* RequiredSize)
+// Values follow Xenia: US English console, 720p widescreen.
 GUEST_IMPORT(ExGetXConfigSetting)
 {
-    warn("ExGetXConfigSetting(category %u, setting %u) - not provided", ctx.r3.u16, ctx.r4.u16);
-    ctx.r3.u64 = STATUS_UNSUCCESSFUL;
+    uint32_t category = ctx.r3.u16, setting = ctx.r4.u16, buf = ctx.r5.u32, size = ctx.r6.u16, pRequired = ctx.r7.u32;
+    uint32_t value = 0, valueSize = 4;
+    bool known = true;
+    if (category == 2 && setting == 2)                   // XCONFIG_SECURED_AV_REGION
+        value = 0x00001000;                              // NTSC-M (USA/Canada)
+    else if (category == 3 && setting >= 1 && setting <= 7)
+        value = 0;                                       // time zone fields
+    else if (category == 3 && setting == 9)
+        value = 1;                                       // XCONFIG_USER_LANGUAGE: English
+    else if (category == 3 && setting == 10)
+        value = 0x00040000;                              // XCONFIG_USER_VIDEO_FLAGS: widescreen
+    else if (category == 3 && setting == 11)
+        value = 0;                                       // XCONFIG_USER_AUDIO_FLAGS
+    else if (category == 3 && setting == 12)
+        value = 0;                                       // XCONFIG_USER_RETAIL_FLAGS
+    else if (category == 3 && setting == 14)
+        { value = 103; valueSize = 1; }                  // XCONFIG_USER_COUNTRY: US
+    else if (category == 3 && setting == 15)
+        { value = 0; valueSize = 1; }                    // XCONFIG_USER_PC_FLAGS
+    else
+        known = false;
+
+    if (!known)
+    {
+        warn("ExGetXConfigSetting(category %u, setting %u) - unknown", category, setting);
+        ctx.r3.u64 = STATUS_UNSUCCESSFUL;
+        return;
+    }
+    if (pRequired) write16(pRequired, valueSize);
+    if (buf)
+    {
+        if (size < valueSize) { ctx.r3.u64 = 0xC0000023; return; } // STATUS_BUFFER_TOO_SMALL
+        if (valueSize == 1) write8(buf, value); else write32(buf, value);
+    }
+    ctx.r3.u64 = STATUS_SUCCESS;
 }
 
 GUEST_IMPORT(ExRegisterTitleTerminateNotification) {}

@@ -10,9 +10,14 @@ namespace mem
     constexpr uint32_t kVirtualBase      = 0x40000000; // NtAllocateVirtualMemory, stacks
     constexpr uint32_t kVirtualEnd       = 0x7F000000;
     constexpr uint32_t kKernelBase       = 0x7F000000; // kernel objects owned by the runtime
-    constexpr uint32_t kKernelEnd        = 0x80000000;
+    constexpr uint32_t kKernelEnd        = 0x7FC00000;
+    constexpr uint32_t kGpuMmioBase      = 0x7FC80000; // GPU register file (CPU-visible MMIO window)
     constexpr uint32_t kPhysicalBase     = 0xA0000000; // MmAllocatePhysicalMemoryEx
     constexpr uint32_t kPhysicalEnd      = 0xC0000000;
+    constexpr uint32_t kPhysicalSize     = 0x20000000; // 512 MB, also visible at 0xC0000000 and 0xE0000000
+
+    // Guest virtual address in a physical view -> physical address
+    inline uint32_t physicalAddress(uint32_t v) { return (v & 0x1FFFFFFF) + (v >= 0xE0000000 ? 0x1000 : 0); }
 
     extern uint8_t* base;
 
@@ -29,6 +34,8 @@ namespace mem
     void recordAllocation(uint32_t base, uint32_t size, uint32_t protect);
 
     inline uint8_t* host(uint32_t guest) { return base + guest; }
+    // Physical address (as the GPU sees it) -> host pointer
+    inline uint8_t* physical(uint32_t p) { return base + kPhysicalBase + (p & 0x1FFFFFFF); }
     inline bool isGuest(const void* p) { return (const uint8_t*)p >= base && (const uint8_t*)p < base + 0x100000000ull; }
 
     // Big-endian accessors

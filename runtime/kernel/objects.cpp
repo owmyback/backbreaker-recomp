@@ -401,3 +401,71 @@ GUEST_IMPORT(ObReferenceObjectByHandle)
 
 GUEST_IMPORT(ObReferenceObject) {}
 GUEST_IMPORT(ObDereferenceObject) {}
+
+// ---- Timers ----
+// A timer is an event that a host thread signals at its due time (and again every period).
+// Re-arming or cancelling bumps a generation counter so stale sleeper threads do nothing.
+namespace
+{
+    struct Timer : Event
+    {
+        std::atomic<uint64_t> generation{0};
+        explicit Timer(bool manual) : Event(manual, false) { type = Type::Timer; }
+    };
+}
+
+// NTSTATUS NtCreateTimer(HANDLE* Handle, OBJECT_ATTRIBUTES* Attr, u32 TimerType)  (0 = notification, 1 = sync)
+GUEST_IMPORT(NtCreateTimer)
+{
+    auto* t = new Timer(ctx.r5.u32 == 0);
+    write32(ctx.r3.u32, registerObject(t));
+    ctx.r3.u64 = STATUS_SUCCESS;
+}
+
+// NTSTATUS NtSetTimerEx(HANDLE Timer, i64* DueTime, void* ApcRoutine, u32 ApcMode, void* ApcContext,
+//                       BOOL Resume, LONG Period /* ms */, BOOL* PreviousState)
+GUEST_IMPORT(NtSetTimerEx)
+{
+    auto* t = dynamic_cast<Timer*>(objectFromHandle(ctx.r3.u32));
+    if (!t) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
+    uint32_t apc = ctx.r5.u32;
+    int32_t period = int32_t(ctx.r9.u32);
+    uint32_t pPrev = ctx.r10.u32;
+    if (apc)
+        warn("NtSetTimerEx: APC routine %08X not supported, timer will only be signaled", apc);
+    Deadline due = deadlineFromGuest(ctx.r4.u32);
+    {
+        std::lock_guard lock(g_dispatchLock);
+        if (pPrev) write32(pPrev, t->signaled);
+        t->signaled = false;
+        syncGuestState(t);
+    }
+    uint64_t gen = ++t->generation;
+    std::thread([t, gen, due, period] {
+        auto when = due ? *due : std::chrono::steady_clock::now();
+        for (;;)
+        {
+            std::this_thread::sleep_until(when);
+            if (t->generation != gen) return;
+            {
+                std::lock_guard lock(g_dispatchLock);
+                t->signaled = true;
+                syncGuestState(t);
+                signalObjectsChanged();
+            }
+            if (period <= 0) return;
+            when += std::chrono::milliseconds(period);
+        }
+    }).detach();
+    ctx.r3.u64 = STATUS_SUCCESS;
+}
+
+// NTSTATUS NtCancelTimer(HANDLE Timer, BOOL* CurrentState)
+GUEST_IMPORT(NtCancelTimer)
+{
+    auto* t = dynamic_cast<Timer*>(objectFromHandle(ctx.r3.u32));
+    if (!t) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
+    t->generation++;
+    if (ctx.r4.u32) write32(ctx.r4.u32, t->signaled);
+    ctx.r3.u64 = STATUS_SUCCESS;
+}

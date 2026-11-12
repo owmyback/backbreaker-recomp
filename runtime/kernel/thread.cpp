@@ -7,6 +7,7 @@
 #include <csignal>
 #include <cstring>
 #include <pthread.h>
+#include <mutex>
 #include <vector>
 
 using namespace mem;
@@ -14,6 +15,8 @@ using namespace mem;
 namespace
 {
     thread_local kernel::GuestThread* t_current = nullptr;
+    std::mutex g_threadListLock;
+    std::vector<kernel::GuestThread*> g_threadList;
     std::atomic<uint32_t> g_nextThreadId{1};
 
     // Offsets follow Xenia's X_KPCR / X_KTHREAD research.
@@ -116,10 +119,18 @@ namespace kernel
         ctx.r1.u64 = t->stackBase - 0x100; // leave room for the caller's back chain area
         ctx.r13.u64 = t->pcr;
         info("thread %u: stack %08X-%08X pcr %08X kthread %08X", t->id, t->stackLimit, t->stackBase, t->pcr, t->kthread);
+        std::lock_guard guard(g_threadListLock);
+        g_threadList.push_back(t);
         return t;
     }
 
     void setCurrentThread(GuestThread* t) { t_current = t; }
+
+    std::vector<GuestThread*> allThreads()
+    {
+        std::lock_guard guard(g_threadListLock);
+        return g_threadList;
+    }
     GuestThread* currentThread() { return t_current; }
 }
 

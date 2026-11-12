@@ -191,10 +191,31 @@ def analyze(pe, bctr):
 
     # pattern must start at the first lis that feeds the table
     first_lis = next(a for a, n, f in seq if n == 'lis')
-    cmp = find_compare(pe, first_lis, index_register(seq, li))
+    idx = index_register(seq, li)
+    cmp = find_compare(pe, first_lis, idx)
     if cmp is None:
-        return None
-    reg, count, default, cmp_addr = cmp
+        # No bounds check (index range known to the compiler). Only handled for word tables
+        # stored inline right after the bctr: count entries while they are code addresses
+        # inside this function, after the table itself.
+        if kind != 'lwzx' or table_addr != bctr + 4:
+            return None
+        fn = pe.func_of(bctr)
+        if fn is None:
+            return None
+        count = 0
+        while count < 4096:
+            v = pe.u32(table_addr + 4 * count)
+            if not (fn[0] <= v < fn[1]) or v & 3:
+                break
+            count += 1
+        if count == 0:
+            return None
+        # targets must lie after the table, which ends at the first non-entry word
+        if min(pe.u32(table_addr + 4 * i) for i in range(count)) < table_addr + 4 * count:
+            return None
+        reg, default, cmp_addr = idx, 0, 0
+    else:
+        reg, count, default, cmp_addr = cmp
     if count > 4096:
         return None
 

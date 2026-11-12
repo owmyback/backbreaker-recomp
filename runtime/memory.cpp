@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <sys/mman.h>
+#include <unistd.h>
 
 namespace mem
 {
@@ -44,6 +45,20 @@ namespace mem
             fatal("could not reserve 4 GB guest address space");
         base = (uint8_t*)p;
         mprotect(base, kNullGuardEnd, PROT_NONE);
+
+        // Physical RAM is one 512 MB file mapped at three guest views, like the console:
+        // 0xA0000000 (64 KB pages), 0xC0000000 (16 MB pages) and 0xE0000000 (4 KB pages, offset 0x1000).
+        int fd = memfd_create("xbox-physical", 0);
+        if (fd < 0 || ftruncate(fd, kPhysicalSize) != 0)
+            fatal("could not create physical memory backing");
+        auto view = [&](uint32_t guest, off_t offset, size_t size) {
+            if (mmap(base + guest, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, offset) == MAP_FAILED)
+                fatal("could not map physical view at %08X", guest);
+        };
+        view(0xA0000000, 0, kPhysicalSize);
+        view(0xC0000000, 0, kPhysicalSize);
+        view(0xE0000000, 0x1000, kPhysicalSize - 0x1000);
+        close(fd);
         info("guest memory at %p", base);
     }
 

@@ -19,12 +19,17 @@ set(COMMON_FLAGS -march=x86-64-v3 -fno-strict-aliasing)
 file(GLOB PPC_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/ppc/*.cpp)
 add_library(backbreaker_ppc STATIC ${PPC_SOURCES})
 target_include_directories(backbreaker_ppc PUBLIC ${COMMON_INCLUDES})
-target_compile_options(backbreaker_ppc PRIVATE ${COMMON_FLAGS} -O2 -Wno-everything)
+target_compile_options(backbreaker_ppc PRIVATE ${COMMON_FLAGS} -O2 -Wno-everything
+    -include ${CMAKE_SOURCE_DIR}/runtime/ppc_hooks.h) # route MMIO stores to the runtime
 
 # Host runtime
 file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/runtime/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/kernel/*.cpp
+    ${CMAKE_SOURCE_DIR}/runtime/gpu/*.cpp
+    ${CMAKE_SOURCE_DIR}/runtime/apu/*.cpp
+    ${CMAKE_SOURCE_DIR}/runtime/hid/*.cpp
+    ${CMAKE_SOURCE_DIR}/runtime/debug/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/generated/*.cpp)
 add_executable(backbreaker ${RUNTIME_SOURCES})
 target_include_directories(backbreaker PRIVATE ${CMAKE_SOURCE_DIR}/runtime)

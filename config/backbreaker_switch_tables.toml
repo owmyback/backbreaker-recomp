@@ -5959,6 +5959,25 @@ labels = [
     0x826AAA00,
 ]
 
+# bctr 0x826AAA14  lwzx  table 0x826AAA18
+[[switch]]
+base = 0x826AAA00
+r = 11
+default = 0x0
+labels = [
+    0x826AAA88,
+    0x826AAA9C,
+    0x826AAA9C,
+    0x826AAA9C,
+    0x826AAA9C,
+    0x826AAA9C,
+    0x826AAA44,
+    0x826AAA54,
+    0x826AAA68,
+    0x826AAA78,
+    0x826AAA78,
+]
+
 # bctr 0x826AAB04  lwzx  table 0x826AAB08
 [[switch]]
 base = 0x826AAAF0
@@ -6679,6 +6698,44 @@ labels = [
     0x826BD824,
     0x826BD83C,
     0x826BD83C,
+]
+
+# bctr 0x826BD89C  lwzx  table 0x826BD8A0
+[[switch]]
+base = 0x826BD888
+r = 28
+default = 0x0
+labels = [
+    0x826BD904,
+    0x826BD8CC,
+    0x826BD8D4,
+    0x826BD8DC,
+    0x826BD8E4,
+    0x826BD8E4,
+    0x826BD904,
+    0x826BD904,
+    0x826BD904,
+    0x826BD904,
+    0x826BD904,
+]
+
+# bctr 0x826BD918  lwzx  table 0x826BD91C
+[[switch]]
+base = 0x826BD904
+r = 28
+default = 0x0
+labels = [
+    0x826BD974,
+    0x826BDA10,
+    0x826BDA10,
+    0x826BDA10,
+    0x826BDA10,
+    0x826BDA10,
+    0x826BD948,
+    0x826BD954,
+    0x826BD960,
+    0x826BD96C,
+    0x826BD96C,
 ]
 
 # bctr 0x826BDB64  lwzx  table 0x826BDB68
@@ -7968,6 +8025,29 @@ labels = [
     0x826EBD18,
     0x826EBCB4,
     0x826EBD08,
+]
+
+# bctr 0x826EC014  lwzx  table 0x826EC018
+[[switch]]
+base = 0x826EC000
+r = 11
+default = 0x0
+labels = [
+    0x826EC054,
+    0x826EC0F4,
+    0x826EC134,
+    0x826EC160,
+    0x826EC16C,
+    0x826EC178,
+    0x826EC208,
+    0x826EC254,
+    0x826EC444,
+    0x826EC444,
+    0x826EC260,
+    0x826EC444,
+    0x826EC444,
+    0x826EC444,
+    0x826EC2A4,
 ]
 
 # bctr 0x826ECB10  lwzx  table 0x826ECB14
@@ -11253,6 +11333,35 @@ labels = [
     0x8287E770,
 ]
 
+# bctr 0x8287E7C8  lwzx  table 0x8287E7CC
+[[switch]]
+base = 0x8287E7B4
+r = 18
+default = 0x0
+labels = [
+    0x8287E820,
+    0x8287E820,
+    0x8287E97C,
+    0x8287E820,
+    0x8287E820,
+    0x8287E908,
+    0x8287E820,
+    0x8287E894,
+    0x8287E820,
+    0x8287E820,
+    0x8287E97C,
+    0x8287E97C,
+    0x8287E820,
+    0x8287E820,
+    0x8287E97C,
+    0x8287E97C,
+    0x8287E97C,
+    0x8287E97C,
+    0x8287E820,
+    0x8287E820,
+    0x8287E820,
+]
+
 # bctr 0x8287F750  lwzx  table 0x8287F754
 [[switch]]
 base = 0x8287F73C
@@ -11804,6 +11913,42 @@ labels = [
     0x82946234,
     0x8294625C,
     0x82946280,
+]
+
+# bctr 0x829745B4  lwzx  table 0x829745B8
+[[switch]]
+base = 0x82974590
+r = 8
+default = 0x0
+labels = [
+    0x829745E0,
+    0x82974634,
+    0x82974688,
+    0x82974690,
+    0x829746E0,
+    0x829746E0,
+    0x829746E0,
+    0x829746E0,
+    0x829745E0,
+    0x82974634,
+]
+
+# bctr 0x82974B60  lwzx  table 0x82974B64
+[[switch]]
+base = 0x82974B3C
+r = 8
+default = 0x0
+labels = [
+    0x82974B8C,
+    0x82974BE0,
+    0x82974C34,
+    0x82974C3C,
+    0x82974C8C,
+    0x82974C8C,
+    0x82974C8C,
+    0x82974C8C,
+    0x82974B8C,
+    0x82974BE0,
 ]
 
 # bctr 0x829750E4  lwzx  table 0x829750E8

@@ -89,7 +89,7 @@ GUEST_IMPORT(MmAllocatePhysicalMemoryEx)
 GUEST_IMPORT(MmFreePhysicalMemory) { ctx.r3.u64 = 0; }
 
 // Physical address as the GPU sees it
-GUEST_IMPORT(MmGetPhysicalAddress) { ctx.r3.u64 = ctx.r3.u32 & 0x1FFFFFFF; }
+GUEST_IMPORT(MmGetPhysicalAddress) { ctx.r3.u64 = physicalAddress(ctx.r3.u32); }
 
 GUEST_IMPORT(MmQueryAllocationSize)
 {

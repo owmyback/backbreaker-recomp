@@ -8,11 +8,12 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace
 {
-    constexpr size_t kRing = 32;
-    struct Entry { const char* name; uint32_t lr, r3, r4, r5; bool implemented; };
+    constexpr size_t kRing = 4096;
+    struct Entry { const char* name; uint32_t lr, r3, r4, r5, tid; bool implemented; };
     Entry g_ring[kRing];
     std::atomic<size_t> g_ringPos{0};
 
@@ -24,7 +25,8 @@ namespace
     void record(const char* name, PPCContext& ctx, bool implemented)
     {
         size_t i = g_ringPos.fetch_add(1) % kRing;
-        g_ring[i] = { name, uint32_t(ctx.lr), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, implemented };
+        auto* t = kernel::currentThread();
+        g_ring[i] = { name, uint32_t(ctx.lr), ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, t ? t->id : 0, implemented };
         std::lock_guard guard(g_countLock);
         auto& c = g_counts[name];
         c.first++;
@@ -48,18 +50,28 @@ void TraceImport(const char* name, PPCContext& ctx)
 
 namespace kernel
 {
-    void printTrace()
+    // Last `limit` calls, optionally only those made by guest thread `tid` (0 = all threads)
+    void printTrace(uint32_t tid, size_t limit)
     {
         size_t end = g_ringPos.load();
         size_t n = end < kRing ? end : kRing;
-        std::fprintf(stderr, "---- last %zu import calls (oldest first) ----\n", n);
-        for (size_t k = end - n; k < end; k++)
+        std::vector<const Entry*> picked;
+        for (size_t k = end; k > end - n && picked.size() < limit; k--)
         {
-            const Entry& e = g_ring[k % kRing];
-            std::fprintf(stderr, "  %c %-40s r3=%08X r4=%08X r5=%08X lr=%08X\n", e.implemented ? ' ' : '!',
-                         e.name, e.r3, e.r4, e.r5, e.lr);
+            const Entry& e = g_ring[(k - 1) % kRing];
+            if (!tid || e.tid == tid) picked.push_back(&e);
+        }
+        if (tid) std::fprintf(stderr, "---- last %zu import calls on thread %u (oldest first) ----\n", picked.size(), tid);
+        else std::fprintf(stderr, "---- last %zu import calls, all threads (oldest first) ----\n", picked.size());
+        for (auto it = picked.rbegin(); it != picked.rend(); ++it)
+        {
+            const Entry& e = **it;
+            std::fprintf(stderr, "  %c t%-2u %-38s r3=%08X r4=%08X r5=%08X lr=%08X\n", e.implemented ? ' ' : '!',
+                         e.tid, e.name, e.r3, e.r4, e.r5, e.lr);
         }
     }
+
+    void printTrace() { printTrace(0, 32); }
 
     void printSummary()
     {

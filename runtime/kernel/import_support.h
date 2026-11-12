@@ -28,6 +28,10 @@ void TraceImport(const char* name, PPCContext& ctx);
     PPC_FUNC(__imp__##name) { TraceImport(#name, ctx); impl_##name(ctx, base); } \
     static void impl_##name(PPCContext& ctx, [[maybe_unused]] uint8_t* base)
 
+// Arguments past the 8th live in the caller's parameter save area (8-byte slots, low word).
+// index is 0-based: stackArg(ctx, 8) is the 9th argument.
+inline uint32_t stackArg(PPCContext& ctx, int index) { return mem::read32(ctx.r1.u32 + 0x54 + (index - 8) * 8); }
+
 // Xbox NTSTATUS values
 constexpr uint32_t STATUS_SUCCESS = 0x00000000;
 constexpr uint32_t STATUS_UNSUCCESSFUL = 0xC0000001;
