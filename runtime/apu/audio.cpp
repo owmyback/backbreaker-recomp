@@ -121,12 +121,3 @@ GUEST_IMPORT(XAudioSubmitRenderDriverFrame)
     ctx.r3.u64 = 0;
 }
 
-// u32 XMACreateContext(u32* Context)
-GUEST_IMPORT(XMACreateContext)
-{
-    uint32_t c = physicalAlloc(64, 64); // XMA hardware context block
-    write32(ctx.r3.u32, c);
-    ctx.r3.u64 = 0;
-}
-
-GUEST_IMPORT(XMAReleaseContext) { ctx.r3.u64 = 0; }

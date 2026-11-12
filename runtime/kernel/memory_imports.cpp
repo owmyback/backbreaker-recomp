@@ -1,6 +1,4 @@
 // Memory management imports.
-// NOTE: allocations come from bump allocators and are never reused; frees are accepted
-// and ignored. Good enough to boot; replace with a real allocator once the game runs longer.
 #include "import_support.h"
 #include "../log.h"
 
@@ -50,7 +48,20 @@ GUEST_IMPORT(NtAllocateVirtualMemory)
     ctx.r3.u64 = STATUS_SUCCESS;
 }
 
-GUEST_IMPORT(NtFreeVirtualMemory) { ctx.r3.u64 = STATUS_SUCCESS; }
+// NTSTATUS NtFreeVirtualMemory(void** BaseAddress, size_t* RegionSize, u32 FreeType, u32 DebugMemory)
+GUEST_IMPORT(NtFreeVirtualMemory)
+{
+    constexpr uint32_t MEM_RELEASE = 0x8000;
+    uint32_t pBase = ctx.r3.u32, type = ctx.r5.u32;
+    uint32_t addr = read32(pBase);
+    if (type & MEM_RELEASE)
+    {
+        // Releasing the start of a reservation frees all of it; decommits keep the memory
+        if (!virtualFree(addr))
+            warn("NtFreeVirtualMemory(%08X): not an allocation start", addr);
+    }
+    ctx.r3.u64 = STATUS_SUCCESS;
+}
 
 // NTSTATUS NtQueryVirtualMemory(void* BaseAddress, MEMORY_BASIC_INFORMATION* Info)
 GUEST_IMPORT(NtQueryVirtualMemory)
@@ -86,7 +97,12 @@ GUEST_IMPORT(MmAllocatePhysicalMemoryEx)
     ctx.r3.u64 = addr;
 }
 
-GUEST_IMPORT(MmFreePhysicalMemory) { ctx.r3.u64 = 0; }
+// void MmFreePhysicalMemory(u32 Type, void* BaseAddress)
+GUEST_IMPORT(MmFreePhysicalMemory)
+{
+    if (!physicalFree(ctx.r4.u32))
+        warn("MmFreePhysicalMemory(%08X): not an allocation start", ctx.r4.u32);
+}
 
 // Physical address as the GPU sees it
 GUEST_IMPORT(MmGetPhysicalAddress) { ctx.r3.u64 = physicalAddress(ctx.r3.u32); }
@@ -112,7 +128,11 @@ GUEST_IMPORT(ExAllocatePoolWithTag)
     ctx.r3.u64 = addr;
 }
 
-GUEST_IMPORT(ExFreePool) {}
+GUEST_IMPORT(ExFreePool)
+{
+    if (ctx.r3.u32 && !virtualFree(ctx.r3.u32))
+        warn("ExFreePool(%08X): not an allocation start", ctx.r3.u32);
+}
 
 // u32 XamAlloc(u32 Flags, u32 Size, void** Result)
 GUEST_IMPORT(XamAlloc)
@@ -124,4 +144,9 @@ GUEST_IMPORT(XamAlloc)
     ctx.r3.u64 = 0;
 }
 
-GUEST_IMPORT(XamFree) { ctx.r3.u64 = 0; }
+GUEST_IMPORT(XamFree)
+{
+    if (ctx.r3.u32 && !virtualFree(ctx.r3.u32))
+        warn("XamFree(%08X): not an allocation start", ctx.r3.u32);
+    ctx.r3.u64 = 0;
+}

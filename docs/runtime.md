@@ -25,16 +25,22 @@ the last 32 kernel calls and a per-import usage summary.
 - `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py)
 
 ## Status (2026-11-12)
-Phase 1 (headless GPU) works: the game boots, initializes graphics, audio, voice (XHV2), comms
-and input, plays the 505 and NaturalMotion logo movies at ~30 fps (~1500 draws/s), loads the
-front-end sound banks, then runs a main loop at 4-11 fps with ~59 draws per frame (likely the
-front end; the low rate is not investigated yet). Nothing is drawn: the command processor
-executes PM4 packets only for their side effects (registers, fences, waits, interrupts).
+Phase 1 (headless GPU) works end to end: the game boots, initializes graphics, audio, voice
+(XHV2), comms and input, plays the 505 and NaturalMotion logo movies at ~30 fps, loads its sound
+banks (~3 s), then runs its front end at a steady 30 fps (~65 draws per frame, likely the game's
+own cap). Tested for 4 minutes: memory stays flat (~135 MB virtual + 280 MB physical). Nothing is
+drawn: the command processor executes PM4 packets only for their side effects.
+
+The earlier "slow menu" was a loading screen stuck forever: FMOD's sound-bank loader waited on the
+XMA hardware decoder, which did not exist. With XMA emulated (silent output) loading completes.
 
 Subsystems:
 - `runtime/gpu/` - Vd* imports, PM4 command processor, register file at 0x7FC80000, 60 Hz vblank
   interrupt; MMIO stores reach it through `runtime/ppc_hooks.h` (force-included into ppc/)
-- `runtime/apu/` - XAudio render driver clock (256 samples @ 48 kHz), frames discarded; XMA contexts
+- `runtime/apu/` - XAudio render driver clock (256 samples @ 48 kHz), frames discarded
+- `runtime/apu/xma.cpp` - XMA decoder: 320-context array (register 0x600), kick/lock/clear
+  registers (0x650/0x690/0x6A0), decoder thread that walks packets frame by frame and writes
+  SILENCE of the right length (real XMA2 decoding needs a WMA Pro capable decoder)
 - `runtime/hid/` - one neutral pad on user 0, no keystrokes
 - `runtime/kernel/xam.cpp` - notifications, local profile "Player", profile settings (empty values)
 - `runtime/kernel/scopes.cpp` - the game's compiled-out profiler markers carry function names;
@@ -42,14 +48,16 @@ Subsystems:
 - `runtime/debug/guest_trace.cpp` - GUEST_TRACE(addr) wraps a guest function to log args/result
 
 ## Debugging aids
+- `tools/fninfo.py default.pe ppc ADDR...` - string references, imports and callees of guest functions
+- Sampling a busy thread: `eu-stack -1 -p <tid>` (recompiled frames are named sub_XXXXXXXX)
 - Crash report: host backtrace, guest registers, recent profiler scopes and import calls of the
   crashing thread. Indirect calls to addresses without a recompiled function are reported with
   the target and caller.
 - `--timeout N`: after N seconds print every thread's recent scopes and calls.
 
 ## Known shortcuts
-- Allocators never free; NtSuspendThread only works before a thread starts
+- NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Physical memory is not aliased across 0xA0/0xC0/0xE0 ranges yet
 - KeTimeStampBundle is not updated; timer APC routines are not delivered
-- XAM content (saves), networking, movies (XMV) and real audio output are stubs
+- XAM content (saves), networking, movies (XMV) and real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield

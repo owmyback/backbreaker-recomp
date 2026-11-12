@@ -27,11 +27,16 @@ namespace mem
     uint32_t kernelAlloc(size_t size, size_t align = 16);
     uint32_t virtualAlloc(size_t size, size_t align = 0x10000);
     uint32_t physicalAlloc(size_t size, size_t align = 0x1000);
+    // Return an allocation to its heap (exact start address). False if it isn't one.
+    bool virtualFree(uint32_t guest);
+    bool physicalFree(uint32_t guest);
+    void usage(uint64_t& virtualMb, uint64_t& physicalMb);
 
     // Allocation bookkeeping for NtQueryVirtualMemory / MmQueryAllocationSize
     struct Allocation { uint32_t base, size, protect; };
     bool findAllocation(uint32_t addr, Allocation& out);
     void recordAllocation(uint32_t base, uint32_t size, uint32_t protect);
+    void forgetAllocation(uint32_t base);
 
     inline uint8_t* host(uint32_t guest) { return base + guest; }
     // Physical address (as the GPU sees it) -> host pointer

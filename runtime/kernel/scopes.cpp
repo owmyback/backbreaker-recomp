@@ -21,8 +21,14 @@ namespace kernel
         for (uint32_t k = 0; k < 16; k++)
         {
             uint32_t a = t->scopes[(t->scopePos + k) % 16];
-            if (a >= 0x82000000 && a < 0x83000000)
-                std::fprintf(stderr, "  %s\n", (const char*)mem::host(a));
+            if (a < 0x82000000 || a >= 0x83000000)
+                continue;
+            // Some markers pass non-string data; only print readable names
+            const char* s = (const char*)mem::host(a);
+            size_t n = 0;
+            while (n < 120 && s[n] >= 0x20 && s[n] < 0x7F) n++;
+            if (n >= 3 && s[n] == 0)
+                std::fprintf(stderr, "  %s\n", s);
         }
     }
 }

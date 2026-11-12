@@ -31,9 +31,76 @@ namespace mem
             }
         };
 
+        // First-fit heap with coalescing free ranges (guest memory is always backed, so
+        // allocating is pure bookkeeping plus zero-fill).
+        struct Heap
+        {
+            const char* name;
+            uint32_t begin, end;
+            std::mutex lock;
+            std::map<uint32_t, uint32_t> freeRanges; // start -> size
+            std::map<uint32_t, uint32_t> used;       // start -> size
+            uint64_t inUse = 0, peak = 0;
+
+            Heap(const char* n, uint32_t b, uint32_t e) : name(n), begin(b), end(e) { freeRanges[b] = e - b; }
+
+            uint32_t alloc(size_t size, size_t align)
+            {
+                std::lock_guard guard(lock);
+                size = (size + 15) & ~size_t(15);
+                if (align < 16) align = 16;
+                for (auto it = freeRanges.begin(); it != freeRanges.end(); ++it)
+                {
+                    uint64_t s = it->first, len = it->second;
+                    uint64_t a = (s + align - 1) & ~uint64_t(align - 1);
+                    if (a + size > s + len)
+                        continue;
+                    freeRanges.erase(it);
+                    if (a > s) freeRanges[uint32_t(s)] = uint32_t(a - s);
+                    if (a + size < s + len) freeRanges[uint32_t(a + size)] = uint32_t(s + len - a - size);
+                    used[uint32_t(a)] = uint32_t(size);
+                    inUse += size;
+                    if (inUse > peak) peak = inUse;
+                    memset(base + a, 0, size);
+                    return uint32_t(a);
+                }
+                fatal("out of %s memory (want 0x%zX bytes, %llu MB in use)", name, size, (unsigned long long)(inUse >> 20));
+            }
+
+            bool free(uint32_t a)
+            {
+                std::lock_guard guard(lock);
+                auto u = used.find(a);
+                if (u == used.end())
+                    return false;
+                uint32_t start = a, size = u->second;
+                used.erase(u);
+                inUse -= size;
+                auto next = freeRanges.lower_bound(start);
+                if (next != freeRanges.end() && start + size == next->first)
+                {
+                    size += next->second;
+                    next = freeRanges.erase(next);
+                }
+                if (next != freeRanges.begin())
+                {
+                    auto prev = std::prev(next);
+                    if (prev->first + prev->second == start)
+                    {
+                        start = prev->first;
+                        size += prev->second;
+                        freeRanges.erase(prev);
+                    }
+                }
+                freeRanges[start] = size;
+                return true;
+            }
+        };
+
         Bump g_kernel{ "kernel", kKernelBase, kKernelEnd };
-        Bump g_virtual{ "virtual", kVirtualBase, kVirtualEnd };
-        Bump g_physical{ "physical", kPhysicalBase, kPhysicalEnd };
+        Heap g_virtual{ "virtual", kVirtualBase, kVirtualEnd };
+        // Physical address 0 is left unused: guest code treats a zero physical address as "unset"
+        Heap g_physical{ "physical", kPhysicalBase + 0x10000, kPhysicalEnd };
     }
 
     void init()
@@ -90,4 +157,31 @@ namespace mem
     uint32_t kernelAlloc(size_t size, size_t align) { return g_kernel.alloc(size, align); }
     uint32_t virtualAlloc(size_t size, size_t align) { return g_virtual.alloc(size, align); }
     uint32_t physicalAlloc(size_t size, size_t align) { return g_physical.alloc(size, align); }
+
+    void forgetAllocation(uint32_t b)
+    {
+        std::lock_guard guard(g_allocLock);
+        g_allocs.erase(b);
+    }
+
+    bool virtualFree(uint32_t a)
+    {
+        forgetAllocation(a);
+        return g_virtual.free(a);
+    }
+
+    bool physicalFree(uint32_t a)
+    {
+        // Any of the three physical views may be passed in
+        uint32_t v = kPhysicalBase + physicalAddress(a);
+        forgetAllocation(a);
+        forgetAllocation(v);
+        return g_physical.free(v);
+    }
+
+    void usage(uint64_t& virtualMb, uint64_t& physicalMb)
+    {
+        virtualMb = g_virtual.inUse >> 20;
+        physicalMb = g_physical.inUse >> 20;
+    }
 }

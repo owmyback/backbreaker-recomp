@@ -3,6 +3,7 @@
 // Packet formats follow Xenia's command_processor.cc.
 #include "gpu.h"
 #include "../kernel/objects.h"
+#include "../apu/apu.h"
 #include "../log.h"
 #include "../memory.h"
 
@@ -11,6 +12,8 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <map>
+#include <cstdio>
 
 using namespace mem;
 
@@ -356,10 +359,12 @@ namespace gpu
                 if (clock::now() - lastReport >= std::chrono::seconds(1))
                 {
                     uint64_t f = g_frames, d = g_draws;
-                    info("[gpu] %llu fps, %llu draws/s, %llu frames total, front buffer %08X %ux%u, %llu packets",
+                    uint64_t vmb, pmb;
+                    mem::usage(vmb, pmb);
+                    info("[gpu] %llu fps, %llu draws/s, %llu frames total, front buffer %08X %ux%u, %llu xma frames, mem %llu+%llu MB",
                          (unsigned long long)(f - lastFrames), (unsigned long long)(d - lastDraws),
                          (unsigned long long)f, g_frontBuffer, g_frontWidth, g_frontHeight,
-                         (unsigned long long)g_packets.load());
+                         (unsigned long long)apu::xmaFramesDecoded(), (unsigned long long)vmb, (unsigned long long)pmb);
                     lastFrames = f;
                     lastDraws = d;
                     lastReport = clock::now();
@@ -458,6 +463,19 @@ void GuestMmioStore32(uint8_t* base, uint32_t address, uint32_t value)
         if (index == gpu::reg::CP_RB_WPTR)
             gpu::wakeCommandProcessor();
         return;
+    }
+    if (address >= 0x7FEA0000 && address < 0x7FEB0000)
+    {
+        // Audio chip (XMA): registers are little-endian, i.e. byte-swapped from the store value
+        apu::mmioStore((address - 0x7FEA0000) / 4, __builtin_bswap32(value));
+        return;
+    }
+    {
+        static std::mutex lk;
+        static std::map<uint32_t, int> seen;
+        std::lock_guard g(lk);
+        if (seen[address]++ == 0)
+            warn("unhandled MMIO store %08X = %08X", address, value);
     }
     *(uint32_t*)(base + address) = __builtin_bswap32(value);
 }

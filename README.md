@@ -25,7 +25,9 @@ An ISO image made from your own retail Backbreaker disc (its path is not recorde
 
 ## Recompile
     python3 -I tools/find_switch_tables.py game/extracted/default.pe config/backbreaker_switch_tables.toml
-    python3 -I tools/leaf_functions.py game/extracted/default.pe config/backbreaker_switch_tables.toml config/backbreaker.toml
+    # function_bounds.py adds leaf-function switch bounds and pointer-only functions; pass the
+    # ppc_func_mapping.cpp of a previous run so the analyzer's own functions are not duplicated
+    python3 -I tools/function_bounds.py game/extracted/default.pe config/backbreaker_switch_tables.toml config/backbreaker.toml ppc/ppc_func_mapping.cpp
     mkdir -p ppc && third_party/XenonRecomp/build/XenonRecomp/XenonRecomp config/backbreaker.toml third_party/XenonRecomp/XenonUtils/ppc_context.h
 
 ## Tests

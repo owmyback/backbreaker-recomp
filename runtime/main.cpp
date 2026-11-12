@@ -5,6 +5,7 @@
 #include "kernel/kernel.h"
 #include "kernel/objects.h"
 #include "gpu/gpu.h"
+#include "apu/apu.h"
 #include "log.h"
 #include "memory.h"
 
@@ -158,6 +159,7 @@ int main(int argc, char** argv)
     kernel::setCurrentThread(mainThread);
     kernel::adoptCurrentThread(mainThread, &ctx);
     gpu::init();
+    apu::initXma();
 
     if (timeout > 0)
         alarm(timeout);
