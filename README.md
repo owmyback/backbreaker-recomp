@@ -1,20 +1,32 @@
 # Backbreaker (Xbox 360) static recompilation
 
 Exploratory project to statically recompile Backbreaker (2010, NaturalMotion) for native Linux
-using XenonRecomp. Requires a legally owned disc image.
+using XenonRecomp. Requires a legally owned disc image; no game data is in this repository.
+
+## Start here
+- `docs/ROADMAP.md` - phases, current status, what each phase did and what is next
+- `docs/runtime.md` - building and running the runtime, its layout and debugging aids
+- `docs/feasibility.md` - the original analysis and recompiler notes
 
 ## Layout
-- `tools/`        - our own helper scripts (disc extraction, XEX decryption)
+- `tools/`        - our own helper scripts (disc extraction, XEX decryption, switch tables, function bounds)
+- `config/`       - XenonRecomp configuration and generated switch tables
+- `patches/`      - our changes to XenonRecomp
+- `runtime/`      - the host runtime (kernel, GPU, audio, input)
+- `tests/`        - instruction semantics tests
 - `game/`         - extracted/decrypted game files (gitignored, copyrighted)
+- `ppc/`          - recompiled C++ output (gitignored, derived from game code)
 - `third_party/`  - upstream clones such as XenonRecomp (gitignored)
-- `docs/`         - notes and analysis results
+- `docs/`         - roadmap, notes and analysis results
 
 ## Source ISO
-An ISO image made from your own retail Backbreaker disc (its path is not recorded in this repository).
+An ISO image made from your own retail Backbreaker disc. Below, `<iso>` is its path.
 
 ## Reproduce extraction
+    mkdir -p game/extracted game/disc
     python3 -I tools/xdvdfs.py "<iso>" game/extracted default.xex > docs/disc-listing.txt
     python3 -I tools/xex_decrypt.py game/extracted/default.xex game/extracted/default.pe
+    python3 -I tools/xdvdfs.py "<iso>" game/disc --all     # full disc, used by the runtime
 
 ## XenonRecomp setup
     git clone --recursive https://github.com/hedge-dev/XenonRecomp.git third_party/XenonRecomp
@@ -33,3 +45,6 @@ An ISO image made from your own retail Backbreaker disc (its path is not recorde
 ## Tests
     X=third_party/XenonRecomp
     mkdir -p build && clang++ -std=c++20 -O2 -march=x86-64-v3 -I ppc -I $X/XenonUtils -I $X/thirdparty/simde tests/instr_semantics.cpp -o build/instr_semantics && build/instr_semantics
+
+## Build and run the runtime
+See `docs/runtime.md` (import glue generation, CMake/Ninja build, `./build/backbreaker --timeout N`).

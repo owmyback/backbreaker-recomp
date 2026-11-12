@@ -25,7 +25,7 @@ the last 32 kernel calls and a per-import usage summary.
 - `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py)
 
 ## Status (2026-11-12)
-Phase 1 (headless GPU) works end to end: the game boots, initializes graphics, audio, voice
+Phase 3 (headless subsystems, see docs/ROADMAP.md) works end to end: the game boots, initializes graphics, audio, voice
 (XHV2), comms and input, plays the 505 and NaturalMotion logo movies at ~30 fps, loads its sound
 banks (~3 s), then runs its front end at a steady 30 fps (~65 draws per frame, likely the game's
 own cap). Tested for 4 minutes: memory stays flat (~135 MB virtual + 280 MB physical). Nothing is
