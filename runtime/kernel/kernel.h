@@ -25,6 +25,7 @@ namespace kernel
     };
 
     GuestThread* createGuestThread(PPCContext& ctx, uint32_t stackSize);
+    void setCurrentThread(GuestThread* t);
     GuestThread* currentThread();
 
     void printTrace();

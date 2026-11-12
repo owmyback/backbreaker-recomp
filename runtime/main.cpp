@@ -3,6 +3,7 @@
 #include <ppc_context.h>
 
 #include "kernel/kernel.h"
+#include "kernel/objects.h"
 #include "log.h"
 #include "memory.h"
 
@@ -110,7 +111,9 @@ int main(int argc, char** argv)
 
     static PPCContext ctx{};
     ctx.fpscr.loadFromHost();
-    kernel::createGuestThread(ctx, 0x100000);
+    kernel::GuestThread* mainThread = kernel::createGuestThread(ctx, 0x100000);
+    kernel::setCurrentThread(mainThread);
+    kernel::adoptCurrentThread(mainThread, &ctx);
 
     if (timeout > 0)
         alarm(timeout);
