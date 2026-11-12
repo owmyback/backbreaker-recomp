@@ -1,0 +1,8 @@
+# Copyrighted game data - never commit
+game/
+*.iso
+*.xex
+*.pe
+# Upstream clones
+third_party/
+build/
