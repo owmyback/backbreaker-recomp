@@ -1,0 +1,127 @@
+// Memory management imports.
+// NOTE: allocations come from bump allocators and are never reused; frees are accepted
+// and ignored. Good enough to boot; replace with a real allocator once the game runs longer.
+#include "import_support.h"
+#include "../log.h"
+
+using namespace mem;
+
+namespace
+{
+    constexpr uint32_t MEM_COMMIT = 0x1000;
+    constexpr uint32_t MEM_LARGE_PAGES = 0x20000000; // 64 KB pages
+    constexpr uint32_t MEM_16MB_PAGES = 0x80000000;
+    constexpr uint32_t PAGE_READWRITE = 0x04;
+
+    uint32_t pageSizeFor(uint32_t type)
+    {
+        if (type & MEM_16MB_PAGES) return 0x1000000;
+        if (type & MEM_LARGE_PAGES) return 0x10000;
+        return 0x1000;
+    }
+
+    uint32_t roundUp(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
+}
+
+// NTSTATUS NtAllocateVirtualMemory(void** BaseAddress, size_t* RegionSize, u32 AllocationType, u32 Protect, u32 DebugMemory)
+GUEST_IMPORT(NtAllocateVirtualMemory)
+{
+    uint32_t pBase = ctx.r3.u32, pSize = ctx.r4.u32, type = ctx.r5.u32, protect = ctx.r6.u32;
+    uint32_t want = read32(pBase);
+    uint32_t page = pageSizeFor(type);
+    uint32_t size = roundUp(read32(pSize), page);
+
+    if (want != 0)
+    {
+        // Committing (part of) an existing reservation: memory is always backed, just succeed.
+        Allocation a;
+        if (!findAllocation(want, a))
+            warn("NtAllocateVirtualMemory at unreserved %08X (size %X, type %X)", want, size, type);
+        write32(pBase, want & ~(page - 1));
+        write32(pSize, size);
+        ctx.r3.u64 = STATUS_SUCCESS;
+        return;
+    }
+
+    uint32_t addr = virtualAlloc(size, page < 0x10000 ? 0x10000 : page);
+    recordAllocation(addr, size, protect ? protect : PAGE_READWRITE);
+    write32(pBase, addr);
+    write32(pSize, size);
+    ctx.r3.u64 = STATUS_SUCCESS;
+}
+
+GUEST_IMPORT(NtFreeVirtualMemory) { ctx.r3.u64 = STATUS_SUCCESS; }
+
+// NTSTATUS NtQueryVirtualMemory(void* BaseAddress, MEMORY_BASIC_INFORMATION* Info)
+GUEST_IMPORT(NtQueryVirtualMemory)
+{
+    uint32_t addr = ctx.r3.u32, info = ctx.r4.u32;
+    Allocation a;
+    if (!findAllocation(addr, a))
+    {
+        a = { addr & ~0xFFFu, 0x1000, 0 };
+        write32(info + 0x10, 0x10000); // State = MEM_FREE
+    }
+    else
+    {
+        write32(info + 0x10, MEM_COMMIT);
+    }
+    write32(info + 0x00, addr & ~0xFFFu); // BaseAddress
+    write32(info + 0x04, a.base);         // AllocationBase
+    write32(info + 0x08, a.protect);      // AllocationProtect
+    write32(info + 0x0C, a.base + a.size - (addr & ~0xFFFu)); // RegionSize
+    write32(info + 0x14, a.protect);      // Protect
+    write32(info + 0x18, 0x20000);        // Type = MEM_PRIVATE
+    ctx.r3.u64 = STATUS_SUCCESS;
+}
+
+// void* MmAllocatePhysicalMemoryEx(u32 Flags, size_t Size, u32 Protect, u32 MinAddress, u32 MaxAddress, u32 Alignment)
+GUEST_IMPORT(MmAllocatePhysicalMemoryEx)
+{
+    uint32_t size = ctx.r4.u32, protect = ctx.r5.u32, align = ctx.r8.u32;
+    uint32_t page = (protect & MEM_16MB_PAGES) ? 0x1000000 : (protect & MEM_LARGE_PAGES) ? 0x10000 : 0x1000;
+    if (align < page) align = page;
+    uint32_t addr = physicalAlloc(roundUp(size, page), align);
+    recordAllocation(addr, roundUp(size, page), protect & 0xFF);
+    ctx.r3.u64 = addr;
+}
+
+GUEST_IMPORT(MmFreePhysicalMemory) { ctx.r3.u64 = 0; }
+
+// Physical address as the GPU sees it
+GUEST_IMPORT(MmGetPhysicalAddress) { ctx.r3.u64 = ctx.r3.u32 & 0x1FFFFFFF; }
+
+GUEST_IMPORT(MmQueryAllocationSize)
+{
+    Allocation a;
+    ctx.r3.u64 = findAllocation(ctx.r3.u32, a) ? a.size : 0;
+}
+
+GUEST_IMPORT(MmQueryAddressProtect)
+{
+    Allocation a;
+    ctx.r3.u64 = findAllocation(ctx.r3.u32, a) ? a.protect : PAGE_READWRITE;
+}
+
+// void* ExAllocatePoolWithTag(size_t Size, u32 Tag)
+GUEST_IMPORT(ExAllocatePoolWithTag)
+{
+    uint32_t size = roundUp(ctx.r3.u32 ? ctx.r3.u32 : 1, 16);
+    uint32_t addr = virtualAlloc(size, 16);
+    recordAllocation(addr, size, PAGE_READWRITE);
+    ctx.r3.u64 = addr;
+}
+
+GUEST_IMPORT(ExFreePool) {}
+
+// u32 XamAlloc(u32 Flags, u32 Size, void** Result)
+GUEST_IMPORT(XamAlloc)
+{
+    uint32_t size = roundUp(ctx.r4.u32 ? ctx.r4.u32 : 1, 16);
+    uint32_t addr = virtualAlloc(size, 16);
+    recordAllocation(addr, size, PAGE_READWRITE);
+    write32(ctx.r5.u32, addr);
+    ctx.r3.u64 = 0;
+}
+
+GUEST_IMPORT(XamFree) { ctx.r3.u64 = 0; }
