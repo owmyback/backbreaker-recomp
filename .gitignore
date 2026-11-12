@@ -11,3 +11,6 @@ ppc/
 
 # Python cache
 __pycache__/
+
+# Personal Claude Code settings
+.claude/settings.local.json
