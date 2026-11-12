@@ -49,3 +49,14 @@ Risk: Euphoria physics floating-point sensitivity.
 ## Not done yet
 - longjmp/setjmp addresses
 - No runtime: nothing links or runs yet (kernel, GPU, audio, input all missing)
+
+# Missing instructions added - 2026-11-12
+- patches/xenonrecomp-backbreaker-instructions.patch (against XenonRecomp ddd128b):
+  all 62 missing mnemonics implemented; `vcmpgtuh.` record form added; `bdnzf` now uses the
+  real CR bit instead of assuming `eq`; CTR branches (bdz/bdnz/bdnzf/bdzf/bdnzt) tail-call
+  when the target is outside the function, like other conditional branches.
+- Recompiler run: 0 warnings. All 116 generated files compile.
+- tests/instr_semantics.cpp checks the layout-sensitive ops (packs, vsro, vsel128, vctuxs,
+  unsigned compares/saturation, carry ops) against hand-computed PowerPC results; a mutation
+  (swapped pack operands) is caught.
+- Not tested yet: the simple update-form loads/stores and lane-wise ops are only reviewed, not executed.
