@@ -8,3 +8,6 @@ third_party/
 build/
 # Recompiled output (derived from game code)
 ppc/
+
+# Python cache
+__pycache__/
