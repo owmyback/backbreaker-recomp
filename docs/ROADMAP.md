@@ -31,7 +31,7 @@ actually play. Audio is still silence.
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
 | 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-9 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture) | `258ec24`, `7bf4023`, `9ac4cb9` |
-| 5 | Controller input (SDL, DualSense) | **In progress** (SDL3 backend done, hardware test pending) | `STEP_INPUT` |
+| 5 | Controller input (SDL, DualSense) | **In progress** (SDL3 backend done, hardware test pending) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
 | 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
@@ -295,7 +295,7 @@ This is the largest phase (weeks to months).
 SDL3 gamepad backend behind `readPad()` in `runtime/hid/input.cpp` (DualSense over USB on the
 dev machine), vibration via `XamInputSetState`, keyboard fallback.
 
-Status (`STEP_INPUT`, issue #6): up to four controllers through SDL3 (users 0-3, in SDL's order),
+Status (`607e8ce`, issue #6): up to four controllers through SDL3 (users 0-3, in SDL's order),
 mapped to XInput (south/east/west/north = A/B/X/Y, stick Y inverted), keystrokes generated from
 button, trigger and stick-direction edges, vibration forwarded with `SDL_RumbleGamepad`. With a
 window the presenter's loop polls the controllers (SDL events stay on that thread); headless
