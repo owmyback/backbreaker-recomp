@@ -34,7 +34,7 @@ actually play. Audio is still silence.
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
-| 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `STEP_SAVES` |
+| 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | Planned | - |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Planned | - |
@@ -320,7 +320,7 @@ and any decoding the player expects hardware for.
 XamContent* (save devices, content creation/enumeration) mapped to a host directory; persist
 profile settings; device selector UI answered automatically.
 
-Status - saves done (`STEP_SAVES`, issue #7): `runtime/kernel/xam_content.cpp` implements
+Status - saves done (`69ba008`, issue #7): `runtime/kernel/xam_content.cpp` implements
 content enumerators (`XamContentCreateEnumerator` / `XamEnumerate`), `XamContentCreateEx` /
 `XamContentClose` (a package is mounted as a drive such as `save:` through a runtime device
 mount + symbolic link in `files.cpp`), `XamContentGetCreator`, `XamContentSetThumbnail` and the
