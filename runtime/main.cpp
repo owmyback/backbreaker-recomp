@@ -7,6 +7,7 @@
 #include "gpu/gpu.h"
 #include "apu/apu.h"
 #include "gpu/capture.h"
+#include "debug/sampler.h"
 #include "gpu/renderer.h"
 #include "video/vk_context.h"
 #include "hid/hid.h"
@@ -182,6 +183,8 @@ int main(int argc, char** argv)
             timeout = std::atoi(argv[++i]);
         else if (a == "--headless")
             headless = true;
+        else if (a == "--sample-threads" && i + 1 < argc)
+            debug::scheduleThreadSampling(std::atof(argv[++i])); // hang diagnosis: see docs/runtime.md
         else if (a == "--no-render")
             gpu::render::disable();
         else if (a == "--resolution-scale" && i + 1 < argc)

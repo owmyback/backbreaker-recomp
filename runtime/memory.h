@@ -44,6 +44,7 @@ namespace mem
     inline bool isGuest(const void* p) { return (const uint8_t*)p >= base && (const uint8_t*)p < base + 0x100000000ull; }
 
     // Big-endian accessors
+    inline uint8_t read8(uint32_t a) { return base[a]; }
     inline uint32_t read32(uint32_t a) { return __builtin_bswap32(*(uint32_t*)(base + a)); }
     inline uint16_t read16(uint32_t a) { return __builtin_bswap16(*(uint16_t*)(base + a)); }
     inline uint64_t read64(uint32_t a) { return __builtin_bswap64(*(uint64_t*)(base + a)); }

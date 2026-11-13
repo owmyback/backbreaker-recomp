@@ -1,6 +1,7 @@
 #pragma once
 #include <ppc_config.h>
 #include <ppc_context.h>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -43,6 +44,9 @@ namespace kernel
         // Ring of recent profiler scope names (guest string addresses), see scopes.cpp
         uint32_t scopes[16] = {};
         uint32_t scopePos = 0;
+        // Host thread running it (for the thread sampler); valid from setCurrentThread until exit
+        unsigned long hostThread = 0; // pthread_t
+        std::atomic<bool> hostRunning{false};
     };
 
     GuestThread* createGuestThread(PPCContext& ctx, uint32_t stackSize);

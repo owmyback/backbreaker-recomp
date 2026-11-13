@@ -130,6 +130,10 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 `tools/gen_register_names.py` from Xenia's `register_table.inc` (BSD, `docs/licenses/xenia-LICENSE.txt`).
 
 ## Debugging aids
+- `--sample-threads N`: N seconds after launch, every running guest thread is sampled 50 times
+  (20 ms apart) and the most frequent guest call stacks are printed per thread, innermost first,
+  with the host function it was in (e.g. `[pthread_cond_wait]` = parked in a wait). A thread
+  stuck in a polling loop shows one stack at ~100% with no host function. Use it on hangs.
 - `tools/fninfo.py default.pe ppc ADDR...` - string references, imports and callees of guest functions
 - Sampling a busy thread: `eu-stack -1 -p <tid>` (recompiled frames are named sub_XXXXXXXX)
 - Crash report: host backtrace, guest registers, recent profiler scopes and import calls of the

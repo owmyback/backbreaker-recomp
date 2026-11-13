@@ -56,7 +56,7 @@ namespace
         ss.ss_size = altStack.size();
         sigaltstack(&ss, nullptr);
 
-        t_current = th->guestThread;
+        kernel::setCurrentThread(th->guestThread); // also records the host thread for the sampler
         kernel::adoptExistingThread(th);
 
         {
@@ -84,6 +84,7 @@ namespace
         }
 
         info("thread %u exited (code %08X)", th->guestThread->id, code);
+        th->guestThread->hostRunning = false; // the thread sampler must not signal it any more
         std::lock_guard lock(kernel::g_dispatchLock);
         th->exited = true;
         th->exitCode = code;
@@ -124,7 +125,15 @@ namespace kernel
         return t;
     }
 
-    void setCurrentThread(GuestThread* t) { t_current = t; }
+    void setCurrentThread(GuestThread* t)
+    {
+        t_current = t;
+        if (t)
+        {
+            t->hostThread = (unsigned long)pthread_self();
+            t->hostRunning = true;
+        }
+    }
 
     std::vector<GuestThread*> allThreads()
     {
@@ -196,7 +205,24 @@ GUEST_IMPORT(NtResumeThread)
 }
 
 // Scheduling hints: accepted, no effect on the host scheduler yet.
-GUEST_IMPORT(KeSetAffinityThread) { if (ctx.r5.u32) write32(ctx.r5.u32, 0x3F); ctx.r3.u64 = 0x3F; }
+// NTSTATUS KeSetAffinityThread(KTHREAD* Thread, u32 Affinity, u32* PreviousAffinity)
+// As in Xenia: the previous affinity goes through the pointer, the return value is a status, and
+// the thread now runs on the lowest CPU of the mask. Host threads are not pinned, but the guest
+// sees that CPU number in its PCR (+0x10C): the game's per-CPU work queues (e.g. the Direct3D
+// GPU callback workers) depend on it.
+GUEST_IMPORT(KeSetAffinityThread)
+{
+    uint32_t kthread = ctx.r3.u32, affinity = ctx.r4.u32 & 0x3F, pPrevious = ctx.r5.u32;
+    if (!affinity) { ctx.r3.u64 = 0xC000000D; return; } // STATUS_INVALID_PARAMETER
+    for (kernel::GuestThread* t : kernel::allThreads())
+    {
+        if (t->kthread != kthread) continue;
+        if (pPrevious) write32(pPrevious, 1u << read8(t->pcr + kPcrCurrentCpu));
+        write8(t->pcr + kPcrCurrentCpu, uint8_t(__builtin_ctz(affinity)));
+        break;
+    }
+    ctx.r3.u64 = 0; // STATUS_SUCCESS
+}
 GUEST_IMPORT(KeSetBasePriorityThread) { ctx.r3.u64 = 0; }
 GUEST_IMPORT(KeQueryBasePriorityThread) { ctx.r3.u64 = 0; }
 GUEST_IMPORT(KeSetDisableBoostThread) { ctx.r3.u64 = 0; }

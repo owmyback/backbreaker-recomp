@@ -22,6 +22,17 @@ the game leaves the title screen, picks the (emulated) hard drive, creates or lo
 Camp, Exhibition, Leagues, Tackle Alley, Xbox LIVE). Next: controller input (phase 5, #6) to
 actually play. Audio is still silence.
 
+**Current blocker (2026-11-13):** after Exhibition's side select, match loading hangs (the screen
+keeps showing the side-select menu). Found with `--sample-threads`: the main thread spins in
+`sub_824103C8` until the Direct3D device's pending GPU-callback count (`device + 0x2B04`) drops
+to 0. It was raised once by `sub_8241D778`, which submits a GPU->CPU callback handshake (scratch
+registers + `WAIT_REG_MEM` + `INTERRUPT`); the callback queues work for a per-CPU worker
+(`sub_8241D5E0` -> `sub_8241D320`), which re-arms another handshake instead of releasing the
+count. The handshake itself works (each run is acknowledged); whatever condition the job waits
+for is never met. Fixed on the way: `KeSetAffinityThread` (the per-CPU workers need their CPU
+number in the PCR). Next suspects: GPU skinning through memory export (`vs_f4d7b7690397f218`,
+skipped by the translator), then reverse the job in `sub_8241D320`.
+
 ## Phase overview
 
 | # | Phase | Status | Commits |
