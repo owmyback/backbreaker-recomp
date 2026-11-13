@@ -24,11 +24,11 @@ audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
 
 | # | Phase | Status | Commits |
 |---|-------|--------|---------|
-| 0 | Feasibility and extraction | Done | `2947ba2` |
-| 1 | CPU recompilation (PowerPC -> C++) | Done | `463a08a`, `3a430d9`, `be2b9ff`, `47eea11` |
-| 2 | Host runtime boot (loader, kernel, threads, files) | Done | `ffd4677`, `b3682e6`, `d680bb6` |
-| 3 | Headless subsystems: game reaches the front end | Done | `be2b9ff`, `47eea11` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (step 0 done) | `288cb51` |
+| 0 | Feasibility and extraction | Done | `43b7032` |
+| 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
+| 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
+| 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (step 0 done) | `258ec24` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -131,7 +131,7 @@ shows fps, draws and memory.
 
 Goal: see the game, ideally at higher internal resolution than the console (see Goals).
 
-**Step 0 - GPU frame capture (done, `288cb51`).** `--capture-frame N[,N...]` records a frame's draws,
+**Step 0 - GPU frame capture (done, `258ec24`).** `--capture-frame N[,N...]` records a frame's draws,
 shader loads, register changes, render targets and textures to `captures/frame_N/` (see
 `docs/runtime.md`). Register names and field layouts come from Xenia's register table and
 `xenos.h` (BSD). First findings:
