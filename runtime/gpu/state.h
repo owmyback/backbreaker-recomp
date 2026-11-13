@@ -57,7 +57,11 @@ namespace gpu
 
         // Viewport (identity components when the VTE enable bit is clear)
         float vpScale[3] = { 1, 1, 1 }, vpOffset[3] = { 0, 0, 0 };
-        bool xyInScreenSpace = false, zInScreenSpace = false, w0Reciprocal = false; // PA_CL_VTE_CNTL vtx_*_fmt
+        // PA_CL_VTE_CNTL vtx_xy_fmt / vtx_z_fmt / vtx_w0_fmt: the shader's position is already
+        // divided by W (XY, Z), and W is W rather than 1/W
+        bool xyDividedByW = false, zDividedByW = false, wNotReciprocal = false;
+        bool pixelCenterHalf = false;     // PA_SU_VTX_CNTL pix_center: 0 = Direct3D (centers at .0), 1 = OpenGL (.5)
+        bool vertexWindowOffset = false;  // PA_SU_SC_MODE_CNTL vtx_window_offset_enable
 
         // Scissor
         int32_t windowOffsetX = 0, windowOffsetY = 0;

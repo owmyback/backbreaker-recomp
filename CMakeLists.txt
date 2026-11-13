@@ -38,7 +38,7 @@ target_include_directories(backbreaker PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
 target_compile_options(backbreaker PRIVATE ${COMMON_FLAGS} -Wall -Wno-unused-function)
 find_package(Vulkan REQUIRED)
 find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
-target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3)
+target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3 shaderc_shared)
 # export symbols so crash backtraces show guest function names
 target_link_options(backbreaker PRIVATE -rdynamic)
 

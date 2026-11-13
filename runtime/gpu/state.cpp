@@ -129,9 +129,11 @@ namespace gpu
             if (scaleEna[i]) s.vpScale[i] = regFloat(PA_CL_VPORT_XSCALE + 2 * i);
             if (offsetEna[i]) s.vpOffset[i] = regFloat(PA_CL_VPORT_XSCALE + 2 * i + 1);
         }
-        s.xyInScreenSpace = vte.vtx_xy_fmt();
-        s.zInScreenSpace = vte.vtx_z_fmt();
-        s.w0Reciprocal = vte.vtx_w0_fmt();
+        s.xyDividedByW = vte.vtx_xy_fmt();
+        s.zDividedByW = vte.vtx_z_fmt();
+        s.wNotReciprocal = vte.vtx_w0_fmt();
+        s.pixelCenterHalf = readReg<PA_SU_VTX_CNTL>().pix_center();
+        s.vertexWindowOffset = mode.vtx_window_offset_enable();
 
         // Scissor
         auto wo = readReg<PA_SC_WINDOW_OFFSET>();
@@ -205,7 +207,7 @@ namespace gpu
         }
         snprintf(buf, sizeof(buf), "  viewport: scale=(%.1f, %.1f, %.3f) offset=(%.1f, %.1f, %.3f)%s%s window_offset=(%d, %d)%s\n",
                  s.vpScale[0], s.vpScale[1], s.vpScale[2], s.vpOffset[0], s.vpOffset[1], s.vpOffset[2],
-                 s.xyInScreenSpace ? " xy_screen" : "", s.w0Reciprocal ? " w_is_1/w" : "", s.windowOffsetX, s.windowOffsetY,
+                 s.xyDividedByW ? " xy/w" : "", s.wNotReciprocal ? "" : " w_is_1/w", s.windowOffsetX, s.windowOffsetY,
                  s.windowOffsetDisabled ? " (disabled for scissor)" : "");
         out += buf;
         snprintf(buf, sizeof(buf), "  scissor: window (%u,%u)-(%u,%u) screen (%u,%u)-(%u,%u)\n", s.scissorTL[0], s.scissorTL[1],

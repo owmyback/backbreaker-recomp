@@ -3,6 +3,7 @@
 // Packet formats follow Xenia's command_processor.cc.
 #include "gpu.h"
 #include "capture.h"
+#include "renderer.h"
 #include "../video/presenter.h"
 #include "../kernel/objects.h"
 #include "../apu/apu.h"
@@ -285,6 +286,7 @@ namespace gpu
                 r.skip(count - used);
                 g_draws++;
                 capture::onDraw(op, initiator, indexBase, indexSize);
+                render::onDraw(initiator, indexBase, indexSize);
                 return;
             }
             case PM4_DRAW_INDX_2:
@@ -294,6 +296,7 @@ namespace gpu
                 r.skip(count - 1);
                 g_draws++;
                 capture::onDraw(op, initiator, 0, 0);
+                render::onDraw(initiator, 0, 0);
                 return;
             }
             case PM4_IM_LOAD:
@@ -303,6 +306,7 @@ namespace gpu
                 r.skip(count - 2);
                 uint32_t size = startSize & 0xFFFF;
                 capture::onShaderLoad(addrType & 3, startSize >> 16, size, (const uint32_t*)physical(addrType & ~3u));
+                render::onShaderLoad(addrType & 3, (const uint32_t*)physical(addrType & ~3u), size);
                 return;
             }
             case PM4_IM_LOAD_IMMEDIATE:
@@ -314,6 +318,7 @@ namespace gpu
                 for (uint32_t i = 0; i < size; i++) words[i] = __builtin_bswap32(r.next()); // keep big-endian
                 r.skip(count - 2 - size);
                 capture::onShaderLoad(type & 3, startSize >> 16, size, words.data());
+                render::onShaderLoad(type & 3, words.data(), size);
                 return;
             }
             case PM4_XE_SWAP:
@@ -325,6 +330,7 @@ namespace gpu
                 g_frames++;
                 g_counter++;
                 capture::onSwap(g_frames, g_frontBuffer, g_frontWidth, g_frontHeight);
+                render::onSwap(g_frontBuffer, g_frontWidth, g_frontHeight, g_frames); // before publishFrame
                 video::publishFrame(g_frontBuffer, g_frontWidth, g_frontHeight, g_frames);
                 return;
             }

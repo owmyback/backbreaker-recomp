@@ -7,6 +7,8 @@
 #include "gpu/gpu.h"
 #include "apu/apu.h"
 #include "gpu/capture.h"
+#include "gpu/renderer.h"
+#include "video/vk_context.h"
 #include "hid/hid.h"
 #include "video/presenter.h"
 #include "log.h"
@@ -180,6 +182,20 @@ int main(int argc, char** argv)
             timeout = std::atoi(argv[++i]);
         else if (a == "--headless")
             headless = true;
+        else if (a == "--no-render")
+            gpu::render::disable();
+        else if (a == "--screenshot" && i + 1 < argc)
+        {
+            // frame numbers, comma-separated: --screenshot 600,1200 -> screenshots/frame_600.png, ...
+            std::string list = argv[++i];
+            for (size_t p = 0; p <= list.size();)
+            {
+                size_t q = list.find(',', p);
+                if (q == std::string::npos) q = list.size();
+                gpu::render::requestScreenshot(std::strtoull(list.substr(p, q - p).c_str(), nullptr, 10));
+                p = q + 1;
+            }
+        }
         else if (a == "--dump-shaders")
             gpu::capture::dumpAllShaders("captures/shaders");
         else if (a == "--press" && i + 1 < argc)
@@ -219,6 +235,8 @@ int main(int argc, char** argv)
 
     if (headless)
         runGuestMain(); // no window: the game runs on the process main thread, as before
+
+    vkctx::expectWindow(); // the renderer waits for the window's Vulkan device
 
     // Windowed: the game runs on its own host thread (large stack: recompiled code recurses on
     // the host stack) and the process main thread drives the window, as SDL expects.

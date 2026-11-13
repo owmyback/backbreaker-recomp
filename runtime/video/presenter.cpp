@@ -1,12 +1,13 @@
 // SDL3 window + Vulkan swapchain that shows the guest front buffer.
 //
-// Each presented frame copies the guest front buffer (physical memory) into a host-visible
-// staging buffer, uploads it to a source image and blits it, letterboxed to 16:9, into the
-// swapchain image. One frame in flight; the guest frame is only re-copied when a new swap was
-// published. The copy is raw for now: the front buffer is the destination of an EDRAM resolve
-// (8_8_8_8, red/blue swapped, most likely tiled) and will be untiled/converted once the
-// renderer produces real pixels.
+// When the renderer (runtime/gpu/renderer.cpp) produced the swapped frame, its resolved front
+// buffer image is blitted, letterboxed to 16:9, into the swapchain image. Otherwise (renderer
+// off, or the frame was not rendered) the raw guest front buffer is copied from physical memory
+// into a staging buffer, uploaded to a source image and blitted instead. One frame in flight.
+// Both threads use one queue: the renderer submits a frame before publishing it, so queue
+// submission order plus the barrier below order its writes before our read.
 #include "presenter.h"
+#include "vk_context.h"
 #include "../log.h"
 #include "../memory.h"
 
@@ -26,12 +27,10 @@ namespace video
         // ---- Published by the guest (command processor thread) ----
         std::atomic<uint64_t> g_frameNumber{0};
         std::atomic<uint32_t> g_front{0}, g_width{0}, g_height{0};
-
-#define VK_CHECK(x)                                                                 \
-    do {                                                                            \
-        VkResult r_ = (x);                                                          \
-        if (r_ != VK_SUCCESS) fatal("[video] %s failed: %d", #x, int(r_));          \
-    } while (0)
+        // ---- Published by the renderer (same thread as above, before publishFrame) ----
+        std::atomic<uint64_t> g_renderedFrame{0}, g_renderedImage{0};
+        std::atomic<uint32_t> g_renderedWidth{0}, g_renderedHeight{0};
+        vkctx::Context* g_ctx = nullptr;
 
         struct Vk
         {
@@ -66,79 +65,19 @@ namespace video
 
         uint32_t findMemory(uint32_t typeBits, VkMemoryPropertyFlags flags)
         {
-            VkPhysicalDeviceMemoryProperties props;
-            vkGetPhysicalDeviceMemoryProperties(vk.gpu, &props);
-            for (uint32_t i = 0; i < props.memoryTypeCount; i++)
-                if ((typeBits & (1u << i)) && (props.memoryTypes[i].propertyFlags & flags) == flags)
-                    return i;
-            fatal("[video] no suitable memory type");
+            uint32_t i = g_ctx->findMemory(typeBits, flags);
+            if (i == UINT32_MAX) fatal("[video] no suitable memory type");
+            return i;
         }
 
         void createInstanceAndDevice()
         {
-            Uint32 extCount = 0;
-            const char* const* exts = SDL_Vulkan_GetInstanceExtensions(&extCount);
-            if (!exts) fatal("[video] SDL_Vulkan_GetInstanceExtensions: %s", SDL_GetError());
-
-            VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
-            app.pApplicationName = "backbreaker-recomp";
-            app.apiVersion = VK_API_VERSION_1_3;
-            VkInstanceCreateInfo ici{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
-            ici.pApplicationInfo = &app;
-            ici.enabledExtensionCount = extCount;
-            ici.ppEnabledExtensionNames = exts;
-            const char* validation = "VK_LAYER_KHRONOS_validation";
-            if (SDL_getenv("BB_VK_VALIDATION"))
-            {
-                ici.enabledLayerCount = 1;
-                ici.ppEnabledLayerNames = &validation;
-            }
-            VK_CHECK(vkCreateInstance(&ici, nullptr, &vk.instance));
-            if (!SDL_Vulkan_CreateSurface(vk.window, vk.instance, nullptr, &vk.surface))
-                fatal("[video] SDL_Vulkan_CreateSurface: %s", SDL_GetError());
-
-            // Prefer a discrete GPU with a queue that does graphics + present
-            uint32_t n = 0;
-            vkEnumeratePhysicalDevices(vk.instance, &n, nullptr);
-            std::vector<VkPhysicalDevice> gpus(n);
-            vkEnumeratePhysicalDevices(vk.instance, &n, gpus.data());
-            int bestScore = -1;
-            for (VkPhysicalDevice g : gpus)
-            {
-                uint32_t qn = 0;
-                vkGetPhysicalDeviceQueueFamilyProperties(g, &qn, nullptr);
-                std::vector<VkQueueFamilyProperties> qs(qn);
-                vkGetPhysicalDeviceQueueFamilyProperties(g, &qn, qs.data());
-                for (uint32_t q = 0; q < qn; q++)
-                {
-                    VkBool32 present = VK_FALSE;
-                    vkGetPhysicalDeviceSurfaceSupportKHR(g, q, vk.surface, &present);
-                    if (!(qs[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) || !present) continue;
-                    VkPhysicalDeviceProperties p;
-                    vkGetPhysicalDeviceProperties(g, &p);
-                    int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
-                    if (score > bestScore) { bestScore = score; vk.gpu = g; vk.queueFamily = q; }
-                    break;
-                }
-            }
-            if (!vk.gpu) fatal("[video] no Vulkan GPU can present to this window");
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(vk.gpu, &props);
-            info("[video] Vulkan device: %s", props.deviceName);
-
-            float priority = 1.0f;
-            VkDeviceQueueCreateInfo qci{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
-            qci.queueFamilyIndex = vk.queueFamily;
-            qci.queueCount = 1;
-            qci.pQueuePriorities = &priority;
-            const char* devExt = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-            VkDeviceCreateInfo dci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
-            dci.queueCreateInfoCount = 1;
-            dci.pQueueCreateInfos = &qci;
-            dci.enabledExtensionCount = 1;
-            dci.ppEnabledExtensionNames = &devExt;
-            VK_CHECK(vkCreateDevice(vk.gpu, &dci, nullptr, &vk.device));
-            vkGetDeviceQueue(vk.device, vk.queueFamily, 0, &vk.queue);
+            g_ctx = &vkctx::createForWindow(vk.window, vk.surface);
+            vk.instance = g_ctx->instance;
+            vk.gpu = g_ctx->gpu;
+            vk.queueFamily = g_ctx->queueFamily;
+            vk.device = g_ctx->device;
+            vk.queue = g_ctx->queue;
 
             VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
             pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -302,8 +241,17 @@ namespace video
             // we waited on the fence above).
             uint64_t frame = g_frameNumber.load(std::memory_order_acquire);
             uint32_t front = g_front.load(), width = g_width.load(), height = g_height.load();
+            // Did the renderer produce this frame? Then show its image instead of the raw copy.
+            VkImage rendered = VK_NULL_HANDLE;
+            uint32_t renderedWidth = 0, renderedHeight = 0;
+            if (frame && g_renderedFrame.load(std::memory_order_acquire) == frame)
+            {
+                rendered = VkImage(g_renderedImage.load());
+                renderedWidth = g_renderedWidth.load();
+                renderedHeight = g_renderedHeight.load();
+            }
             bool upload = false;
-            if (frame && frame != uploadedFrame && width && height && width <= 8192 && height <= 8192)
+            if (!rendered && frame && frame != uploadedFrame && width && height && width <= 8192 && height <= 8192)
             {
                 if (width != vk.sourceWidth || height != vk.sourceHeight)
                     createSource(width, height);
@@ -324,7 +272,32 @@ namespace video
             VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             vkCmdClearColorImage(vk.cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
 
-            if (vk.source)
+            auto letterbox = [&](VkImage image, uint32_t srcWidth, uint32_t srcHeight) {
+                // Keep the guest aspect ratio inside the window
+                float sx = float(vk.swapExtent.width) / srcWidth, sy = float(vk.swapExtent.height) / srcHeight;
+                float s = sx < sy ? sx : sy;
+                int32_t w = int32_t(srcWidth * s), h = int32_t(srcHeight * s);
+                int32_t x = (int32_t(vk.swapExtent.width) - w) / 2, y = (int32_t(vk.swapExtent.height) - h) / 2;
+                VkImageBlit blit{};
+                blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                blit.srcOffsets[1] = { int32_t(srcWidth), int32_t(srcHeight), 1 };
+                blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                blit.dstOffsets[0] = { x, y, 0 };
+                blit.dstOffsets[1] = { x + w, y + h, 1 };
+                vkCmdBlitImage(vk.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                               VK_FILTER_LINEAR);
+            };
+            if (rendered)
+            {
+                // The renderer keeps its front buffer images in TRANSFER_SRC_OPTIMAL between submissions
+                VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0,
+                                     nullptr);
+                letterbox(rendered, renderedWidth, renderedHeight);
+            }
+            else if (vk.source)
             {
                 if (upload)
                 {
@@ -341,21 +314,7 @@ namespace video
                     vk.sourceValid = true;
                 }
                 if (vk.sourceValid)
-                {
-                    // Letterbox: keep the guest aspect ratio inside the window
-                    float sx = float(vk.swapExtent.width) / vk.sourceWidth, sy = float(vk.swapExtent.height) / vk.sourceHeight;
-                    float s = sx < sy ? sx : sy;
-                    int32_t w = int32_t(vk.sourceWidth * s), h = int32_t(vk.sourceHeight * s);
-                    int32_t x = (int32_t(vk.swapExtent.width) - w) / 2, y = (int32_t(vk.swapExtent.height) - h) / 2;
-                    VkImageBlit blit{};
-                    blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                    blit.srcOffsets[1] = { int32_t(vk.sourceWidth), int32_t(vk.sourceHeight), 1 };
-                    blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                    blit.dstOffsets[0] = { x, y, 0 };
-                    blit.dstOffsets[1] = { x + w, y + h, 1 };
-                    vkCmdBlitImage(vk.cmd, vk.source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
-                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-                }
+                    letterbox(vk.source, vk.sourceWidth, vk.sourceHeight);
             }
 
             barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
@@ -371,6 +330,7 @@ namespace video
             si.pCommandBuffers = &vk.cmd;
             si.signalSemaphoreCount = 1;
             si.pSignalSemaphores = &vk.rendered[index];
+            std::lock_guard queueGuard(g_ctx->queueLock);
             VK_CHECK(vkQueueSubmit(vk.queue, 1, &si, vk.inFlight));
 
             VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -384,6 +344,14 @@ namespace video
             if (r != VK_SUCCESS) fatal("[video] vkQueuePresentKHR: %d", int(r));
             return true;
         }
+    }
+
+    void publishRenderedFrame(VkImage image, uint32_t width, uint32_t height, uint64_t frameNumber)
+    {
+        g_renderedImage.store(uint64_t(image), std::memory_order_relaxed);
+        g_renderedWidth.store(width, std::memory_order_relaxed);
+        g_renderedHeight.store(height, std::memory_order_relaxed);
+        g_renderedFrame.store(frameNumber, std::memory_order_release);
     }
 
     void publishFrame(uint32_t front, uint32_t width, uint32_t height, uint64_t frameNumber)
@@ -423,7 +391,7 @@ namespace video
 
             if (!haveSwapchain)
             {
-                vkDeviceWaitIdle(vk.device);
+                { std::lock_guard g(g_ctx->queueLock); vkDeviceWaitIdle(vk.device); }
                 destroySwapchain();
                 haveSwapchain = createSwapchain();
                 if (!haveSwapchain) { SDL_Delay(50); continue; } // minimized
@@ -452,7 +420,7 @@ namespace video
             }
         }
 
-        vkDeviceWaitIdle(vk.device);
+        { std::lock_guard g(g_ctx->queueLock); vkDeviceWaitIdle(vk.device); }
         info("[video] window closed");
     }
 }

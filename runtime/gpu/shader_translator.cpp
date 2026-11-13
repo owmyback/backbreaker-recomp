@@ -4,6 +4,7 @@
 #include "shader_translator.h"
 #include "ucode.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -304,6 +305,9 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                 }
                 else
                 {
+                    if (((vmask & 1) && (a.vectorDest() == 0 || a.vectorDestRelative())) ||
+                        ((smask & 1) && (a.scalarDest() == 0 || a.scalarDestRelative())))
+                        r0xWritten = true;
                     std::string vd = a.vectorDestRelative() ? fmt("r[%u + aL]", a.vectorDest()) : fmt("r[%u]", a.vectorDest());
                     std::string sd = a.scalarDestRelative() ? fmt("r[%u + aL]", a.scalarDest()) : fmt("r[%u]", a.scalarDest());
                     for (uint32_t c = 0; c < 4; c++)
@@ -319,6 +323,7 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
             {
                 std::string d = f.dstRegRelative() ? fmt("r[%u + aL]", f.dstReg()) : fmt("r[%u]", f.dstReg());
                 emit("fres = " + value + ";");
+                if ((f.dstReg() == 0 || f.dstRegRelative()) && (f.dstSwizzle() & 7) != 7) r0xWritten = true;
                 for (uint32_t c = 0; c < 4; c++)
                 {
                     uint32_t s = (f.dstSwizzle() >> (3 * c)) & 7;
@@ -329,6 +334,7 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
             }
 
             uint32_t vfetchLastSlot = 0;
+            bool r0xWritten = false; // r0.x no longer holds the vertex index
             void vfetch(const Fetch& f)
             {
                 if (type != ShaderType::Vertex) { fail("vertex fetch in a pixel shader"); return; }
@@ -338,15 +344,23 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                     uint32_t slot = f.vfFetchSlot();
                     vfetchLastSlot = slot;
                     fetchConstantsUsed.insert(slot);
+                    out.vertexFetchSlots[slot / 32] |= 1u << (slot % 32);
                     // Fetch constant slot -> 2 dwords in fetchc (6-dword texture slots hold 3 vertex slots)
                     uint32_t dw = slot * 2;
                     // Index: floor, or round to nearest when the instruction asks for it
-                    emit(fmt("vf_base = (fetchc[%u].%c >> 2) + uint(int(floor(r[%u].%c%s))) * %uu;", dw / 4, kComp[dw % 4], f.srcReg(),
+                    emit(fmt("vf_base = fetchc[%u].%c + uint(int(floor(r[%u].%c%s))) * %uu;", dw / 4, kComp[dw % 4], f.srcReg(),
                              kComp[f.vfSrcSwizzle()], f.vfIsIndexRounded() ? " + 0.5" : "", f.vfStride()));
+                    if (f.srcReg() != 0 || f.vfSrcSwizzle() != 0 || r0xWritten) out.vertexIndexDirect = false;
+                    out.vertexStride[slot] = uint8_t(std::max<uint32_t>(out.vertexStride[slot], f.vfStride()));
                     emit(fmt("vf_endian = fetchc[%u].%c & 3u;", (dw + 1) / 4, kComp[(dw + 1) % 4]));
                 }
                 uint32_t format = f.vfFormat();
                 int32_t off = f.vfOffset();
+                {
+                    uint32_t size = (format == 38) ? 4 : (format == 57) ? 3 : (format == 37 || format == 32 || format == 26) ? 2 : 1;
+                    uint8_t& extent = out.vertexExtent[vfetchLastSlot];
+                    extent = uint8_t(std::clamp<int32_t>(std::max<int32_t>(extent, off + int32_t(size)), 0, 255));
+                }
                 auto word = [&](int i) { return fmt("gpuSwap(mem[vf_base + %du], vf_endian)", off + i); };
                 bool isSigned = f.vfFormatCompAll(), isInt = f.vfNumFormatAll();
                 std::string v;
@@ -506,16 +520,17 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                 s += "layout(set = 0, binding = 1, std140) uniform VsConstants { vec4 c[256]; } vsc;\n";
                 s += "layout(set = 0, binding = 2, std140) uniform PsConstants { vec4 c[256]; } psc;\n";
                 s += "layout(set = 0, binding = 3, std140) uniform OtherConstants { uvec4 boolc[2]; uvec4 loopc[8]; uvec4 fetchc[48]; };\n";
-                s += "layout(push_constant) uniform Push { int vertexIndexOffset; };\n";
+                // System constants: guest -> host viewport transform, vertex index offset, alpha test
+                s += "layout(push_constant) uniform Push { vec4 ndcScale; vec4 ndcOffset; int vertexIndexOffset; uint flags; uint alphaFunc; float alphaRef; } pc;\n";
                 static const char* samplers[4] = { "sampler1D", "sampler2D", "sampler3D", "samplerCube" };
                 for (uint32_t i = 0; i < 32; i++)
                     if (out.textureSlots & (1u << i))
                         s += fmt("layout(set = 1, binding = %u) uniform %s tex%u;\n", i, samplers[out.textureDims[i]], i);
                 if (type == ShaderType::Vertex)
-                    s += "layout(location = 0) out vec4 v_int[16];\n";
+                    s += "layout(location = 0) out XeInterpolators { vec4 v[16]; } xe_out;\n";
                 else
                 {
-                    s += "layout(location = 0) in vec4 v_int[16];\n";
+                    s += "layout(location = 0) in XeInterpolators { vec4 v[16]; } xe_in;\n";
                     for (uint32_t i = 0; i < 4; i++)
                         if (out.colorOutputs & (1u << i)) s += fmt("layout(location = %u) out vec4 frag_col%u;\n", i, i);
                 }
@@ -526,19 +541,34 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                 {
                     s += "  uint vf_base = 0u, vf_endian = 0u, vf_w = 0u, vf_w2 = 0u;\n";
                     s += "  vec4 o_pos = vec4(0.0), o_pts = vec4(0.0);\n  vec4 o_int[16];\n  for (int i = 0; i < 16; i++) o_int[i] = vec4(0.0);\n";
-                    s += "  r[0].x = float(gl_VertexIndex + vertexIndexOffset); // vertex index, with VGT_INDX_OFFSET\n";
+                    s += "  r[0].x = float(gl_VertexIndex + pc.vertexIndexOffset); // vertex index, with VGT_INDX_OFFSET\n";
                 }
                 else
                 {
                     s += "  vec4 o_col[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));\n  vec4 o_depth = vec4(gl_FragCoord.z);\n";
-                    s += "  for (int i = 0; i < 16; i++) r[i] = v_int[i];\n";
+                    s += "  for (int i = 0; i < 16; i++) r[i] = xe_in.v[i];\n";
                 }
                 s += "  vec4 o_unused = vec4(0.0);\n";
                 s += body;
                 if (type == ShaderType::Vertex)
-                    s += "  gl_Position = o_pos;\n  for (int i = 0; i < 16; i++) v_int[i] = o_int[i];\n";
+                {
+                    // Undo the guest position formats (PA_CL_VTE_CNTL), then guest viewport -> host NDC
+                    s += "  vec4 pos = o_pos;\n";
+                    s += "  if ((pc.flags & 4u) == 0u) pos.w = 1.0 / pos.w; // W given as 1/W\n";
+                    s += "  if ((pc.flags & 1u) != 0u) pos.xy *= pos.w;     // XY given divided by W\n";
+                    s += "  if ((pc.flags & 2u) != 0u) pos.z *= pos.w;      // Z given divided by W\n";
+                    s += "  pos.xyz = pos.xyz * pc.ndcScale.xyz + pc.ndcOffset.xyz * pos.w;\n";
+                    s += "  gl_Position = pos;\n  gl_PointSize = 1.0;\n";
+                    s += "  for (int i = 0; i < 16; i++) xe_out.v[i] = o_int[i];\n";
+                }
                 else
                 {
+                    // Alpha test (RB_COLORCONTROL), compare functions as VkCompareOp; 7 = always
+                    if (out.colorOutputs & 1)
+                        s += "  if (pc.alphaFunc != 7u) {\n    float a = o_col[0].w, ref = pc.alphaRef;\n"
+                             "    bool pass = pc.alphaFunc == 1u ? a < ref : pc.alphaFunc == 2u ? a == ref : pc.alphaFunc == 3u ? a <= ref :\n"
+                             "                pc.alphaFunc == 4u ? a > ref : pc.alphaFunc == 5u ? a != ref : pc.alphaFunc == 6u ? a >= ref : false;\n"
+                             "    if (!pass) discard;\n  }\n";
                     for (uint32_t i = 0; i < 4; i++)
                         if (out.colorOutputs & (1u << i)) s += fmt("  frag_col%u = o_col[%u];\n", i, i);
                     if (out.writesDepth) s += "  gl_FragDepth = o_depth.x;\n";

@@ -15,5 +15,6 @@ __pycache__/
 # Personal Claude Code settings
 .claude/settings.local.json
 
-# GPU frame captures (contain game shader microcode)
+# GPU frame captures (contain game shader microcode) and renderer screenshots (game imagery)
 captures/
+screenshots/

@@ -11,10 +11,22 @@
     ninja -C build
     ./build/backbreaker --timeout 15     # run from the repo root
 
-By default a window opens (SDL3 + Vulkan) showing the guest front buffer; its title shows the
-game's frame rate and the display rate. `--headless` runs without a window, exactly as before
-the window existed. Build dependencies for the window: Vulkan headers/loader and SDL3 development
-packages. Set `BB_VK_VALIDATION=1` to enable the Vulkan validation layer (if installed).
+By default a window opens (SDL3 + Vulkan) showing what the game renders; its title shows the
+game's frame rate and the display rate. `--headless` runs without a window (the renderer still
+runs if a Vulkan GPU is available, for screenshots). Build dependencies: Vulkan headers/loader,
+SDL3 and shaderc (Fedora: `libshaderc-devel`) development packages. Set `BB_VK_VALIDATION=1` to
+enable the Vulkan validation layer (needs it installed; Fedora: `vulkan-validation-layers`).
+
+## Renderer
+`runtime/gpu/renderer.cpp` executes the game's draws with Vulkan (one device shared with the
+window, `runtime/video/vk_context.cpp`): shaders are translated (see below) and compiled with
+shaderc on first use, EDRAM render targets are Vulkan images, resolves copy into images keyed by
+their guest address, and the presenter shows the image resolved to the front buffer.
+- `--screenshot N[,N...]` writes `screenshots/frame_N.png` (the front buffer of swap N; works
+  headless). `screenshots/` is gitignored - pictures of the game are not committed.
+- `--no-render` turns the renderer off (command stream side effects only, as in phase 3).
+- Unsupported textures (tiled ones, for now) show as magenta, and unsupported features log one
+  `[render] WARNING` each.
 
 On a crash or timeout it prints the host backtrace (sub_XXXXXXXX names are guest functions),
 the last 32 kernel calls and a per-import usage summary.
@@ -119,3 +131,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - KeTimeStampBundle is not updated; timer APC routines are not delivered
 - XAM content (saves), networking, movies (XMV) and real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
+- Renderer: EDRAM render targets don't alias each other; resolves are not written back to guest
+  memory and take their rectangle from the window scissor; tiled, 1D/3D/cube and some texture
+  formats are placeholders; textures are re-uploaded once per frame they are used (no
+  write-watching); only the base mip level; depth is 32-bit float instead of 24-bit

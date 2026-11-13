@@ -20,8 +20,10 @@ nothing shown), loads all sound banks, and reaches the title screen, where it lo
 movie (`attract.wmv`) with a 3D logo scene in between at a steady 30 fps. With scripted button
 presses (`--press`), the game leaves the title screen, asks for a storage device and starts
 looking for saves - where it stops, because save handling (phase 8) is not implemented yet.
-**Nothing is visible or audible yet**: GPU commands are executed only for their side effects and
-audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
+**The first picture is on screen**: the Vulkan renderer draws the attract movie correctly (the
+game decodes the video itself and draws it with its own shaders). Screens whose images are
+stored tiled (the logo screens) show magenta placeholders until untiling lands (#12). Audio is
+still silence.
 
 ## Phase overview
 
@@ -31,7 +33,7 @@ audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-3 done, 4 started) | `258ec24` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-5 done: first picture) | `258ec24`, `STEP5` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -216,12 +218,34 @@ Not yet: loops/calls/jumps, vector predicate-push ops, LOD/gradient fetches, mem
 texture fetch offsets, pixel shader param_gen, runtime compilation with shaderc + caching (comes
 with draw execution).
 
+**Step 5 - Vulkan renderer, first picture (`STEP5`).** `runtime/gpu/renderer.cpp` runs the
+game's draws on the host GPU. The attract movie renders correctly (checked with
+`--screenshot`). Design:
+- One Vulkan device shared by the window and the renderer (`runtime/video/vk_context.cpp`); the
+  renderer submits each frame at the swap and publishes the front buffer image to the presenter.
+- Guest data is snapshotted at draw time into a per-frame upload buffer: constants, indices
+  (byte-swapped; quad lists expanded), and only the vertex range a draw uses (from its index
+  range and the strides the translator reports). The vertex fetch constants in the uniform
+  buffer are rewritten to point into it. When it fills (one loading phase issues ~10,600 draws
+  without a swap), the work so far is submitted and recording continues.
+- EDRAM render targets: one image per (base tile, pitch, MSAA, format), sized to what fits in
+  EDRAM from the base tile; depth is D32_SFLOAT_S8 (AMD has no D24S8).
+- Rectangle lists use a geometry shader; the guest viewport (`PA_CL_VTE_CNTL` formats, scale,
+  offset, Direct3D pixel centers) is mapped to Vulkan in the vertex shader; alpha test in the
+  pixel shader; blend/depth/stencil/cull from the draw state.
+- Resolves copy (or MSAA-resolve) into images keyed by destination address, then clear if
+  asked. Linear textures (8, 8_8, 8_8_8_8, DXT1/3/5) upload once per frame they are used.
+- `--screenshot N` writes PNGs (headless too); `--no-render` turns the renderer off.
+
 Remaining steps:
-1. Shader translation: remaining control flow and features as gameplay shaders need them.
-2. Render targets in EDRAM, resolves to memory (including the front buffer); internal
-   resolution scaling.
-3. Textures: tiled formats, untiling, format conversion; vertex fetch.
-4. Draw calls (`DRAW_INDX`, `DRAW_INDX_2`). First picture expected: the attract movie.
+1. Tiled textures (needs #12's untiling), more texture formats, mip levels, 1D/3D/cube.
+   Then the logo screens and the 3D title scene should appear.
+2. Resolves written back to guest memory (render-to-texture through memory, CPU reads), the
+   resolve rectangle from the vertex data, depth resolves, EDRAM aliasing between targets.
+3. Internal resolution scaling (goal: 1440p/4K).
+4. Shader translation: remaining control flow and features as gameplay shaders need them;
+   point sprites; pixel shader param_gen.
+5. Performance: texture write-watching instead of per-frame uploads, finer barriers.
 This is the largest phase (weeks to months).
 
 ## Phase 5 - Controller input (planned)
@@ -285,7 +309,9 @@ Open issues: #4 (one-step setup script).
 - XMA output is silence; XAudio frames are discarded.
 - Networking (`NetDll_*`), XAM content, achievements and guide UI are stubs.
 - `WAIT_REG_MEM` in the command processor spins with `yield`.
-- The presenter shows the front buffer raw (tiled, no format conversion).
+- The presenter falls back to the raw (tiled) front buffer when a swap was not rendered.
+- Renderer shortcuts: see phase 4 step 5 and the remaining steps (no EDRAM aliasing, resolves
+  not written to memory, tiled textures are placeholders, per-frame texture re-uploads).
 - Profile settings are returned empty.
 - Virtual memory grows ~1 MB per 20 s in the front end (not investigated).
 
