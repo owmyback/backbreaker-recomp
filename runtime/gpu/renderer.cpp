@@ -4,13 +4,15 @@
 //   (nothing is written back to guest memory yet). The copy rectangle is the window scissor.
 // - Guest data is snapshotted at draw time into a per-frame upload buffer: vertex data (the
 //   vertex fetch constants are rewritten to point into it), constants, indices, textures.
-// - Textures: linear 2D 8/16/32-bit and DXT formats, base level only, re-uploaded once per frame
-//   they are used. Tiled and other textures get a magenta placeholder.
+// - Textures: 2D linear and tiled (runtime/gpu/tiling.h) 8, 8_8, 8_8_8_8, 4_4_4_4, 5_6_5 and DXT
+//   formats, base level only, re-uploaded once per frame they are used. Other textures get a
+//   magenta placeholder.
 // Register meanings follow Xenia (BSD; docs/licenses/xenia-LICENSE.txt).
 #include "renderer.h"
 #include "gpu.h"
 #include "shader_translator.h"
 #include "state.h"
+#include "tiling.h"
 #include "../debug/png.h"
 #include "../log.h"
 #include "../memory.h"
@@ -452,12 +454,16 @@ void main() {
 
         // ---------------------------------------------------------------- textures
 
-        struct TextureFormat { VkFormat vk; uint32_t blockW, blockH, bytes; };
+        // `convert`: 16-bit formats expanded to RGBA8 on upload (component X = lowest bits -> R)
+        enum class Convert { None, From4444, From565 };
+        struct TextureFormat { VkFormat vk; uint32_t blockW, blockH, bytes; Convert convert = Convert::None; };
         TextureFormat textureFormat(uint32_t f) // xenos::TextureFormat
         {
             switch (f)
             {
             case 2: return { VK_FORMAT_R8_UNORM, 1, 1, 1 };            // 8
+            case 4: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2, Convert::From565 };  // 5_6_5
+            case 15: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2, Convert::From4444 }; // 4_4_4_4
             case 6: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 4 };      // 8_8_8_8
             case 10: return { VK_FORMAT_R8G8_UNORM, 1, 1, 2 };         // 8_8
             case 18: return { VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 4, 4, 8 }; // DXT1
@@ -541,34 +547,80 @@ void main() {
                 warnOnce("texture dimension " + std::to_string(fetchDim) + " (shader " + std::to_string(dim) + ") not supported yet");
                 return out;
             }
-            if (tf.vk == VK_FORMAT_UNDEFINED || tiled || !pitch)
+            if (tf.vk == VK_FORMAT_UNDEFINED || !pitch)
             {
                 warnOnce("texture format " + std::to_string(format) + (tiled ? " (tiled)" : " (linear)") +
                          " not supported yet: magenta placeholder");
                 return out;
             }
-            TextureKey key{ base, format, endian, width, height, pitch };
+            TextureKey key{ base, format | (tiled ? 0x100u : 0u), endian, width, height, pitch };
             Texture& t = g_textures[key];
             if (!t.img.image)
                 t.img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, tf.vk, width, height, 1, 1, 1,
                                     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
             if (t.uploadedFrame != g_frameSerial)
             {
-                // Linear layout: rows of `pitch` texels (in blocks for compressed formats), 256-byte aligned
-                uint32_t blocksH = (height + tf.blockH - 1) / tf.blockH;
-                uint32_t rowBytes = ((pitch / tf.blockW) * tf.bytes + 255) & ~255u;
-                VkDeviceSize size = VkDeviceSize(rowBytes) * blocksH;
+                // Guest layout -> row-major blocks (byte-swapped), `rowBlocks` blocks per row.
+                // Linear: rows of `pitch` texels (blocks for compressed formats), 256-byte aligned.
+                // Tiled: 32x32-block tiles (runtime/gpu/tiling.h), pitch aligned to 32 blocks.
+                uint32_t blocksW = (width + tf.blockW - 1) / tf.blockW, blocksH = (height + tf.blockH - 1) / tf.blockH;
+                uint32_t rowBlocks, srcBytes;
+                if (tiled)
+                {
+                    rowBlocks = tiledBlocksAligned(std::max(pitch / tf.blockW, blocksW));
+                    srcBytes = tiledUpperBound2D(blocksW, blocksH, rowBlocks, tf.bytes);
+                }
+                else
+                {
+                    uint32_t rowBytes = ((pitch / tf.blockW) * tf.bytes + 255) & ~255u;
+                    rowBlocks = rowBytes / tf.bytes;
+                    srcBytes = rowBytes * blocksH;
+                }
+                srcBytes = (srcBytes + 3) & ~3u;
+                if (base + uint64_t(srcBytes) > mem::kPhysicalSize)
+                {
+                    warnOnce("texture extends past physical memory: placeholder");
+                    return out;
+                }
+                static std::vector<uint8_t> swapped, rows;
+                swapped.resize(srcBytes);
+                const uint32_t* src = (const uint32_t*)mem::physical(base);
+                for (uint32_t i = 0; i < srcBytes / 4; i++) ((uint32_t*)swapped.data())[i] = gpuSwap(src[i], endian);
+                const uint8_t* linear = swapped.data();
+                if (tiled)
+                {
+                    rows.assign(size_t(rowBlocks) * blocksH * tf.bytes, 0);
+                    untile2D(swapped.data(), rows.data(), blocksW, blocksH, rowBlocks, tf.bytes);
+                    linear = rows.data();
+                }
+                uint32_t outBytes = tf.convert == Convert::None ? tf.bytes : 4;
+                VkDeviceSize size = VkDeviceSize(rowBlocks) * blocksH * outBytes;
                 VkDeviceSize off = uploadAlloc(size);
                 if (off == UINT64_MAX) return out;
-                const uint32_t* src = (const uint32_t*)mem::physical(base);
-                uint32_t* dst = (uint32_t*)(frame().uploadMap + off);
-                for (VkDeviceSize i = 0; i < size / 4; i++) dst[i] = gpuSwap(src[i], endian);
+                uint8_t* dst = frame().uploadMap + off;
+                if (tf.convert == Convert::None)
+                    std::memcpy(dst, linear, size);
+                else
+                    for (size_t i = 0; i < size_t(rowBlocks) * blocksH; i++)
+                    {
+                        uint16_t v = ((const uint16_t*)linear)[i];
+                        uint8_t* o = dst + i * 4;
+                        if (tf.convert == Convert::From4444)
+                            for (int c = 0; c < 4; c++) o[c] = uint8_t(((v >> (4 * c)) & 0xF) * 17);
+                        else
+                        {
+                            o[0] = uint8_t((v & 0x1F) * 255 / 31);
+                            o[1] = uint8_t(((v >> 5) & 0x3F) * 255 / 63);
+                            o[2] = uint8_t((v >> 11) * 255 / 31);
+                            o[3] = 255;
+                        }
+                    }
                 endPass();
                 VkCommandBuffer c = cmd();
                 transition(c, t.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 VkBufferImageCopy copy{};
                 copy.bufferOffset = off;
-                copy.bufferRowLength = rowBytes / tf.bytes * tf.blockW;
+                copy.bufferRowLength = rowBlocks * tf.blockW;
                 copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
                 copy.imageExtent = { width, height, 1 };
                 vkCmdCopyBufferToImage(c, frame().upload, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);

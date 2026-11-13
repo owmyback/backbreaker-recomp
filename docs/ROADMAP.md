@@ -254,12 +254,18 @@ offsets of a pitch-aligned surface forming a permutation, and the header buildin
 translation units (everything in it is inline/constexpr). Not used by the renderer or the presenter
 yet.
 
+**Step 7 - Tiled textures (`STEP7`).** Textures are untiled on upload with `runtime/gpu/tiling.h`
+(after byte-swapping guest memory); 4_4_4_4 and 5_6_5 are expanded to RGBA8. The middleware
+logo screen and the title screen ("BACKBREAKER", "(A) START") now render with their real images.
+Visible gap: the game clears the screen with a rectangle drawn at pitch 640 with 4x MSAA, which
+on the console covers the same EDRAM as the 1280x720 target; without EDRAM aliasing (step 2
+below) that clear misses, so stale pixels show around the logos.
+
 Remaining steps:
-1. Tiled textures (the untiling helper from #12 exists - see above; the renderer still uploads tiled
-   textures as placeholders), more texture formats, mip levels, 1D/3D/cube.
-   Then the logo screens and the 3D title scene should appear.
-2. Resolves written back to guest memory (render-to-texture through memory, CPU reads), the
-   resolve rectangle from the vertex data, depth resolves, EDRAM aliasing between targets.
+1. More texture formats, mip levels, 1D/3D/cube (cube maps are used by the title scene).
+2. EDRAM aliasing between targets (next: the screen clear above needs it), resolves written
+   back to guest memory (render-to-texture through memory, CPU reads), the resolve rectangle
+   from the vertex data, depth resolves.
 3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
    clears (`--resolution-scale N`, step 6). Still to check once 3D scenes render: effects that
    depend on pixel size (blur, bloom, shadow maps, half-pixel offsets in post-processing), and
