@@ -47,6 +47,11 @@ Subsystems:
   crash and timeout reports list each thread's recent scopes
 - `runtime/debug/guest_trace.cpp` - GUEST_TRACE(addr) wraps a guest function to log args/result
 
+## Scripted input
+`--press "start@12,a@20,down@24.5"` presses each button that many seconds after launch (held
+150 ms), reported as pad state and as keystrokes. Buttons: a b x y start back up down left right
+lb rb ls rs. Example that gets past the title screen: `--press "a@20,a@26"`.
+
 ## GPU frame capture
 `./build/backbreaker --capture-frame 1200` (or a list: `--capture-frame 300,1200,2400`) records the
 frame ending with that swap into `captures/frame_N/` (gitignored):

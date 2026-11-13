@@ -14,10 +14,11 @@ Last updated: 2026-11-12 (phase 4 started)
 The whole executable recompiles (0 warnings) and builds into one native binary. The runtime
 boots the game through its full initialization, runs through the two logo movies (timing only,
 nothing shown), loads all sound banks, and reaches the title screen, where it loops the attract
-movie (`attract.wmv`) with a 3D logo scene in between at a steady 30 fps, waiting for **Press
-Start** (tested 4 minutes, memory flat). **Nothing is visible or audible yet**: GPU commands are
-executed only for their side effects and audio is silence. Rendering (phase 4) has started with a
-GPU frame-capture tool.
+movie (`attract.wmv`) with a 3D logo scene in between at a steady 30 fps. With scripted button
+presses (`--press`), the game leaves the title screen, asks for a storage device and starts
+looking for saves - where it stops, because save handling (phase 8) is not implemented yet.
+**Nothing is visible or audible yet**: GPU commands are executed only for their side effects and
+audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
 
 ## Phase overview
 
@@ -28,10 +29,10 @@ GPU frame-capture tool.
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `ffd4677`, `b3682e6`, `d680bb6` |
 | 3 | Headless subsystems: game reaches the front end | Done | `be2b9ff`, `47eea11` |
 | 4 | Rendering (Vulkan): see the game | **In progress** (step 0 done) | `288cb51` |
-| 5 | Controller input (SDL, DualSense) | Planned | - |
+| 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
-| 8 | Saves and profile (XAM content) | Planned | - |
+| 8 | Saves and profile (XAM content) | **Next blocker** (device selector done) | - |
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | Planned | - |
 
@@ -159,6 +160,10 @@ This is the largest phase (weeks to months).
 SDL3 gamepad backend behind `readPad()` in `runtime/hid/input.cpp` (DualSense over USB on the
 dev machine), vibration via `XamInputSetState`, keyboard fallback.
 
+Done early: scripted presses for testing (`--press "a@20,a@26"`, see `docs/runtime.md`), reported
+both as pad state and as keystroke events (`XamInputGetKeystrokeEx`). The game accepts them:
+A on the title screen stops the attract loop and moves on to the storage-device prompt.
+
 ## Phase 6 - Audio output (planned)
 
 - Real XMA2 decoding. Fedora's `ffmpeg-free` has no XMA decoder (WMA Pro family is excluded);
@@ -177,6 +182,12 @@ and any decoding the player expects hardware for.
 
 XamContent* (save devices, content creation/enumeration) mapped to a host directory; persist
 profile settings; device selector UI answered automatically.
+
+Status: the device selector is answered (one dummy hard drive, as in Xenia) and the XMP music
+player query is handled. The game then enumerates saves with `XamContentCreateEnumerator` /
+`XamEnumerate` and crashes on the stubs - this is the current blocker after the title screen.
+Next: enumerators (empty at first), `XamContentCreateEx` / `XamContentClose` mounting a save
+container as a drive (e.g. `save:`) backed by a host folder, `XamContentGetDeviceData`.
 
 ## Phase 9 - Gameplay correctness and performance (planned)
 
@@ -205,8 +216,7 @@ optional integration with a launcher such as recomplauncher.com.
 ## Open questions
 
 - What caps the title loop at 30 fps (attract video rate, vblank interval, or game logic)?
-- Reaching real menus needs a Start press: worth a debug option that presses Start after N
-  seconds, so captures and testing can go past the title screen before phase 5.
+- Which save/content calls the game makes after enumeration (expected: XamContentCreateEx).
 - XMA2 decoder source for phase 6 (RPM Fusion FFmpeg vs. vendored decoder).
 - High-level (hook Direct3D calls) vs. low-level (emulate Xenos PM4, like Xenia) rendering:
   the current command processor follows the low-level route, which needs no knowledge of the

@@ -19,8 +19,9 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
 - `third_party/`  - upstream clones such as XenonRecomp (gitignored)
 - `docs/`         - roadmap, notes and analysis results
 
-## Source ISO
-An ISO image made from your own retail Backbreaker disc. Below, `<iso>` is its path.
+## Game files
+You need an ISO image made from your own retail Backbreaker (Xbox 360) disc. No game files are
+included or provided here. Below, `<iso>` is the path to your image.
 
 ## Reproduce extraction
     mkdir -p game/extracted game/disc

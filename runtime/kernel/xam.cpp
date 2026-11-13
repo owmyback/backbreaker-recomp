@@ -196,6 +196,40 @@ GUEST_IMPORT(XamGetExecutionId)
     ctx.r3.u64 = info ? 0 : 0x80004005;
 }
 
+// ---- Storage devices (behavior follows Xenia: one dummy hard drive, id 1) ----
+namespace
+{
+    constexpr uint32_t kDummyDeviceId = 1;
+}
+
+// u32 XamShowDeviceSelectorUI(u32 UserIndex, u32 ContentType, u32 ContentFlags, u64 TotalRequested,
+//                             u32* DeviceId, XOVERLAPPED* Overlapped)
+GUEST_IMPORT(XamShowDeviceSelectorUI)
+{
+    uint32_t pDevice = ctx.r7.u32, overlapped = ctx.r8.u32;
+    if (pDevice) write32(pDevice, kDummyDeviceId);
+    info("[xam] device selector: picked the hard drive (device %u)", kDummyDeviceId);
+    ctx.r3.u64 = completeOverlapped(overlapped, ERROR_SUCCESS);
+}
+
+// ---- In-process XMsg calls to system apps ----
+// u32 XMsgInProcessCall(u32 App, u32 Message, void* Buffer, u32 BufferLength)
+GUEST_IMPORT(XMsgInProcessCall)
+{
+    uint32_t app = ctx.r3.u32, msg = ctx.r4.u32, buf = ctx.r5.u32;
+    if (app == 0xFA && msg == 0x0007001B)
+    {
+        // XMP (music player) XMPGetPlaybackController { u32 client; u32* controller; u32* locked }:
+        // the title controls playback, not the user's own music
+        if (uint32_t p = read32(buf + 4)) write32(p, 0);
+        if (uint32_t p = read32(buf + 8)) write32(p, 0);
+        ctx.r3.u64 = 0;
+        return;
+    }
+    warn("XMsgInProcessCall(app %02X, message %08X) not implemented", app, msg);
+    ctx.r3.u64 = 0x80004005; // E_FAIL
+}
+
 // ---- Misc kernel bits the game touches during init ----
 // void KeInitializeDpc(KDPC* Dpc, void* Routine, void* Context)
 GUEST_IMPORT(KeInitializeDpc)

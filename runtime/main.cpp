@@ -7,6 +7,7 @@
 #include "gpu/gpu.h"
 #include "apu/apu.h"
 #include "gpu/capture.h"
+#include "hid/hid.h"
 #include "log.h"
 #include "memory.h"
 
@@ -142,6 +143,11 @@ int main(int argc, char** argv)
         std::string a = argv[i];
         if (a == "--timeout" && i + 1 < argc)
             timeout = std::atoi(argv[++i]);
+        else if (a == "--press" && i + 1 < argc)
+        {
+            if (!hid::setScript(argv[++i]))
+                return 2;
+        }
         else if (a == "--capture-frame" && i + 1 < argc)
         {
             // one frame number or a comma-separated list: --capture-frame 300,1500,3000
