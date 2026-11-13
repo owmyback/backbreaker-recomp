@@ -72,6 +72,102 @@ float rsqf(float x) { float r = inversesqrt(x); return isinf(r) ? 0.0 : r; }
 float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.402823466e38 : r; }
 )";
 
+        // Memory export (Xenia's xenos.h describes the format): eA = (base address in dwords,
+        // 2^23 + element index, 2^23 + format bit field, 2^23 + element count) as float bits; each
+        // written eM# stores element index + #. Elements are packed per color format and number
+        // format, red/blue swapped and endian swapped like resolves, and written straight to guest
+        // memory (gmem: little-endian view of the big-endian guest bytes).
+        const char* kMemExport = R"(
+layout(set = 0, binding = 4, std430) buffer GuestPhysical { uint gmem[]; };
+vec4 xe_eA = vec4(0.0);
+vec4 xe_eM[5] = vec4[5](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+uint xe_eMWritten = 0u;
+uint xeSwap32(uint v, uint e) {
+  if (e == 1u) return ((v >> 8) & 0x00FF00FFu) | ((v << 8) & 0xFF00FF00u);
+  if (e == 2u || e >= 4u) return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
+  if (e == 3u) return (v >> 16) | (v << 16);
+  return v;
+}
+// One integer component of `bits` (< 32) bits; nfmt: 0 unorm, 1 snorm, 2 uint, 3 sint
+uint xeComp(float v, uint bits, uint nfmt) {
+  uint mask = (1u << bits) - 1u;
+  if (nfmt == 0u) return uint(round(clamp(v, 0.0, 1.0) * float(mask)));
+  if (nfmt == 1u) return uint(int(round(clamp(v, -1.0, 1.0) * float(mask >> 1)))) & mask;
+  if (nfmt == 2u) return uint(clamp(round(v), 0.0, float(mask)));
+  if (nfmt == 3u) { float h = float(1u << (bits - 1u)); return uint(int(clamp(round(v), -h, h - 1.0))) & mask; }
+  return floatBitsToUint(v) & mask;
+}
+uint xeComp32(float v, uint nfmt) {
+  if (nfmt == 2u) return uint(max(round(v), 0.0));
+  if (nfmt == 3u) return uint(int(round(v)));
+  return floatBitsToUint(v);
+}
+uint xeElementSize(uint fmt) {
+  if (fmt == 2u) return 1u;                                          // 8
+  if (fmt == 24u || fmt == 30u) return 2u;                           // 16, 16_FLOAT
+  if (fmt == 6u || fmt == 7u || fmt == 25u || fmt == 31u || fmt == 33u || fmt == 36u) return 4u;
+  if (fmt == 26u || fmt == 32u || fmt == 34u || fmt == 37u) return 8u;
+  if (fmt == 35u || fmt == 38u) return 16u;                          // 32_32_32_32 (_FLOAT)
+  return 0u;
+}
+void xeMemExportElement(uint addr, vec4 v, uint fmt, uint nfmt, uint endian, uint size) {
+  uvec4 d = uvec4(0u);
+  if (fmt == 2u) d.x = xeComp(v.x, 8u, nfmt);
+  else if (fmt == 24u) d.x = xeComp(v.x, 16u, nfmt);
+  else if (fmt == 30u) d.x = packHalf2x16(vec2(v.x, 0.0)) & 0xFFFFu;
+  else if (fmt == 6u) d.x = xeComp(v.x, 8u, nfmt) | (xeComp(v.y, 8u, nfmt) << 8) | (xeComp(v.z, 8u, nfmt) << 16) | (xeComp(v.w, 8u, nfmt) << 24);
+  else if (fmt == 7u) d.x = xeComp(v.x, 10u, nfmt) | (xeComp(v.y, 10u, nfmt) << 10) | (xeComp(v.z, 10u, nfmt) << 20) | (xeComp(v.w, 2u, nfmt) << 30);
+  else if (fmt == 25u) d.x = xeComp(v.x, 16u, nfmt) | (xeComp(v.y, 16u, nfmt) << 16);
+  else if (fmt == 31u) d.x = packHalf2x16(v.xy);
+  else if (fmt == 26u) d.xy = uvec2(xeComp(v.x, 16u, nfmt) | (xeComp(v.y, 16u, nfmt) << 16), xeComp(v.z, 16u, nfmt) | (xeComp(v.w, 16u, nfmt) << 16));
+  else if (fmt == 32u) d.xy = uvec2(packHalf2x16(v.xy), packHalf2x16(v.zw));
+  else if (fmt == 36u) d.x = floatBitsToUint(v.x);
+  else if (fmt == 37u) d.xy = floatBitsToUint(v.xy);
+  else if (fmt == 38u) d = floatBitsToUint(v);
+  else if (fmt == 33u) d.x = xeComp32(v.x, nfmt);
+  else if (fmt == 34u) d.xy = uvec2(xeComp32(v.x, nfmt), xeComp32(v.y, nfmt));
+  else if (fmt == 35u) d = uvec4(xeComp32(v.x, nfmt), xeComp32(v.y, nfmt), xeComp32(v.z, nfmt), xeComp32(v.w, nfmt));
+  if (size >= 4u) {
+    uint n = size / 4u, base = addr >> 2;
+    uvec4 o;
+    if (endian == 4u && n >= 2u) o = uvec4(xeSwap32(d.y, 2u), xeSwap32(d.x, 2u), xeSwap32(d.w, 2u), xeSwap32(d.z, 2u)); // 8in64
+    else if (endian == 5u && n == 4u) o = uvec4(xeSwap32(d.w, 2u), xeSwap32(d.z, 2u), xeSwap32(d.y, 2u), xeSwap32(d.x, 2u)); // 8in128
+    else o = uvec4(xeSwap32(d.x, endian), xeSwap32(d.y, endian), xeSwap32(d.z, endian), xeSwap32(d.w, endian));
+    gmem[base] = o.x;
+    if (n > 1u) gmem[base + 1u] = o.y;
+    if (n > 2u) { gmem[base + 2u] = o.z; gmem[base + 3u] = o.w; }
+  } else {
+    // 8/16-bit element: the swap moves its byte lane (and swaps a 16-bit element's bytes)
+    uint a = addr, v = d.x;
+    if (size == 2u) {
+      if (endian == 1u || endian == 2u) v = ((v >> 8) & 0xFFu) | ((v & 0xFFu) << 8);
+      if (endian == 2u || endian == 3u) a ^= 2u;
+    } else {
+      a ^= endian == 1u ? 1u : endian == 2u ? 3u : endian == 3u ? 2u : 0u;
+    }
+    uint shift = (a & 3u) * 8u, mask = (size == 1u ? 0xFFu : 0xFFFFu) << shift;
+    atomicAnd(gmem[a >> 2], ~mask);
+    atomicOr(gmem[a >> 2], (v << shift) & mask);
+  }
+}
+void xeMemExportFlush() {
+  if (xe_eMWritten == 0u) return;
+  uint ay = floatBitsToUint(xe_eA.y);
+  if ((ay & 0xFF800000u) == 0x4B000000u) { // index must have exponent 23 and sign 0
+    uint ax = floatBitsToUint(xe_eA.x), az = floatBitsToUint(xe_eA.z), aw = floatBitsToUint(xe_eA.w);
+    uint index = ay & 0x7FFFFFu, count = aw & 0x7FFFFFu, base = (ax & 0x3FFFFFFFu) << 2;
+    uint endian = az & 7u, fmt = (az >> 8) & 0x3Fu, nfmt = (az >> 16) & 7u, size = xeElementSize(fmt);
+    bool swapRB = ((az >> 19) & 1u) != 0u;
+    for (uint i = 0u; i < 5u; i++) {
+      uint e = index + i, addr = base + e * size;
+      if ((xe_eMWritten & (1u << i)) == 0u || e >= count || size == 0u || addr + size > 0x20000000u) continue;
+      xeMemExportElement(addr, swapRB ? xe_eM[i].zyxw : xe_eM[i], fmt, nfmt, endian, size);
+    }
+  }
+  xe_eMWritten = 0u;
+}
+)";
+
         struct Translator
         {
             const std::vector<uint32_t>& w;
@@ -134,6 +230,8 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                     if (reg == 63) return "o_pts";
                     if (reg < 16) return fmt("o_int[%u]", reg);
                 }
+                if (reg == 32) { out.memExport = true; return "xe_eA"; }              // memory export address
+                if (reg >= 33 && reg <= 37) { out.memExport = true; return fmt("xe_eM[%u]", reg - 33); } // data
                 else
                 {
                     if (reg < 4) { out.colorOutputs |= 1u << reg; return fmt("o_col[%u]", reg); }
@@ -295,7 +393,14 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                 // Write results
                 if (exp)
                 {
-                    std::string t = exportTarget(a.vectorDest());
+                    uint32_t reg = a.vectorDest();
+                    if (reg == 32)
+                    {
+                        // A new eA closes the export in progress; remember the stream constant
+                        emit("xeMemExportFlush();");
+                        if (a.vectorOp() == 11 && !a.srcIsTemp(3)) out.memExportStreams[(a.srcReg(3) & 0xFF) / 32] |= 1u << (a.srcReg(3) % 32);
+                    }
+                    std::string t = exportTarget(reg);
                     for (uint32_t c = 0; c < 4; c++)
                     {
                         bool v = (vmask >> c) & 1, s = (smask >> c) & 1;
@@ -304,6 +409,7 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                         else if (s) emit(fmt("%s.%c = ps;", t.c_str(), kComp[c]));
                         else if (a.scalarDestRelative()) emit(fmt("%s.%c = 0.0;", t.c_str(), kComp[c]));
                     }
+                    if (reg >= 33 && reg <= 37) emit(fmt("xe_eMWritten |= %uu;", 1u << (reg - 33)));
                 }
                 else
                 {
@@ -528,7 +634,10 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                         if (isExec(op) && cf.execCount() && cf.execAddress() * 3 < cfEnd) cfEnd = cf.execAddress() * 3;
                         switch (op)
                         {
-                        case CfOp::Nop: case CfOp::Alloc: case CfOp::MarkVsFetchDone:
+                        case CfOp::Alloc:
+                            emit("xeMemExportFlush();"); // an alloc ends the memory export in progress
+                            break;
+                        case CfOp::Nop: case CfOp::MarkVsFetchDone:
                             break;
                         case CfOp::Exec: case CfOp::ExecEnd:
                             exec(cf);
@@ -563,6 +672,7 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                 s += "layout(set = 0, binding = 3, std140) uniform OtherConstants { uvec4 boolc[2]; uvec4 loopc[8]; uvec4 fetchc[48]; };\n";
                 // System constants: guest -> host viewport transform, vertex index offset, alpha test
                 s += "layout(push_constant) uniform Push { vec4 ndcScale; vec4 ndcOffset; int vertexIndexOffset; uint flags; uint alphaFunc; float alphaRef; } pc;\n";
+                s += out.memExport ? kMemExport : "void xeMemExportFlush() {}\n";
                 static const char* samplers[4] = { "sampler1D", "sampler2D", "sampler3D", "samplerCube" };
                 for (uint32_t i = 0; i < 32; i++)
                     if (out.textureSlots & (1u << i))
@@ -591,6 +701,7 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                 }
                 s += "  vec4 o_unused = vec4(0.0);\n";
                 s += body;
+                s += "  xeMemExportFlush();\n";
                 if (type == ShaderType::Vertex)
                 {
                     // Undo the guest position formats (PA_CL_VTE_CNTL), then guest viewport -> host NDC

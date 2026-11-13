@@ -30,8 +30,9 @@ registers + `WAIT_REG_MEM` + `INTERRUPT`); the callback queues work for a per-CP
 (`sub_8241D5E0` -> `sub_8241D320`), which re-arms another handshake instead of releasing the
 count. The handshake itself works (each run is acknowledged); whatever condition the job waits
 for is never met. Fixed on the way: `KeSetAffinityThread` (the per-CPU workers need their CPU
-number in the PCR). Next suspects: GPU skinning through memory export (`vs_f4d7b7690397f218`,
-skipped by the translator), then reverse the job in `sub_8241D320`.
+number in the PCR) and GPU skinning through memory export (the match load skins the players with
+`vs_f4d7b7690397f218`; positions and normals now come out right, but the hang is unchanged). Next:
+reverse the job in `sub_8241D320` to find the condition it waits for.
 
 ## Phase overview
 
@@ -227,7 +228,7 @@ multiplications follow Shader Model 3 (0 * anything = 0); unsupported features f
 with a reason. All 58 shaders of the current corpus translate, compile with glslc and pass
 spirv-val. A hand-checked vertex shader confirmed the swizzle decoding: the game's compiler keeps
 intermediate results in permuted component order and undoes it on export.
-Not yet: loops/calls/jumps, vector predicate-push ops, LOD/gradient fetches, memory export,
+Not yet: loops/calls/jumps, vector predicate-push ops, LOD/gradient fetches,
 texture fetch offsets, pixel shader param_gen, runtime compilation with shaderc + caching (comes
 with draw execution).
 

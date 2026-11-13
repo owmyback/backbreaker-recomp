@@ -11,6 +11,7 @@
 //                                     - bool constants (256 bits), loop constants (32), fetch constants (32 x 6 dwords)
 //                                     Dword 0 of each vertex fetch slot the shader reads holds the dword index of
 //                                     that vertex data in `mem` (rewritten by the renderer; not the guest value)
+//   set 0, binding 4: storage buffer  `uint gmem[]`     - guest physical memory, writable (memory export only)
 //   set 1, binding N: texture for fetch constant slot N (sampler1D/2D/3D/Cube by fetch dimension)
 //   push constant:    system constants (struct SystemConstants below)
 // Vertex shader outputs and pixel shader inputs are the block XeInterpolators { vec4 v[16]; }
@@ -31,6 +32,10 @@ namespace gpu
         uint32_t textureSlots = 0;   // bit N set: uses texture fetch constant slot N
         uint32_t textureDims[32]{};  // per used slot: 0 1D, 1 2D, 2 3D, 3 cube
         bool writesDepth = false;
+        // Memory export (eA / eM0-4): the shader writes guest memory through set 0 binding 4.
+        // memExportStreams: float constants used as stream constants (`mad eA, r#, const0100, c#`)
+        bool memExport = false;
+        uint32_t memExportStreams[8]{}; // bit N of [N / 32]: c<N>
         uint32_t colorOutputs = 0;   // bit N: writes oCN
         uint32_t vertexFetchSlots[3]{}; // bit N of [N / 32]: reads vertex fetch slot N (fetch constant dwords 2N, 2N+1)
         // Per vertex fetch slot: stride and the dwords an element reaches (max offset + size), so the

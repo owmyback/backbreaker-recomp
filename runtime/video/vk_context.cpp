@@ -98,6 +98,8 @@ namespace vkctx
             features.features.fillModeNonSolid = supported.fillModeNonSolid;
             features.features.samplerAnisotropy = supported.samplerAnisotropy;
             features.features.sampleRateShading = supported.sampleRateShading;
+            features.features.vertexPipelineStoresAndAtomics = supported.vertexPipelineStoresAndAtomics;
+            features.features.fragmentStoresAndAtomics = supported.fragmentStoresAndAtomics;
             if (!supported.geometryShader || !supported.depthClamp || !supported.independentBlend)
                 warn("[vulkan] GPU lacks geometry shaders, depth clamp or independent blend; some draws will be wrong");
 
@@ -110,6 +112,16 @@ namespace vkctx
             if (surface) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
             c.stencilExport = hasExtension(c.gpu, VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
             if (c.stencilExport) exts.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+            c.hostMemoryImport = hasExtension(c.gpu, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) && supported.vertexPipelineStoresAndAtomics;
+            if (c.hostMemoryImport)
+            {
+                exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+                VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProps{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
+                VkPhysicalDeviceProperties2 p2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+                p2.pNext = &hostProps;
+                vkGetPhysicalDeviceProperties2(c.gpu, &p2);
+                c.hostPointerAlignment = uint32_t(hostProps.minImportedHostPointerAlignment);
+            }
             VkDeviceCreateInfo dci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
             dci.pNext = &features;
             dci.queueCreateInfoCount = 1;
@@ -119,6 +131,9 @@ namespace vkctx
             if (vkCreateDevice(c.gpu, &dci, nullptr, &c.device) != VK_SUCCESS) return false;
             vkGetDeviceQueue(c.device, c.queueFamily, 0, &c.queue);
             c.cmdPushDescriptorSet = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c.device, "vkCmdPushDescriptorSetKHR");
+            if (c.hostMemoryImport)
+                c.getMemoryHostPointerProperties =
+                    (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(c.device, "vkGetMemoryHostPointerPropertiesEXT");
             return c.cmdPushDescriptorSet != nullptr;
         }
     }

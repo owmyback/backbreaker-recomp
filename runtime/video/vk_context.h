@@ -21,6 +21,11 @@ namespace vkctx
         VkQueue queue = VK_NULL_HANDLE;
         PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
         bool stencilExport = false; // VK_EXT_shader_stencil_export (EDRAM depth transfers keep stencil)
+        // VK_EXT_external_memory_host + vertexPipelineStoresAndAtomics: shaders can write guest
+        // memory directly (Xenos memory export)
+        bool hostMemoryImport = false;
+        uint32_t hostPointerAlignment = 0;
+        PFN_vkGetMemoryHostPointerPropertiesEXT getMemoryHostPointerProperties = nullptr;
         std::mutex queueLock; // the queue is used by both threads (vkQueueSubmit, vkQueuePresentKHR)
 
         // Memory type with all of `flags` among `typeBits`; UINT32_MAX if there is none.

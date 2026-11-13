@@ -57,6 +57,13 @@ namespace gpu::render
         vkctx::Context* C = nullptr;
         VkDevice D = VK_NULL_HANDLE;
         std::set<uint64_t> g_screenshots;
+        // Guest physical memory imported as a writable storage buffer (memory export)
+        VkBuffer g_guestMem = VK_NULL_HANDLE;
+        VkDeviceMemory g_guestMemMemory = VK_NULL_HANDLE;
+        bool g_memExportReady = false;
+        // Fallback when the driver can't import the guest mapping: a host-visible buffer at the
+        // same addresses; export stream ranges are copied in before and out after each draw
+        uint8_t* g_exportMap = nullptr;
 
         void warnOnce(const std::string& what)
         {
@@ -349,6 +356,7 @@ void main() {
                 w = std::min(w, depth->width);
                 h = std::min(h, depth->height);
             }
+            if (w == UINT32_MAX) w = h = 1; // no attachments: a memory export pass, rasterization discarded
             VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
             ri.renderArea = { { 0, 0 }, { w, h } };
             ri.layerCount = 1;
@@ -1076,6 +1084,7 @@ void main() {
             VkFormat colors[4];
             bool depth;
             uint32_t samples;
+            bool discard = false; // rasterizer discard: a memory export draw with no render targets
         };
 
         VkPipeline pipeline(const PipelineDesc& p)
@@ -1086,7 +1095,7 @@ void main() {
             bool restart = strip && s.primitiveRestart;
             bool cullable = !p.rectangles && p.topology >= VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
             char key[512];
-            int n = snprintf(key, sizeof(key), "%p %p %d %d %d|%d %d %d %d %d|%u|", (void*)p.vs->module, (void*)p.ps->module, int(p.topology),
+            int n = snprintf(key, sizeof(key), "%d %p %p %d %d %d|%d %d %d %d %d|%u|", p.discard, (void*)p.vs->module, (void*)p.ps->module, int(p.topology),
                              p.rectangles, restart, p.colors[0], p.colors[1], p.colors[2], p.colors[3], p.depth, p.samples);
             for (int i = 0; i < 4; i++)
             {
@@ -1124,6 +1133,7 @@ void main() {
             vp.scissorCount = 1;
             VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
             rs.depthClampEnable = s.clipDisable;
+            rs.rasterizerDiscardEnable = p.discard;
             rs.polygonMode = s.polyMode == 1 && s.polyFront == 1 ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
             rs.cullMode = (cullable && s.cullFront ? VK_CULL_MODE_FRONT_BIT : 0) | (cullable && s.cullBack ? VK_CULL_MODE_BACK_BIT : 0);
             rs.frontFace = s.frontFaceCW ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -1188,6 +1198,108 @@ void main() {
 
         // ---------------------------------------------------------------- setup
 
+        // Import guest physical memory (a host mapping) as a Vulkan buffer, so memory export can
+        // write it directly: after the GPU finishes, the data is where the guest expects it.
+        void createExportBuffer()
+        {
+            VkDeviceSize size = mem::kPhysicalSize;
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size = size;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &g_guestMem));
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(D, g_guestMem, &req);
+            uint32_t type = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                                  VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+            if (type == UINT32_MAX) type = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = type;
+            if (type == UINT32_MAX || vkAllocateMemory(D, &mai, nullptr, &g_guestMemMemory) != VK_SUCCESS)
+            {
+                warn("[render] no memory for the memory export buffer: memory export draws are skipped");
+                vkDestroyBuffer(D, g_guestMem, nullptr);
+                g_guestMem = VK_NULL_HANDLE;
+                return;
+            }
+            VK_CHECK(vkBindBufferMemory(D, g_guestMem, g_guestMemMemory, 0));
+            VK_CHECK(vkMapMemory(D, g_guestMemMemory, 0, size, 0, (void**)&g_exportMap));
+            g_memExportReady = true;
+            info("[render] memory export: %llu MB staging buffer (stream ranges copied in and out per draw)", (unsigned long long)(size >> 20));
+        }
+
+        void importGuestMemory()
+        {
+            void* ptr = mem::physical(0);
+            VkDeviceSize size = mem::kPhysicalSize;
+            if (!C->hostMemoryImport || !C->getMemoryHostPointerProperties || (uintptr_t(ptr) % std::max(1u, C->hostPointerAlignment)))
+            {
+                if (!C->hostMemoryImport) { warn("[render] no vertex shader stores: memory export draws are skipped"); return; }
+                createExportBuffer();
+                return;
+            }
+            VkMemoryHostPointerPropertiesEXT hp{ VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
+            if (C->getMemoryHostPointerProperties(D, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr, &hp) != VK_SUCCESS)
+            {
+                createExportBuffer();
+                return;
+            }
+            VkExternalMemoryBufferCreateInfo ext{ VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+            ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.pNext = &ext;
+            bci.size = size;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &g_guestMem));
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(D, g_guestMem, &req);
+            uint32_t bits = req.memoryTypeBits & hp.memoryTypeBits, type = bits ? uint32_t(__builtin_ctz(bits)) : UINT32_MAX;
+            VkImportMemoryHostPointerInfoEXT imp{ VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT };
+            imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+            imp.pHostPointer = ptr;
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.pNext = &imp;
+            mai.allocationSize = size;
+            mai.memoryTypeIndex = type;
+            VkResult allocResult = VK_ERROR_UNKNOWN, bindResult = VK_ERROR_UNKNOWN;
+            if (type == UINT32_MAX || (allocResult = vkAllocateMemory(D, &mai, nullptr, &g_guestMemMemory)) != VK_SUCCESS ||
+                (bindResult = vkBindBufferMemory(D, g_guestMem, g_guestMemMemory, 0)) != VK_SUCCESS)
+            {
+                info("[render] guest memory not importable here (allocate %d, bind %d): using a staging buffer for memory export",
+                     int(allocResult), int(bindResult));
+                vkDestroyBuffer(D, g_guestMem, nullptr);
+                g_guestMem = VK_NULL_HANDLE;
+                createExportBuffer();
+                return;
+            }
+            g_memExportReady = true;
+            info("[render] guest physical memory imported (%llu MB) for memory export", (unsigned long long)(size >> 20));
+        }
+
+        // Submit what is recorded and wait for it, then keep recording in the same frame context
+        // (memory export results must be in guest memory before later draws copy vertex data
+        // from it or the CPU reads it)
+        void flushAndWait()
+        {
+            endPass();
+            Frame& f = frame();
+            if (!f.recording) return;
+            VK_CHECK(vkEndCommandBuffer(f.cmd));
+            f.recording = false;
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &f.cmd;
+            {
+                std::lock_guard guard(C->queueLock);
+                VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.fence));
+            }
+            VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
+            VK_CHECK(vkResetFences(D, 1, &f.fence));
+            f.submitted = false;
+            VK_CHECK(vkResetCommandPool(D, f.pool, 0));
+            f.used = 0; // everything recorded so far has executed
+        }
+
         bool ready()
         {
             if (g_disabled || g_failed) return false;
@@ -1195,6 +1307,7 @@ void main() {
             C = vkctx::get();
             if (!C) { g_failed = true; return false; }
             D = C->device;
+            importGuestMemory();
 
             g_compiler = shaderc_compiler_initialize();
             g_options = shaderc_compile_options_initialize();
@@ -1206,15 +1319,16 @@ void main() {
 
             // set 0: guest data + constants (one set per frame in flight, constants by dynamic
             // offset); set 1: 32 textures, pushed per draw (a layout may have one push set only)
-            VkDescriptorSetLayoutBinding b0[4]{};
-            for (uint32_t i = 0; i < 4; i++)
-                b0[i] = { i, i ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+            // binding 4: guest physical memory, written by memory export
+            VkDescriptorSetLayoutBinding b0[5]{};
+            for (uint32_t i = 0; i < 5; i++)
+                b0[i] = { i, (i == 0 || i == 4) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
             VkDescriptorSetLayoutBinding b1[32]{};
             for (uint32_t i = 0; i < 32; i++)
                 b1[i] = { i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
             VkDescriptorSetLayoutCreateInfo dl{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-            dl.bindingCount = 4;
+            dl.bindingCount = 5;
             dl.pBindings = b0;
             VK_CHECK(vkCreateDescriptorSetLayout(D, &dl, nullptr, &g_setLayouts[0]));
             dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
@@ -1257,7 +1371,7 @@ void main() {
                 VK_CHECK(vkBindBufferMemory(D, f.upload, f.uploadMemory, 0));
                 VK_CHECK(vkMapMemory(D, f.uploadMemory, 0, kUploadSize, 0, (void**)&f.uploadMap));
 
-                VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3 } };
+                VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 }, { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3 } };
                 VkDescriptorPoolCreateInfo dpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
                 dpi.maxSets = 1;
                 dpi.poolSizeCount = 2;
@@ -1268,18 +1382,20 @@ void main() {
                 dai.descriptorSetCount = 1;
                 dai.pSetLayouts = &g_setLayouts[0];
                 VK_CHECK(vkAllocateDescriptorSets(D, &dai, &f.buffers));
-                VkDescriptorBufferInfo bufs[4] = { { f.upload, 0, kUploadSize }, { f.upload, 0, 4096 }, { f.upload, 0, 4096 }, { f.upload, 0, 928 } };
-                VkWriteDescriptorSet w[4]{};
-                for (uint32_t i = 0; i < 4; i++)
+                VkDescriptorBufferInfo bufs[5] = { { f.upload, 0, kUploadSize }, { f.upload, 0, 4096 }, { f.upload, 0, 4096 }, { f.upload, 0, 928 },
+                                                   g_memExportReady ? VkDescriptorBufferInfo{ g_guestMem, 0, mem::kPhysicalSize }
+                                                                    : VkDescriptorBufferInfo{ f.upload, 0, 256 } };
+                VkWriteDescriptorSet w[5]{};
+                for (uint32_t i = 0; i < 5; i++)
                 {
                     w[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
                     w[i].dstSet = f.buffers;
                     w[i].dstBinding = i;
                     w[i].descriptorCount = 1;
-                    w[i].descriptorType = i ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    w[i].descriptorType = (i == 0 || i == 4) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
                     w[i].pBufferInfo = &bufs[i];
                 }
-                vkUpdateDescriptorSets(D, 4, w, 0, nullptr);
+                vkUpdateDescriptorSets(D, 5, w, 0, nullptr);
             }
             info("[render] Vulkan renderer ready");
             return true;
@@ -1495,7 +1611,36 @@ void main() {
                         (color[i] = target({ s.color[i].edramBase, s.surfacePitch, s.msaaSamples, s.color[i].format, false })))
                         formats[i] = color[i]->format;
             Image* depth = (s.depthTest || s.stencil) ? target({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true }) : nullptr;
-            if (!depth && !color[0] && !color[1] && !color[2] && !color[3]) return true; // nothing to write (e.g. masked point draws)
+            // Memory export: the shader writes guest memory (GPU skinning, particles...). Without
+            // render targets it is a "compute" draw with rasterization discarded.
+            bool memExport = vs->t.memExport || ps->t.memExport;
+            if (memExport && !g_memExportReady) { warnOnce("memory export draw skipped (guest memory not imported)"); return true; }
+            bool noTargets = !depth && !color[0] && !color[1] && !color[2] && !color[3];
+            if (memExport && g_exportMap && !(vs->t.memExportStreams[0] | vs->t.memExportStreams[1] | vs->t.memExportStreams[2] |
+                                              vs->t.memExportStreams[3] | vs->t.memExportStreams[4] | vs->t.memExportStreams[5] |
+                                              vs->t.memExportStreams[6] | vs->t.memExportStreams[7]))
+            {
+                warnOnce("memory export without a recognizable stream constant (mad eA, r#, const0100, c#): draw skipped");
+                return true;
+            }
+            if (noTargets && !memExport) return true; // nothing to write (e.g. masked point draws)
+            std::vector<std::pair<uint32_t, uint32_t>> exportRanges; // (physical address, bytes)
+            if (memExport)
+                for (uint32_t c = 0; c < 256; c++)
+                {
+                    if (!((vs->t.memExportStreams[c / 32] >> (c % 32)) & 1)) continue;
+                    uint32_t r = kAluConstants + std::min(s.vsConstBase * 4 + c * 4, 2044u);
+                    uint32_t x = readRegister(r), z = readRegister(r + 2), w = readRegister(r + 3);
+                    static const uint8_t sizes[64] = { 0, 0, 1, 0, 0, 0, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4,
+                                                       8, 0, 0, 0, 2, 4, 8, 4, 8, 16, 4, 8, 16 }; // as xeElementSize() in the shader
+                    uint64_t start = uint64_t(x & 0x3FFFFFFF) << 2, bytes = uint64_t(w & 0x7FFFFF) * sizes[(z >> 8) & 0x3F];
+                    if (bytes && start < mem::kPhysicalSize)
+                        exportRanges.push_back({ uint32_t(start), uint32_t(std::min<uint64_t>(bytes, mem::kPhysicalSize - start)) });
+                    static std::set<std::pair<uint32_t, uint32_t>> seen;
+                    if (seen.insert({ x, z }).second)
+                        info("[render] memory export stream c%u: base %08X, %u elements, format %u (number format %u, endian %u%s)", c,
+                             (x & 0x3FFFFFFF) << 2, w & 0x7FFFFF, (z >> 8) & 0x3F, (z >> 16) & 7, z & 7, (z >> 19) & 1 ? ", red/blue swap" : "");
+                }
 
             // Snapshot guest data into the upload buffer: constants, vertex data, indices
             Frame& f = frame();
@@ -1556,15 +1701,18 @@ void main() {
             VkExtent2D guestExtent{ UINT32_MAX, UINT32_MAX };
             for (Image* t : { color[0], color[1], color[2], color[3], depth })
                 if (t) guestExtent = { std::min(guestExtent.width, t->width / g_scale), std::min(guestExtent.height, t->height / g_scale) };
-            VkRect2D guestScissor;
-            if (!scissorRect(s, guestExtent, guestScissor)) return true;
-            for (Image* t : { color[0], color[1], color[2], color[3], depth }) syncTarget(t, guestScissor); // EDRAM aliasing
+            VkRect2D guestScissor{ { 0, 0 }, { 1, 1 } };
+            if (!noTargets)
+            {
+                if (!scissorRect(s, guestExtent, guestScissor)) return true;
+                for (Image* t : { color[0], color[1], color[2], color[3], depth }) syncTarget(t, guestScissor); // EDRAM aliasing
+            }
 
             beginPass(color, depth);
-            VkRect2D scissor = scaled(guestScissor);
+            VkRect2D scissor = noTargets ? VkRect2D{ { 0, 0 }, { 1, 1 } } : scaled(guestScissor);
             VkCommandBuffer c = f.cmd;
             VkPipeline pl = pipeline({ &s, vs, ps, topology, rectangles, { formats[0], formats[1], formats[2], formats[3] }, depth != nullptr,
-                                       s.msaaSamples });
+                                       s.msaaSamples, noTargets });
             vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
 
             uint32_t dynamicOffsets[3] = { uint32_t(constants), uint32_t(constants + 4096), uint32_t(constants + 8192) };
@@ -1624,6 +1772,22 @@ void main() {
             }
             else
                 vkCmdDraw(c, s.indexCount, 1, 0, 0);
+            if (memExport && g_exportMap)
+                for (auto [start, bytes] : exportRanges) std::memcpy(g_exportMap + start, mem::physical(start), bytes);
+            if (memExport)
+            {
+                // Make the shader's writes to guest memory visible to the host and later draws,
+                // and wait for them: later draws snapshot guest memory when they are recorded
+                endPass();
+                VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+                vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                     VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+                flushAndWait();
+                if (g_exportMap)
+                    for (auto [start, bytes] : exportRanges) std::memcpy(mem::physical(start), g_exportMap + start, bytes);
+            }
             for (int i = 0; i < 4; i++) markWritten(color[i], guestScissor);
             if (depth && (s.depthWrite || s.stencil)) markWritten(depth, guestScissor);
             g_drawsInFrame++;
