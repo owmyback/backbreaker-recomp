@@ -46,10 +46,16 @@ included or provided here. Below, `<iso>` is the path to your image.
     mkdir -p ppc && third_party/XenonRecomp/build/XenonRecomp/XenonRecomp config/backbreaker.toml third_party/XenonRecomp/XenonUtils/ppc_context.h
 
 ## Tests
-No game files needed; CI runs this on every push (`.github/workflows/ci.yml`):
+No game files needed; CI runs these on every push (`.github/workflows/ci.yml`):
 
     X=third_party/XenonRecomp
     mkdir -p build && clang++ -std=c++20 -O2 -march=x86-64-v3 -I tests/ppc_config_stub -I $X/XenonUtils -I $X/thirdparty/simde tests/instr_semantics.cpp -o build/instr_semantics && build/instr_semantics
+
+Tiled 2D addressing (`runtime/gpu/tiling.h`, issue #12) is header-only, so nothing else is needed.
+Build both translation units - `tests/tiling_test_odr.cpp` is what catches a definition in the
+header that is not inline:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/tiling_test.cpp tests/tiling_test_odr.cpp -o build/tiling_test && build/tiling_test
 
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 

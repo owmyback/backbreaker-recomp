@@ -242,8 +242,21 @@ render targets, the host viewport, scissors, resolve rectangles and clears by N 
 still renders "1280x720"; the guest viewport math stays in guest pixels. Checked: the attract
 movie at 3x renders a full 3840x2160 front buffer at 30 fps.
 
+**Tiled 2D addressing (`runtime/gpu/tiling.h`, issue #12).** The byte offset of a block in a tiled
+surface, following Xenia's `texture_address::Tiled2D` (BSD, docs/licenses/xenia-LICENSE.txt): the
+32x32 macro tile origin plus the micro tile position carried by the bank/pipe bits, for block sizes
+1, 2, 4, 8 and 16 bytes. `tile2D`/`untile2D` move a whole surface between the tiled storage and
+row-major order, and `tiledUpperBound2D` gives the bytes a tiled surface really occupies - the
+address span (0xA00 and 0xC00 past a tile origin for 1 and 2 bytes per block), which is what buffer
+sizing needs. Checked by `tests/tiling_test.cpp` and `tests/tiling_test_odr.cpp` (run in CI): spot
+values hand-verified against Xenia, round-trip identity for aligned and non-aligned sizes, the
+offsets of a pitch-aligned surface forming a permutation, and the header building in two
+translation units (everything in it is inline/constexpr). Not used by the renderer or the presenter
+yet.
+
 Remaining steps:
-1. Tiled textures (needs #12's untiling), more texture formats, mip levels, 1D/3D/cube.
+1. Tiled textures (the untiling helper from #12 exists - see above; the renderer still uploads tiled
+   textures as placeholders), more texture formats, mip levels, 1D/3D/cube.
    Then the logo screens and the 3D title scene should appear.
 2. Resolves written back to guest memory (render-to-texture through memory, CPU reads), the
    resolve rectangle from the vertex data, depth resolves, EDRAM aliasing between targets.
