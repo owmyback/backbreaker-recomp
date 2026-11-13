@@ -75,13 +75,22 @@ Subsystems:
   the picture is black because nothing renders into the front buffer yet. Window size, position
   and fullscreen state are read from `game/settings.ini` (issue #9)
 - `runtime/gpu/` - Vd* imports, PM4 command processor, register file at 0x7FC80000, 60 Hz vblank
-  interrupt; MMIO stores reach it through `runtime/ppc_hooks.h` (force-included into ppc/)
+  interrupt; MMIO stores reach it through `runtime/ppc_hooks.h` (force-included into ppc/).
+  Predicated tiling is honored: `SET_BIN_MASK`/`SET_BIN_SELECT` (and their `_LO`/`_HI` halves)
+  set 64-bit masks, and a packet with the predicate bit (header bit 0) is skipped unless
+  `select & mask` is non-zero, as in Xenia. D3D's replayed command buffers depend on it: without
+  it, the GPU->CPU callback that queues D3D's worker job fired on every replay (3000+ times),
+  the job's pending count went negative and match loading hung
 - `runtime/apu/` - XAudio render driver clock (256 samples @ 48 kHz), frames discarded
 - `runtime/apu/xma.cpp` - XMA decoder: 320-context array (register 0x600), kick/lock/clear
   registers (0x650/0x690/0x6A0), decoder thread that walks packets frame by frame and writes
   SILENCE of the right length (real XMA2 decoding needs a WMA Pro capable decoder)
 - `runtime/hid/` - one neutral pad on user 0, no keystrokes
 - `runtime/kernel/xam.cpp` - notifications, local profile "Player", profile settings (empty values)
+- `runtime/kernel/xnet.cpp` - networking, offline: XNet/WSA startup succeeds, no Ethernet link,
+  DNS lookups fail (the game looks up "localhost" when a match loads), `WSACreateEvent` returns a
+  real event (as Xenia's xam_net.cc). Sockets are not implemented yet: the game creates and binds
+  UDP/TCP sockets and copes with the default stub (returns 0), but crashes if `socket()` fails
 - `runtime/kernel/scopes.cpp` - the game's compiled-out profiler markers carry function names;
   crash and timeout reports list each thread's recent scopes
 - `runtime/debug/guest_trace.cpp` - GUEST_TRACE(addr) wraps a guest function to log args/result

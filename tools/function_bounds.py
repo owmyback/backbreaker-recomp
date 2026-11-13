@@ -7,8 +7,9 @@
    function starts around it and verify every case label is inside.
 2. Pointer-only functions: functions never called directly (vtables, callbacks, exception
    funclets) are invisible to the analyzer. Code pointers stored in .rdata/.data that land
-   right after padding, a blr or an unconditional branch, and are not a known function
-   start, become explicit functions bounded by the next function start.
+   right after padding, a blr, an unconditional branch or a bctr (a tail call through a
+   register, e.g. vtable thunks packed back to back), and are not a known function start or
+   switch case label, become explicit functions bounded by the next function start.
 
 Usage: function_bounds.py default.pe switch_tables.toml config.toml [ppc_func_mapping.cpp]
 The optional mapping (from a previous XenonRecomp run) adds the analyzer's own function
@@ -51,7 +52,7 @@ def data_sections(pe):
     return out
 
 
-def pointer_functions(pe, known):
+def pointer_functions(pe, known, case_labels):
     code = [(pe.base + va, pe.base + va + vs) for va, vs in pe.code]
     found = set()
     for va, vs in data_sections(pe):
@@ -60,7 +61,9 @@ def pointer_functions(pe, known):
             if v & 3 or v in known or not any(s <= v < e for s, e in code):
                 continue
             prev = pe.w(v - 4)
-            if prev == 0 or prev == 0x4E800020 or (prev >> 26 == 18 and not prev & 1):
+            if prev == 0x4E800420 and v in case_labels:
+                continue  # word jump tables in .rdata hold case addresses, often right after a bctr
+            if prev == 0 or prev in (0x4E800020, 0x4E800420) or (prev >> 26 == 18 and not prev & 1):
                 found.add(v)
     return sorted(found)
 
@@ -77,8 +80,9 @@ def main(pe_path, switch_path, config_path, mapping_path=None):
     starts = [s for s, _ in pe.funcs]
     known = set(starts) | set(call_targets(pe))
     if mapping_path:
-        known |= {int(a, 16) for a in re.findall(r'0x([0-9A-F]{8}), sub', open(mapping_path).read())}
-    pointers = pointer_functions(pe, known)
+        # the previous run's functions, import thunks (__imp__) included
+        known |= {int(a, 16) for a in re.findall(r'0x([0-9A-F]{8}), (?:sub|__imp__)', open(mapping_path).read())}
+    pointers = pointer_functions(pe, known, {l for _, labels in tables for l in labels})
     calls = sorted(set(call_targets(pe)) | set(pointers))
     funcs = {}
     problems = []

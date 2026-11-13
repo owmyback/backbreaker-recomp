@@ -36,8 +36,16 @@ namespace gpu
             PM4_MEM_WRITE = 0x3D, PM4_REG_TO_MEM = 0x3E, PM4_INDIRECT_BUFFER = 0x3F,
             PM4_COND_WRITE = 0x45, PM4_EVENT_WRITE = 0x46, PM4_ME_INIT = 0x48,
             PM4_INTERRUPT = 0x54, PM4_SET_CONSTANT2 = 0x55, PM4_EVENT_WRITE_SHD = 0x58,
-            PM4_EVENT_WRITE_EXT = 0x5A, PM4_EVENT_WRITE_ZPD = 0x5B,
+            PM4_EVENT_WRITE_EXT = 0x5A, PM4_EVENT_WRITE_ZPD = 0x5B, PM4_SET_BIN_MASK = 0x50,
+            PM4_SET_BIN_SELECT = 0x51, PM4_SET_BIN_MASK_LO = 0x60, PM4_SET_BIN_MASK_HI = 0x61,
+            PM4_SET_BIN_SELECT_LO = 0x62, PM4_SET_BIN_SELECT_HI = 0x63,
         };
+
+        // Predicated tiling: D3D replays a command buffer once per screen tile ("bin"); packets with
+        // the predicate bit (header bit 0) only run when the selected bins overlap the bin mask.
+        // Both start as 0xFFFFFFFF, as in Xenia's command_processor.h. Only the command processor
+        // thread uses them.
+        uint64_t g_binMask = 0xFFFFFFFFull, g_binSelect = 0xFFFFFFFFull;
 
         // Register file lives in guest memory (big-endian) so CPU MMIO reads see it directly.
         inline uint32_t* regPtr(uint32_t i) { return (uint32_t*)host(kGpuMmioBase + i * 4); }
@@ -138,6 +146,22 @@ namespace gpu
             uint32_t count = ((header >> 16) & 0x3FFF) + 1;
             g_packets++;
             capture::onPacket(op);
+            if (header & 1)
+            {
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    info("[gpu] predicated packets in use (bin mask %016llX, select %016llX)", (unsigned long long)g_binMask,
+                         (unsigned long long)g_binSelect);
+                }
+                // A predicated swap is never valid (Xenia skips it too)
+                if (!(g_binSelect & g_binMask) || op == PM4_XE_SWAP)
+                {
+                    r.skip(count);
+                    return;
+                }
+            }
             switch (op)
             {
             case PM4_INDIRECT_BUFFER:
@@ -334,8 +358,30 @@ namespace gpu
                 video::publishFrame(g_frontBuffer, g_frontWidth, g_frontHeight, g_frames);
                 return;
             }
+            case PM4_SET_BIN_MASK:
+            case PM4_SET_BIN_SELECT:
+            {
+                uint64_t hi = r.next(), lo = r.next();
+                r.skip(count - 2);
+                (op == PM4_SET_BIN_MASK ? g_binMask : g_binSelect) = (hi << 32) | lo;
+                return;
+            }
+            case PM4_SET_BIN_MASK_LO:
+            case PM4_SET_BIN_MASK_HI:
+            case PM4_SET_BIN_SELECT_LO:
+            case PM4_SET_BIN_SELECT_HI:
+            {
+                uint64_t v = r.next();
+                r.skip(count - 1);
+                uint64_t& target = (op == PM4_SET_BIN_MASK_LO || op == PM4_SET_BIN_MASK_HI) ? g_binMask : g_binSelect;
+                if (op == PM4_SET_BIN_MASK_LO || op == PM4_SET_BIN_SELECT_LO)
+                    target = (target & 0xFFFFFFFF00000000ull) | v;
+                else
+                    target = (target & 0xFFFFFFFFull) | (v << 32);
+                return;
+            }
             default:
-                // ME_INIT, NOP, IM_LOAD*, INVALIDATE_STATE, VIZ_QUERY, WAIT_FOR_IDLE, bin setup, ...
+                // ME_INIT, NOP, IM_LOAD*, INVALIDATE_STATE, VIZ_QUERY, WAIT_FOR_IDLE, ...
                 r.skip(count);
                 return;
             }

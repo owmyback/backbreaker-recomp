@@ -10,7 +10,7 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9 done; setup script, phase 10 started)
+Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9 done; setup script, phase 10 started; an Exhibition match loads and reaches the kickoff)
 
 ## Current state
 
@@ -19,20 +19,27 @@ boots the game through its full initialization and renders it with Vulkan: the m
 screen, the attract movie and the title screen. With scripted button presses (`--press "a@20,a@26"`)
 the game leaves the title screen, picks the (emulated) hard drive, creates or loads its saves
 ("Profile Options", "Custom Teams" in `game/saves/`) and reaches the **main menu** (Training
-Camp, Exhibition, Leagues, Tackle Alley, Xbox LIVE). Next: controller input (phase 5, #6) to
-actually play. Audio is still silence.
+Camp, Exhibition, Leagues, Tackle Alley, Xbox LIVE). Controllers work (phase 5). **Exhibition**
+goes through side select, team select and stadium options, loads the match ("Loading..." with
+both teams' star players) and reaches the **kickoff**: the play call ("Choose a Play") and the
+kicker's aim ("Pull back and release to kick"), with the scoreboard, clock and wind. The 3D view
+is still the magenta placeholder (texture formats 3, 22, 32 and 36, and depth resolves, are not
+supported yet). Audio is still silence.
 
-**Current blocker (2026-11-13):** after Exhibition's side select, match loading hangs (the screen
-keeps showing the side-select menu). Found with `--sample-threads`: the main thread spins in
-`sub_824103C8` until the Direct3D device's pending GPU-callback count (`device + 0x2B04`) drops
-to 0. It was raised once by `sub_8241D778`, which submits a GPU->CPU callback handshake (scratch
-registers + `WAIT_REG_MEM` + `INTERRUPT`); the callback queues work for a per-CPU worker
-(`sub_8241D5E0` -> `sub_8241D320`), which re-arms another handshake instead of releasing the
-count. The handshake itself works (each run is acknowledged); whatever condition the job waits
-for is never met. Fixed on the way: `KeSetAffinityThread` (the per-CPU workers need their CPU
-number in the PCR) and GPU skinning through memory export (the match load skins the players with
-`vs_f4d7b7690397f218`; positions and normals now come out right, but the hang is unchanged). Next:
-reverse the job in `sub_8241D320` to find the condition it waits for.
+**Current blocker (2026-11-13):** during the match the game's memory keeps growing. Idle at the
+kicker's aim, its heap reserves another ~256 MB segment every ~20 s (virtual memory in use: 144 MB
+at kickoff, 848 MB a minute later) until an allocation of 0x30084 bytes fails and the game's
+out-of-memory handler (`sub_826425E0`, called from the allocator `sub_8264B900`) crashes on
+purpose. A real console has 512 MB in all, so something under emulation is allocated per frame
+and never freed; a suspect is a free that waits for a GPU fence our command processor never
+signals. Next: hook the allocator and total allocations by caller.
+
+Fixed on the way to the kickoff: GPU skinning through memory export; predicated tiling in the
+command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
+side-select load hung); offline networking (XNet/WSA startup, DNS); a byte-offset jump table
+whose bounds check is on a copy of the index register; vtable thunks packed after a `bctr`; a
+failed virtual reservation now returns `STATUS_NO_MEMORY` (the heap halves the request and
+retries) instead of aborting; and `KeSetAffinityThread` (CPU number in the PCR).
 
 ## Phase overview
 
@@ -86,10 +93,13 @@ Goal: every guest function translates to C++ that compiles.
   - fixes: `bdnzf` assumed the `eq` bit; `vcmpgtuh.` record form; CTR branches into other
     functions; integer division guarded (x86 traps on /0 and INT_MIN/-1, PowerPC does not)
 - `tools/find_switch_tables.py`: XenonAnalyse found 0 jump tables (Backbreaker's compiler orders
-  instructions differently and pads with nops); ours finds 438, including inline tables without
-  a bounds check.
-- `tools/function_bounds.py`: explicit bounds for 48 leaf functions with switches (no `.pdata`
-  entry) and 11 functions reachable only through pointers (vtables, exception funclets).
+  instructions differently and pads with nops); ours finds 439, including inline tables without
+  a bounds check and bounds checks on the register the index was copied from (`mr r28,r3` then
+  `cmplwi r3`; the one at `0x8230C9E4` runs while a match loads).
+- `tools/function_bounds.py`: explicit bounds for leaf functions with switches (no `.pdata`
+  entry) and functions reachable only through pointers (vtables, exception funclets, and vtable
+  thunks packed back to back after a `bctr`, like `0x8243A4D8`, called when a play starts):
+  58 entries in `config/backbreaker.toml`.
 - Register save/restore helpers located by byte pattern (`config/backbreaker.toml`).
 - Result: 30,000+ functions -> 116 C++ files, 0 recompiler warnings, all compile with clang.
 - Tests: `tests/instr_semantics.cpp` checks the byte-order-sensitive vector ops and carry

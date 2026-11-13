@@ -40,7 +40,15 @@ GUEST_IMPORT(NtAllocateVirtualMemory)
         return;
     }
 
-    uint32_t addr = virtualAlloc(size, page < 0x10000 ? 0x10000 : page);
+    // A full address space is an ordinary failure: the game's heap reserves segments of doubling
+    // size and, when one doesn't fit, halves the request and retries (sub_82405308)
+    uint32_t addr = tryVirtualAlloc(size, page < 0x10000 ? 0x10000 : page);
+    if (!addr)
+    {
+        info("NtAllocateVirtualMemory: no room for 0x%X bytes (type %X): STATUS_NO_MEMORY", size, type);
+        ctx.r3.u64 = STATUS_NO_MEMORY;
+        return;
+    }
     recordAllocation(addr, size, protect ? protect : kProtectReadWrite, "NtAllocateVirtualMemory", uint32_t(ctx.lr));
     write32(pBase, addr);
     write32(pSize, size);

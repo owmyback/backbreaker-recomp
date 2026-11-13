@@ -2536,6 +2536,27 @@ labels = [
     0x8230B624,
 ]
 
+# bctr 0x8230C9E4  lbzx  table 0x8204C3C8
+[[switch]]
+base = 0x8230C9C0
+r = 28
+default = 0x8230CABC
+labels = [
+    0x8230C9E8,
+    0x8230C9F8,
+    0x8230CA08,
+    0x8230CA18,
+    0x8230CA28,
+    0x8230CA38,
+    0x8230CA48,
+    0x8230CA58,
+    0x8230CA70,
+    0x8230CA80,
+    0x8230CA90,
+    0x8230CAA0,
+    0x8230CAB0,
+]
+
 # bctr 0x8230D63C  lbzx  table 0x8204C3D8
 [[switch]]
 base = 0x8230D618

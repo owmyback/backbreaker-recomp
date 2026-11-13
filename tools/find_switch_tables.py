@@ -5,6 +5,7 @@ Handles the codegen used by Backbreaker, which XenonAnalyse misses:
   * instruction order lis / rlwinm / addi / lwzx (rlwinm scheduled between lis and addi)
   * nop (ori r0,r0,0) padding interleaved in the sequence
   * byte (lbzx) and halfword (lhzx) offset tables, with or without a shift
+  * a bounds check on the register the index was copied from (mr rIdx, rN ... cmplwi rN)
 
 Usage: find_switch_tables.py default.pe out.toml
 """
@@ -100,6 +101,8 @@ def decode(w):
         x = (w >> 1) & 0x3FF
         if x in (23, 87, 279, 266):
             return ({23: 'lwzx', 87: 'lbzx', 279: 'lhzx', 266: 'add'}[x], dict(rt=rt, ra=ra, rb=rb))
+        if x == 444:  # or ra, rs, rb ("mr ra, rs" when rs == rb)
+            return ('or', dict(rs=rt, ra=ra, rb=rb))
         if x == 467 and (((w >> 16) & 31) | (((w >> 11) & 31) << 5)) == 9:
             return ('mtctr', dict(rs=rt))
     return ('?', {})
@@ -123,14 +126,39 @@ def is_gt_branch(name, f):
     return name in ('bc', 'bclr') and f['bi'] & 3 == 1 and f['bo'] in (12, 4)
 
 
+def written_register(name, f):
+    """Register an instruction writes, None if none, or -1 if unknown (not decoded)."""
+    if name in ('lis', 'addis', 'addi', 'lwzx', 'lbzx', 'lhzx', 'add'):
+        return f['rt']
+    if name in ('rlwinm', 'or'):
+        return f['ra']
+    if name in ('cmplwi', 'bc', 'bclr', 'mtctr'):
+        return None
+    return -1
+
+
 def find_compare(pe, start, idx_reg, limit=120):
     """Walk back from start for `cmplwi crN, idx_reg, max` that is followed by a bgt/ble on crN.
 
     The bounds check is usually right before the table code, but the compiler sometimes
-    schedules it dozens of instructions earlier, so we key on the index register.
+    schedules it dozens of instructions earlier, so we key on the index register. It may also
+    test the register the index was copied from (`mr idx_reg, rN` earlier, then `cmplwi rN`):
+    that counts when nothing between the copy and the compare can write rN.
     """
     a = start
     branches = []  # (addr, name, fields) seen so far, walking backwards
+    others = []    # compares on other registers: [result, register, clobbered]
+
+    def guarded(f, a):
+        # the earliest gt-branch after the compare on the same cr guards the table
+        for ba, bn, bf in reversed(branches):
+            if bf['bi'] >> 2 == f['cr']:
+                default = 0
+                if bn == 'bc':
+                    default = ba + bf['bd'] if bf['bo'] == 12 else ba + 4
+                return f['ra'], f['imm'] + 1, default, a
+        return None
+
     for _ in range(limit):
         a -= 4
         w = pe.w(a)
@@ -141,15 +169,22 @@ def find_compare(pe, start, idx_reg, limit=120):
             branches.append((a, name, f))
             continue
         if name == 'cmplwi' and (idx_reg is None or f['ra'] == idx_reg):
-            # the earliest gt-branch after the compare on the same cr guards the table
-            for ba, bn, bf in reversed(branches):
-                if bf['bi'] >> 2 == f['cr']:
-                    default = 0
-                    if bn == 'bc':
-                        default = ba + bf['bd'] if bf['bo'] == 12 else ba + 4
-                    return f['ra'], f['imm'] + 1, default, a
-            if idx_reg is None:
-                return None
+            r = guarded(f, a)
+            if r is not None or idx_reg is None:
+                return r
+            continue
+        if name == 'or' and idx_reg is not None and f['ra'] == idx_reg and f['rs'] == f['rb']:
+            for r, reg, clobbered in others:
+                if reg == f['rs'] and not clobbered:
+                    return (idx_reg,) + r[1:]
+        written = written_register(name, f)
+        for o in others:
+            if written == -1 or written == o[1]:
+                o[2] = True
+        if name == 'cmplwi' and idx_reg is not None:
+            r = guarded(f, a)
+            if r is not None:
+                others.append([r, f['ra'], False])
     return None
 
 

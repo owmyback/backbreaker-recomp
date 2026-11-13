@@ -48,7 +48,8 @@ namespace mem
 
             Heap(const char* n, uint32_t b, uint32_t e) : name(n), begin(b), end(e) { freeRanges[b] = e - b; }
 
-            uint32_t alloc(size_t size, size_t align)
+            // Returns 0 when nothing fits and !mustFit; aborts otherwise
+            uint32_t alloc(size_t size, size_t align, bool mustFit = true)
             {
                 std::lock_guard guard(lock);
                 size = (size + 15) & ~size_t(15);
@@ -68,6 +69,8 @@ namespace mem
                     memset(base + a, 0, size);
                     return uint32_t(a);
                 }
+                if (!mustFit)
+                    return 0;
                 fatal("out of %s memory (want 0x%zX bytes, %llu MB in use)", name, size, (unsigned long long)(inUse >> 20));
             }
 
@@ -160,6 +163,7 @@ namespace mem
 
     uint32_t kernelAlloc(size_t size, size_t align) { return g_kernel.alloc(size, align); }
     uint32_t virtualAlloc(size_t size, size_t align) { return g_virtual.alloc(size, align); }
+    uint32_t tryVirtualAlloc(size_t size, size_t align) { return g_virtual.alloc(size, align, false); }
     uint32_t physicalAlloc(size_t size, size_t align) { return g_physical.alloc(size, align); }
 
     void forgetAllocation(uint32_t b)

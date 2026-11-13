@@ -26,6 +26,8 @@ namespace mem
     // Zeroed allocations; return a guest address. Abort on exhaustion.
     uint32_t kernelAlloc(size_t size, size_t align = 16);
     uint32_t virtualAlloc(size_t size, size_t align = 0x10000);
+    // As virtualAlloc, but returns 0 instead of aborting when the address space is full
+    uint32_t tryVirtualAlloc(size_t size, size_t align = 0x10000);
     uint32_t physicalAlloc(size_t size, size_t align = 0x1000);
     // Return an allocation to its heap (exact start address). False if it isn't one.
     bool virtualFree(uint32_t guest);
