@@ -9,6 +9,8 @@ namespace gpu::render
 {
     void disable();                         // --no-render: command stream side effects only
     void requestScreenshot(uint64_t frame); // write screenshots/frame_<N>.png when swap N is rendered
+    // Internal resolution multiplier, 1-4 (2 = 2560x1440, 3 = 3840x2160 for the game's 1280x720)
+    void setResolutionScale(uint32_t scale);
 
     void onShaderLoad(uint32_t type, const uint32_t* bigEndianWords, uint32_t dwords);
     // indexBase / indexSizeWord: DRAW_INDX DMA index buffer (physical address, VGT_DMA_SIZE)

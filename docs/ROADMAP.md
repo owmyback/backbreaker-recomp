@@ -237,12 +237,20 @@ game's draws on the host GPU. The attract movie renders correctly (checked with
   asked. Linear textures (8, 8_8, 8_8_8_8, DXT1/3/5) upload once per frame they are used.
 - `--screenshot N` writes PNGs (headless too); `--no-render` turns the renderer off.
 
+**Step 6 - Internal resolution scaling (`STEP6`).** `--resolution-scale N` (1-4) multiplies
+render targets, the host viewport, scissors, resolve rectangles and clears by N while the game
+still renders "1280x720"; the guest viewport math stays in guest pixels. Checked: the attract
+movie at 3x renders a full 3840x2160 front buffer at 30 fps.
+
 Remaining steps:
 1. Tiled textures (needs #12's untiling), more texture formats, mip levels, 1D/3D/cube.
    Then the logo screens and the 3D title scene should appear.
 2. Resolves written back to guest memory (render-to-texture through memory, CPU reads), the
    resolve rectangle from the vertex data, depth resolves, EDRAM aliasing between targets.
-3. Internal resolution scaling (goal: 1440p/4K).
+3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
+   clears (`--resolution-scale N`, step 6). Still to check once 3D scenes render: effects that
+   depend on pixel size (blur, bloom, shadow maps, half-pixel offsets in post-processing), and
+   scaling resolves back down when they are written to guest memory.
 4. Shader translation: remaining control flow and features as gameplay shaders need them;
    point sprites; pixel shader param_gen.
 5. Performance: texture write-watching instead of per-frame uploads, finer barriers.

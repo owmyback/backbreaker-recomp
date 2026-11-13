@@ -184,6 +184,8 @@ int main(int argc, char** argv)
             headless = true;
         else if (a == "--no-render")
             gpu::render::disable();
+        else if (a == "--resolution-scale" && i + 1 < argc)
+            gpu::render::setResolutionScale(uint32_t(std::atoi(argv[++i])));
         else if (a == "--screenshot" && i + 1 < argc)
         {
             // frame numbers, comma-separated: --screenshot 600,1200 -> screenshots/frame_600.png, ...

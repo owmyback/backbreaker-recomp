@@ -24,6 +24,10 @@ shaderc on first use, EDRAM render targets are Vulkan images, resolves copy into
 their guest address, and the presenter shows the image resolved to the front buffer.
 - `--screenshot N[,N...]` writes `screenshots/frame_N.png` (the front buffer of swap N; works
   headless). `screenshots/` is gitignored - pictures of the game are not committed.
+- `--resolution-scale N` (1-4) renders at N times the game's resolution: 2 = 2560x1440,
+  3 = 3840x2160. The game still sees 1280x720; render targets, viewports, scissors, resolves and
+  clears are scaled. (The attract movie itself is a 1280x720 video, so it only gets smoother
+  scaling; 3D scenes are where the extra resolution shows.)
 - `--no-render` turns the renderer off (command stream side effects only, as in phase 3).
 - Unsupported textures (tiled ones, for now) show as magenta, and unsupported features log one
   `[render] WARNING` each.

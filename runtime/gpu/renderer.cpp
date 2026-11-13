@@ -42,6 +42,13 @@ namespace gpu::render
         constexpr uint32_t kConstantsSize = 4096 * 2 + 928;           // vs, ps, then bool/loop/fetch
 
         bool g_disabled = false, g_failed = false;
+        // Internal resolution scale: render targets and everything drawn into them are this many
+        // times larger than the guest's (the game still sees 1280x720)
+        uint32_t g_scale = 1;
+        VkRect2D scaled(VkRect2D r)
+        {
+            return { { r.offset.x * int32_t(g_scale), r.offset.y * int32_t(g_scale) }, { r.extent.width * g_scale, r.extent.height * g_scale } };
+        }
         vkctx::Context* C = nullptr;
         VkDevice D = VK_NULL_HANDLE;
         std::set<uint64_t> g_screenshots;
@@ -417,7 +424,7 @@ void main() {
             uint32_t height = std::clamp(rows * tileH, 16u, 4096u);
             VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                       (k.depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-            Image img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, format, k.pitch, height, 1, 1, k.samples, usage);
+            Image img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, format, k.pitch * g_scale, height * g_scale, 1, 1, k.samples, usage);
             // EDRAM starts with undefined contents; clear for reproducible output
             endPass();
             VkCommandBuffer c = cmd();
@@ -434,7 +441,7 @@ void main() {
                 vkCmdClearColorImage(c, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
             }
             info("[render] EDRAM %s target: tile %u, pitch %u, %ux msaa, format %u -> %ux%u image", k.depth ? "depth" : "color", k.base,
-                 k.pitch, k.samples, k.format, k.pitch, height);
+                 k.pitch, k.samples, k.format, img.width, img.height);
             return &(g_targets[k] = img);
         }
 
@@ -874,8 +881,9 @@ void main() {
             Image* depth = findTarget({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true });
             Image* src = source < 4 ? color : depth;
             VkRect2D rect;
-            VkExtent2D limit = src ? VkExtent2D{ src->width, src->height } : VkExtent2D{ 8192, 8192 };
-            if (!scissorRect(s, limit, rect)) return;
+            VkExtent2D limit = src ? VkExtent2D{ src->width / g_scale, src->height / g_scale } : VkExtent2D{ 8192, 8192 };
+            if (!scissorRect(s, limit, rect)) return; // guest pixels
+            VkRect2D hostRect = scaled(rect);
 
             if (source == 4)
                 warnOnce("depth resolves not supported yet");
@@ -884,7 +892,8 @@ void main() {
                 // Destination image for this guest address (same format as the source)
                 uint32_t dw = std::max(destPitch, rect.offset.x + rect.extent.width), dh = std::max(destHeight, rect.offset.y + rect.extent.height);
                 auto it = g_resolved.find(destBase);
-                if (it != g_resolved.end() && (it->second.width != dw || it->second.height != dh || it->second.format != color->format))
+                if (it != g_resolved.end() &&
+                    (it->second.width != dw * g_scale || it->second.height != dh * g_scale || it->second.format != color->format))
                 {
                     g_retired.push_back(it->second);
                     g_resolved.erase(it);
@@ -892,7 +901,7 @@ void main() {
                 }
                 if (it == g_resolved.end())
                 {
-                    it = g_resolved.emplace(destBase, createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, color->format, dw, dh, 1, 1, 1,
+                    it = g_resolved.emplace(destBase, createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, color->format, dw * g_scale, dh * g_scale, 1, 1, 1,
                                                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                                                       VK_IMAGE_USAGE_SAMPLED_BIT)).first;
                     info("[render] resolve destination %08X: %ux%u", destBase, dw, dh);
@@ -903,8 +912,8 @@ void main() {
                 transition(c, *color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
                 transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 VkImageSubresourceLayers layers{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                VkOffset3D at{ rect.offset.x, rect.offset.y, 0 };
-                VkExtent3D extent{ rect.extent.width, rect.extent.height, 1 };
+                VkOffset3D at{ hostRect.offset.x, hostRect.offset.y, 0 };
+                VkExtent3D extent{ hostRect.extent.width, hostRect.extent.height, 1 };
                 if (color->samples > 1)
                 {
                     VkImageResolve r{ layers, at, layers, at, extent };
@@ -926,7 +935,7 @@ void main() {
                 uint32_t v = readRegister(RB_COLOR_CLEAR);
                 VkClearAttachment a{ VK_IMAGE_ASPECT_COLOR_BIT, 0, {} };
                 a.clearValue.color = { { (v & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, ((v >> 16) & 0xFF) / 255.0f, (v >> 24) / 255.0f } };
-                VkClearRect r{ rect, 0, 1 };
+                VkClearRect r{ hostRect, 0, 1 };
                 vkCmdClearAttachments(frame().cmd, 1, &a, 1, &r);
             }
             if (clearDepth && (depth || (depth = target({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true }))))
@@ -936,10 +945,10 @@ void main() {
                 uint32_t v = readRegister(RB_DEPTH_CLEAR);
                 VkClearAttachment a{ VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, {} };
                 a.clearValue.depthStencil = { (v >> 8) / float(0xFFFFFF), v & 0xFF };
-                VkRect2D dr{ rect.offset, { std::min(rect.extent.width, depth->width - uint32_t(rect.offset.x)),
-                                            std::min(rect.extent.height, depth->height - uint32_t(rect.offset.y)) } };
+                VkRect2D dr{ hostRect.offset, { std::min(hostRect.extent.width, depth->width - uint32_t(hostRect.offset.x)),
+                                                std::min(hostRect.extent.height, depth->height - uint32_t(hostRect.offset.y)) } };
                 VkClearRect r{ dr, 0, 1 };
-                if (rect.offset.x < int32_t(depth->width) && rect.offset.y < int32_t(depth->height))
+                if (hostRect.offset.x < int32_t(depth->width) && hostRect.offset.y < int32_t(depth->height))
                     vkCmdClearAttachments(frame().cmd, 1, &a, 1, &r);
             }
         }
@@ -1106,7 +1115,9 @@ void main() {
 
             beginPass(color, depth);
             VkRect2D scissor;
-            if (!scissorRect(s, g_pass.extent, scissor)) return true;
+            VkExtent2D guestExtent{ g_pass.extent.width / g_scale, g_pass.extent.height / g_scale };
+            if (!scissorRect(s, guestExtent, scissor)) return true;
+            scissor = scaled(scissor);
             VkCommandBuffer c = f.cmd;
             VkPipeline pl = pipeline({ &s, vs, ps, topology, rectangles, { formats[0], formats[1], formats[2], formats[3] }, depth != nullptr,
                                        s.msaaSamples });
@@ -1128,8 +1139,9 @@ void main() {
             }
             if (textureWrites) C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_layout, 1, textureWrites, writes);
 
-            // Guest viewport -> host NDC over the render area (see shader_translator.h)
-            float w = float(g_pass.extent.width), h = float(g_pass.extent.height);
+            // Guest viewport -> host NDC over the render area (see shader_translator.h). The NDC
+            // math is in guest pixels; the host viewport covers the scaled render area.
+            float w = float(guestExtent.width), h = float(guestExtent.height);
             float ox = s.vpOffset[0], oy = s.vpOffset[1];
             if (s.vertexWindowOffset) { ox += s.windowOffsetX; oy += s.windowOffsetY; }
             if (!s.pixelCenterHalf) { ox += 0.5f; oy += 0.5f; } // Direct3D pixel centers are at .0, Vulkan's at .5
@@ -1148,7 +1160,7 @@ void main() {
             vkCmdPushConstants(c, g_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                sizeof(sc), &sc);
 
-            VkViewport viewport{ 0, 0, w, h, 0.0f, 1.0f };
+            VkViewport viewport{ 0, 0, float(g_pass.extent.width), float(g_pass.extent.height), 0.0f, 1.0f };
             vkCmdSetViewport(c, 0, 1, &viewport);
             vkCmdSetScissor(c, 0, 1, &scissor);
             vkCmdSetStencilReference(c, VK_STENCIL_FACE_FRONT_BIT, s.front.ref);
@@ -1204,6 +1216,7 @@ void main() {
     }
 
     void disable() { g_disabled = true; }
+    void setResolutionScale(uint32_t scale) { g_scale = std::clamp(scale, 1u, 4u); }
     void requestScreenshot(uint64_t frame) { g_screenshots.insert(frame); }
 
     void onShaderLoad(uint32_t type, const uint32_t* words, uint32_t dwords)
@@ -1233,7 +1246,7 @@ void main() {
         Frame& f = frame();
         auto it = g_resolved.find(frontBuffer & 0x1FFFFFFF);
         Image* front = it != g_resolved.end() ? &it->second : nullptr;
-        uint32_t w = front ? std::min(width, front->width) : 0, h = front ? std::min(height, front->height) : 0;
+        uint32_t w = front ? std::min(width * g_scale, front->width) : 0, h = front ? std::min(height * g_scale, front->height) : 0;
         if (!front) warnOnce("swap of a front buffer the renderer did not produce: showing guest memory");
 
         // Screenshot: copy the front buffer image into a host-visible buffer in this submission
