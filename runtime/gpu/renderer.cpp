@@ -5,9 +5,12 @@
 //   (nothing is written back to guest memory yet). The copy rectangle is the window scissor.
 // - Guest data is snapshotted at draw time into a per-frame upload buffer: vertex data (the
 //   vertex fetch constants are rewritten to point into it), constants, indices, textures.
-// - Textures: 2D linear and tiled (runtime/gpu/tiling.h) 8, 8_8, 8_8_8_8, 4_4_4_4, 5_6_5 and DXT
-//   formats, base level only, re-uploaded once per frame they are used. Other textures get a
-//   magenta placeholder.
+// - Textures: 2D linear and tiled (runtime/gpu/tiling.h) 8, 8_8, 1_5_5_5, 5_6_5, 4_4_4_4,
+//   8_8_8_8, 2_10_10_10, DXT, 24_8 (depth), 16_16, 16_16_16_16, the 16-bit float and EXPAND
+//   formats, 32_FLOAT and 32_32_FLOAT (signedness is not applied yet),
+//   base level only, re-uploaded once per frame they are used. Other textures get a magenta
+//   placeholder. A texture at a resolve destination samples the resolved image when the formats
+//   are compatible (render to texture), including depth resolves (R32_SFLOAT).
 // Register meanings follow Xenia (BSD; docs/licenses/xenia-LICENSE.txt).
 #include "renderer.h"
 #include "gpu.h"
@@ -206,6 +209,7 @@ void main() {
             // EDRAM render targets only: where the image lives in EDRAM
             bool edram = false, edramWide = false; // wide: 64 bits per sample
             bool swapRB = false;                    // resolve destinations: red/blue swapped in memory (RB_COPY_DEST_INFO)
+            uint32_t resolvePitch = 0;              // resolve destinations: guest pitch (RB_COPY_DEST_PITCH)
             uint32_t edramBase = 0, edramPitch = 0;
         };
 
@@ -817,22 +821,81 @@ void main() {
 
         // ---------------------------------------------------------------- textures
 
-        // `convert`: 16-bit formats expanded to RGBA8 on upload (component X = lowest bits -> R)
-        enum class Convert { None, From4444, From565 };
-        struct TextureFormat { VkFormat vk; uint32_t blockW, blockH, bytes; Convert convert = Convert::None; };
+        // Xenos texture swizzles: 3 bits per component (0-3 = R, G, B, A of the texture, 4 = 0, 5 = 1)
+        constexpr uint32_t makeSwizzle(uint32_t r, uint32_t g, uint32_t b, uint32_t a) { return r | (g << 3) | (b << 6) | (a << 9); }
+        constexpr uint32_t kSwizzleRGBA = makeSwizzle(0, 1, 2, 3), kSwizzleRRRR = 0, kSwizzleRGGG = makeSwizzle(0, 1, 1, 1),
+                           kSwizzleRGBB = makeSwizzle(0, 1, 2, 2);
+
+        // The guest fetch swizzle applied through the host format's own swizzle (Xenia's
+        // TextureCache::GuestToHostSwizzle): components a format lacks read as Xenos returns them,
+        // e.g. RRRR for one-channel formats. 6 and 7 become 0 and 1.
+        uint32_t hostSwizzle(uint32_t guest, uint32_t formatSwizzle)
+        {
+            uint32_t out = 0;
+            for (uint32_t i = 0; i < 4; i++)
+            {
+                uint32_t g = (guest >> (3 * i)) & 7;
+                out |= (g >= 4 ? (g & 5) : (formatSwizzle >> (3 * g)) & 7) << (3 * i);
+            }
+            return out;
+        }
+
+        // `convert`: 16-bit formats expanded to RGBA8 on upload (component X = lowest bits -> R);
+        // 24_8 depth (24-bit unorm in the high bits) converted to float as Xenia's XeUNorm24To32.
+        // Vulkan formats and swizzles follow Xenia's vulkan_texture_cache.cc host format table.
+        enum class Convert { None, From4444, From565, From1555, FromDepth24 };
+        struct TextureFormat
+        {
+            VkFormat vk;
+            uint32_t blockW, blockH, bytes;
+            Convert convert = Convert::None;
+            uint32_t swizzle = kSwizzleRGBA;
+        };
         TextureFormat textureFormat(uint32_t f) // xenos::TextureFormat
         {
             switch (f)
             {
-            case 2: return { VK_FORMAT_R8_UNORM, 1, 1, 1 };            // 8
-            case 4: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2, Convert::From565 };  // 5_6_5
-            case 15: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2, Convert::From4444 }; // 4_4_4_4
-            case 6: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 4 };      // 8_8_8_8
-            case 10: return { VK_FORMAT_R8G8_UNORM, 1, 1, 2 };         // 8_8
-            case 18: return { VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 4, 4, 8 }; // DXT1
-            case 19: return { VK_FORMAT_BC2_UNORM_BLOCK, 4, 4, 16 };   // DXT2_3
-            case 20: return { VK_FORMAT_BC3_UNORM_BLOCK, 4, 4, 16 };   // DXT4_5
+            case 2: return { VK_FORMAT_R8_UNORM, 1, 1, 1, Convert::None, kSwizzleRRRR };               // 8
+            case 3: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2, Convert::From1555 };                  // 1_5_5_5
+            case 4: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2, Convert::From565, kSwizzleRGBB };     // 5_6_5
+            case 15: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 2, Convert::From4444 };                 // 4_4_4_4
+            case 6: return { VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 4 };                                     // 8_8_8_8
+            case 7: return { VK_FORMAT_A2B10G10R10_UNORM_PACK32, 1, 1, 4 };                           // 2_10_10_10
+            case 10: return { VK_FORMAT_R8G8_UNORM, 1, 1, 2, Convert::None, kSwizzleRGGG };           // 8_8
+            case 18: return { VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 4, 4, 8 };                              // DXT1
+            case 19: return { VK_FORMAT_BC2_UNORM_BLOCK, 4, 4, 16 };                                  // DXT2_3
+            case 20: return { VK_FORMAT_BC3_UNORM_BLOCK, 4, 4, 16 };                                  // DXT4_5
+            case 22: return { VK_FORMAT_R32_SFLOAT, 1, 1, 4, Convert::FromDepth24, kSwizzleRRRR };    // 24_8
+            case 25: return { VK_FORMAT_R16G16_UNORM, 1, 1, 4, Convert::None, kSwizzleRGGG };         // 16_16
+            case 26: return { VK_FORMAT_R16G16B16A16_UNORM, 1, 1, 8 };                                // 16_16_16_16
+            case 27: return { VK_FORMAT_R16_SFLOAT, 1, 1, 2, Convert::None, kSwizzleRRRR };           // 16_EXPAND
+            case 28: return { VK_FORMAT_R16G16_SFLOAT, 1, 1, 4, Convert::None, kSwizzleRGGG };        // 16_16_EXPAND
+            case 29: return { VK_FORMAT_R16G16B16A16_SFLOAT, 1, 1, 8 };                               // 16_16_16_16_EXPAND
+            case 30: return { VK_FORMAT_R16_SFLOAT, 1, 1, 2, Convert::None, kSwizzleRRRR };           // 16_FLOAT
+            case 31: return { VK_FORMAT_R16G16_SFLOAT, 1, 1, 4, Convert::None, kSwizzleRGGG };        // 16_16_FLOAT
+            case 32: return { VK_FORMAT_R16G16B16A16_SFLOAT, 1, 1, 8 };                               // 16_16_16_16_FLOAT
+            case 36: return { VK_FORMAT_R32_SFLOAT, 1, 1, 4, Convert::None, kSwizzleRRRR };           // 32_FLOAT
+            case 37: return { VK_FORMAT_R32G32_SFLOAT, 1, 1, 8, Convert::None, kSwizzleRGGG };        // 32_32_FLOAT
             default: return { VK_FORMAT_UNDEFINED, 1, 1, 0 };
+            }
+        }
+
+        // Can a texture of Xenos format `f` sample a resolve destination of format `r` directly?
+        // Resolves are not written back to guest memory, and the copy's own format conversion
+        // (RB_COPY_DEST_INFO) is skipped, so this matches by channel layout.
+        bool resolveCompatible(uint32_t f, VkFormat r)
+        {
+            switch (f)
+            {
+            case 6: case 3: case 4: case 15: return r == VK_FORMAT_R8G8B8A8_UNORM; // 8_8_8_8 and the 16-bit RGBA formats
+            case 7: return r == VK_FORMAT_A2B10G10R10_UNORM_PACK32;                // 2_10_10_10
+            case 25: return r == VK_FORMAT_R16G16_SNORM;                           // 16_16 (EDRAM 16_16 targets are SNORM)
+            case 26: return r == VK_FORMAT_R16G16B16A16_SNORM;                     // 16_16_16_16
+            case 28: case 31: return r == VK_FORMAT_R16G16_SFLOAT;                 // 16_16_EXPAND, 16_16_FLOAT
+            case 29: case 32: return r == VK_FORMAT_R16G16B16A16_SFLOAT;           // 16_16_16_16_EXPAND, _FLOAT
+            case 37: return r == VK_FORMAT_R32G32_SFLOAT;                          // 32_32_FLOAT
+            case 22: case 23: case 36: return r == VK_FORMAT_R32_SFLOAT;          // 24_8, 24_8_FLOAT (depth resolves), 32_FLOAT
+            default: return false;
             }
         }
 
@@ -897,7 +960,7 @@ void main() {
         {
             static const VkComponentSwizzle comps[8] = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B,
                                                          VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE,
-                                                         VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO };
+                                                         VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE };
             if (swapRB && (s == 0 || s == 2)) s ^= 2; // memory holds B, G, R, A
             return comps[s & 7];
         }
@@ -929,18 +992,18 @@ void main() {
             bool tiled = d[0] >> 31, cube = fetchDim == 3;
             uint32_t pitch = ((d[0] >> 22) & 0x1FF) * 32;
             uint32_t width = (d[2] & 0x1FFF) + 1, height = ((d[2] >> 13) & 0x1FFF) + 1;
-            uint32_t swizzle = (d[3] >> 1) & 0xFFF;
             TextureFormat tf = textureFormat(format);
+            uint32_t swizzle = hostSwizzle((d[3] >> 1) & 0xFFF, tf.swizzle);
             if ((d[0] & 3) != 2 || (fetchDim != 1 && fetchDim != 3) || dim != fetchDim)
             {
                 warnOnce("texture dimension " + std::to_string(fetchDim) + " (shader " + std::to_string(dim) + ") not supported yet");
                 return out;
             }
 
-            // Render to texture: a 2D 8_8_8_8 texture at a resolve destination samples the resolved
-            // image directly (resolves are not written to guest memory yet)
+            // Render to texture: a 2D texture at a resolve destination samples the resolved image
+            // directly when the formats are compatible (resolves are not written to guest memory yet)
             auto resolved = g_resolved.find(base & 0x1FFFFFFF);
-            if (!cube && format == 6 && resolved != g_resolved.end() && resolved->second.format == VK_FORMAT_R8G8B8A8_UNORM &&
+            if (!cube && resolved != g_resolved.end() && resolveCompatible(format, resolved->second.format) &&
                 width * g_scale <= resolved->second.width && height * g_scale <= resolved->second.height)
             {
                 Image& r = resolved->second;
@@ -948,8 +1011,8 @@ void main() {
                 if (!view)
                 {
                     view = createView(r.image, VK_IMAGE_VIEW_TYPE_2D, r.format, 1, swizzle, r.swapRB);
-                    info("[render] render to texture: resolve %08X sampled as a %ux%u texture%s", base & 0x1FFFFFFF, width, height,
-                         r.swapRB ? " (red/blue swapped)" : "");
+                    info("[render] render to texture: resolve %08X sampled as a %ux%u texture (format %u)%s", base & 0x1FFFFFFF, width,
+                         height, format, r.swapRB ? " (red/blue swapped)" : "");
                 }
                 endPass();
                 transition(cmd(), r, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1067,6 +1130,14 @@ void main() {
                     uint8_t* dst = frame().uploadMap + off + layer * faceSize;
                     if (tf.convert == Convert::None)
                         std::memcpy(dst, linear, faceSize);
+                    else if (tf.convert == Convert::FromDepth24)
+                        for (size_t i = 0; i < size_t(rowBlocks) * blocksH; i++)
+                        {
+                            // XeUNorm24To32: (n + (n >> 23)) / 2^24, exact, unlike / (2^24 - 1)
+                            uint32_t n = ((const uint32_t*)linear)[i] >> 8;
+                            float f = float(n + (n >> 23)) * (1.0f / 16777216.0f);
+                            std::memcpy(dst + i * 4, &f, 4);
+                        }
                     else
                         for (size_t i = 0; i < size_t(rowBlocks) * blocksH; i++)
                         {
@@ -1074,6 +1145,11 @@ void main() {
                             uint8_t* o = dst + i * 4;
                             if (tf.convert == Convert::From4444)
                                 for (int c = 0; c < 4; c++) o[c] = uint8_t(((v >> (4 * c)) & 0xF) * 17);
+                            else if (tf.convert == Convert::From1555)
+                            {
+                                for (int c = 0; c < 3; c++) o[c] = uint8_t(((v >> (5 * c)) & 0x1F) * 255 / 31);
+                                o[3] = (v >> 15) ? 255 : 0;
+                            }
                             else
                             {
                                 o[0] = uint8_t((v & 0x1F) * 255 / 31);
@@ -1515,6 +1591,147 @@ void main() {
             return true;
         }
 
+        // Destination image for a resolve to `destBase`: replaced when the size or format changes
+        // (the old one is retired, the presenter may still show it)
+        Image& resolveDestination(uint32_t destBase, uint32_t dw, uint32_t dh, VkFormat format)
+        {
+            auto it = g_resolved.find(destBase);
+            if (it != g_resolved.end() && (it->second.width != dw * g_scale || it->second.height != dh * g_scale || it->second.format != format))
+            {
+                g_retired.push_back(it->second);
+                g_resolved.erase(it);
+                it = g_resolved.end();
+            }
+            if (it == g_resolved.end())
+            {
+                it = g_resolved.emplace(destBase, createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, format, dw * g_scale, dh * g_scale, 1, 1, 1,
+                                                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                                  VK_IMAGE_USAGE_SAMPLED_BIT)).first;
+                info("[render] resolve destination %08X: %ux%u%s", destBase, dw, dh, format == VK_FORMAT_R32_SFLOAT ? " (depth)" : "");
+            }
+            it->second.resolvePitch = std::max(it->second.resolvePitch, dw);
+            return it->second;
+        }
+
+        uint32_t formatBytes(VkFormat f)
+        {
+            switch (f)
+            {
+            case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_R16G16_SNORM:
+            case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R32_SFLOAT:
+                return 4;
+            case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_SFLOAT:
+                return 8;
+            default:
+                return 0;
+            }
+        }
+
+        // Predicated tiling: the game renders a large target in tiles (the match's 1152x640 2x MSAA
+        // scene is two 576x640 tiles) and resolves each tile with RB_COPY_DEST_BASE moved to the
+        // tile's place inside the same tiled texture. If `destBase` lies inside an existing resolve
+        // destination of the same pitch and format, return that image and the tile's position in it:
+        // the 32-aligned (x, y) whose tiled offset (Xenia's Tiled2D) is the address difference and
+        // which keeps the `extent` inside the image.
+        Image* resolveInto(uint32_t destBase, uint32_t destPitch, VkFormat format, VkExtent2D extent, VkOffset2D& offset)
+        {
+            uint32_t bytes = formatBytes(format);
+            if (!bytes || !destPitch) return nullptr;
+            auto it = g_resolved.lower_bound(destBase);
+            for (int n = 0; n < 4 && it != g_resolved.begin(); n++)
+            {
+                --it;
+                Image& img = it->second;
+                if (img.format != format || img.resolvePitch != destPitch) continue;
+                uint32_t delta = destBase - it->first, w = img.width / g_scale, h = img.height / g_scale;
+                for (uint32_t y = 0; y + extent.height <= h; y += 32)
+                    for (uint32_t x = 0; x + extent.width <= w; x += 32)
+                        if (tiledOffset2D(x, y, tiledBlocksAligned(destPitch), bytes) == delta)
+                        {
+                            offset = { int32_t(x), int32_t(y) };
+                            return &img;
+                        }
+            }
+            return nullptr;
+        }
+
+        // Depth resolves: the depth of `src` within `hostRect` goes to an R32_SFLOAT image at the
+        // destination address, which 24_8 / 24_8_FLOAT / 32_FLOAT textures then sample (render to
+        // texture; shadow maps, scene depth). Vulkan has no depth -> color image copy, so the depth
+        // aspect goes through a buffer (D32_SFLOAT_S8_UINT's depth copies out as 32-bit floats). A
+        // multisampled source is first resolved to sample 0 by an empty dynamic-rendering pass.
+        VkBuffer g_depthScratch = VK_NULL_HANDLE;
+        VkDeviceSize g_depthScratchSize = 0;
+        std::vector<std::pair<VkBuffer, VkDeviceMemory>> g_retiredBuffers; // may still be in use by frames in flight
+        std::map<std::pair<uint32_t, uint32_t>, Image> g_depthSampleZero;   // single-sample copies, by size
+
+        void resolveDepth(Image& src, VkRect2D hostRect, Image& dest, VkOffset2D destAt)
+        {
+            VkDeviceSize need = VkDeviceSize(hostRect.extent.width) * hostRect.extent.height * 4;
+            if (need > g_depthScratchSize)
+            {
+                static VkDeviceMemory memory = VK_NULL_HANDLE;
+                if (g_depthScratch) g_retiredBuffers.push_back({ g_depthScratch, memory });
+                VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+                bci.size = std::max<VkDeviceSize>(need, 4u << 20);
+                bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &g_depthScratch));
+                VkMemoryRequirements req;
+                vkGetBufferMemoryRequirements(D, g_depthScratch, &req);
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = req.size;
+                mai.memoryTypeIndex = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &memory));
+                VK_CHECK(vkBindBufferMemory(D, g_depthScratch, memory, 0));
+                g_depthScratchSize = bci.size;
+            }
+            endPass();
+            VkCommandBuffer c = cmd();
+            Image* from = &src;
+            if (src.samples > 1)
+            {
+                Image& one = g_depthSampleZero[{ src.width, src.height }];
+                if (!one.image)
+                    one = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, kDepthFormat, src.width, src.height, 1, 1, 1,
+                                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+                transition(c, src, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                transition(c, one, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                VkRenderingAttachmentInfo da{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+                da.imageView = src.view;
+                da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                da.resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT; // always supported for depth
+                da.resolveImageView = one.view;
+                da.resolveImageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+                ri.renderArea = hostRect;
+                ri.layerCount = 1;
+                ri.pDepthAttachment = &da;
+                vkCmdBeginRendering(c, &ri);
+                vkCmdEndRendering(c);
+                from = &one;
+            }
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT; // earlier uses of the scratch buffer
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            transition(c, *from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
+            copy.imageOffset = { hostRect.offset.x, hostRect.offset.y, 0 };
+            copy.imageExtent = { hostRect.extent.width, hostRect.extent.height, 1 };
+            vkCmdCopyImageToBuffer(c, from->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_depthScratch, 1, &copy);
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.imageOffset = { destAt.x, destAt.y, 0 };
+            vkCmdCopyBufferToImage(c, g_depthScratch, dest.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // resting layout, as color resolves
+        }
+
         void resolve(const DrawState& s)
         {
             uint32_t control = readRegister(RB_COPY_CONTROL);
@@ -1532,29 +1749,27 @@ void main() {
             if (!scissorRect(s, limit, rect)) return; // guest pixels
             VkRect2D hostRect = scaled(rect);
 
+            uint32_t dw = std::max(destPitch, rect.offset.x + rect.extent.width), dh = std::max(destHeight, rect.offset.y + rect.extent.height);
             if (source == 4)
-                warnOnce("depth resolves not supported yet");
+            {
+                if (depth && command != 3 && destPitch && destHeight)
+                {
+                    syncTarget(depth, rect); // EDRAM aliasing: latest contents of these tiles
+                    VkOffset2D tile{};
+                    Image* into = resolveInto(destBase, destPitch, VK_FORMAT_R32_SFLOAT, rect.extent, tile);
+                    Image& dest = into ? *into : resolveDestination(destBase, dw, dh, VK_FORMAT_R32_SFLOAT);
+                    resolveDepth(*depth, hostRect, dest,
+                                 { hostRect.offset.x + tile.x * int32_t(g_scale), hostRect.offset.y + tile.y * int32_t(g_scale) });
+                }
+            }
             else if (color && command != 3 && destPitch && destHeight)
             {
                 syncTarget(color, rect); // EDRAM aliasing: latest contents of these tiles
-                // Destination image for this guest address (same format as the source)
-                uint32_t dw = std::max(destPitch, rect.offset.x + rect.extent.width), dh = std::max(destHeight, rect.offset.y + rect.extent.height);
-                auto it = g_resolved.find(destBase);
-                if (it != g_resolved.end() &&
-                    (it->second.width != dw * g_scale || it->second.height != dh * g_scale || it->second.format != color->format))
-                {
-                    g_retired.push_back(it->second);
-                    g_resolved.erase(it);
-                    it = g_resolved.end();
-                }
-                if (it == g_resolved.end())
-                {
-                    it = g_resolved.emplace(destBase, createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, color->format, dw * g_scale, dh * g_scale, 1, 1, 1,
-                                                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                                                      VK_IMAGE_USAGE_SAMPLED_BIT)).first;
-                    info("[render] resolve destination %08X: %ux%u", destBase, dw, dh);
-                }
-                Image& dest = it->second;
+                // Destination image for this guest address (same format as the source), or the image a
+                // tile of it belongs to (predicated tiling)
+                VkOffset2D tile{};
+                Image* into = resolveInto(destBase, destPitch, color->format, rect.extent, tile);
+                Image& dest = into ? *into : resolveDestination(destBase, dw, dh, color->format);
                 dest.swapRB = (readRegister(0x231B) >> 24) & 1; // RB_COPY_DEST_INFO copy_dest_swap
                 endPass();
                 VkCommandBuffer c = cmd();
@@ -1562,15 +1777,16 @@ void main() {
                 transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 VkImageSubresourceLayers layers{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
                 VkOffset3D at{ hostRect.offset.x, hostRect.offset.y, 0 };
+                VkOffset3D destAt{ at.x + tile.x * int32_t(g_scale), at.y + tile.y * int32_t(g_scale), 0 };
                 VkExtent3D extent{ hostRect.extent.width, hostRect.extent.height, 1 };
                 if (color->samples > 1)
                 {
-                    VkImageResolve r{ layers, at, layers, at, extent };
+                    VkImageResolve r{ layers, at, layers, destAt, extent };
                     vkCmdResolveImage(c, color->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
                 }
                 else
                 {
-                    VkImageCopy r{ layers, at, layers, at, extent };
+                    VkImageCopy r{ layers, at, layers, destAt, extent };
                     vkCmdCopyImage(c, color->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
                 }
                 transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // resting layout (presenter, screenshots)

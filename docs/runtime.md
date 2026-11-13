@@ -176,7 +176,10 @@ Settings -> Game Controller -> pointer navigation, or the stick also moves the m
 `--press "start@12,a@20,down@24.5"` presses each button that many seconds after launch (held
 150 ms), reported as pad state and as keystrokes, added to any real controller on user 0.
 Buttons: a b x y start back up down left right lb rb ls rs. Example that gets past the title
-screen to the main menu: `--press "a@20,a@26"`.
+screen to the main menu: `--press "a@20,a@26"`. Sticks: `ls_` or `rs_` plus `left`, `right`, `up`
+or `down`, as `stick@seconds[:duration]` - full deflection of that axis for the duration (150 ms
+by default), then released; reported as pad state only (no stick keystrokes). The kickoff of the
+Exhibition route: `rs_down@196:1.0,rs_up@197:0.3` pulls the right stick back and pushes it forward.
 
 ## GPU frame capture
 `./build/backbreaker --capture-frame 1200` (or a list: `--capture-frame 300,1200,2400`) records the
@@ -211,7 +214,7 @@ interpolators). Check it over a shader dump:
     ./build/xenos-translate /tmp/glsl captures/shaders
     for f in /tmp/glsl/*; do glslc --target-env=vulkan1.3 -o "$f.spv" "$f" && spirv-val "$f.spv"; done
 
-Unsupported features (loops, calls, jumps, vector predicate-push ops, LOD/gradient fetch ops)
+Unsupported features (loops, calls, LOD/gradient fetch ops)
 make translation fail with a reason instead of producing wrong code.
 
 Memory export (`eA`/`eM0-4`, used by the game's GPU skinning) writes guest memory from the shader
@@ -249,6 +252,8 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); EDRAM aliasing only transfers between targets of the same format; resolves are not written back to guest
-  memory and take their rectangle from the window scissor; 1D/3D/cube and some texture formats are
-  placeholders; textures are re-uploaded once per frame they are used (no
-  write-watching); only the base mip level; depth is 32-bit float instead of 24-bit
+  memory and take their rectangle from the window scissor; a resolve's own format conversion is
+  skipped (textures sample the resolve image in the render target's format); 1D/3D textures and
+  some formats are placeholders; signed texture formats are read unsigned; textures are
+  re-uploaded once per frame they are used (no write-watching); only the base mip level; depth is
+  32-bit float instead of 24-bit

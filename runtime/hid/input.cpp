@@ -42,10 +42,18 @@ namespace
     constexpr uint16_t XINPUT_KEYSTROKE_KEYDOWN = 0x0001, XINPUT_KEYSTROKE_KEYUP = 0x0002;
 
     struct Press { double at; const Button* button; };
+    // Scripted stick holds: full deflection of one axis (0 lx, 1 ly, 2 rx, 3 ry) for `duration`
+    struct StickHold { double at, duration; int axis; int16_t value; };
+    struct Stick { const char* name; int axis; int16_t value; };
+    constexpr Stick kSticks[] = { // XInput: +X right, +Y up
+        { "ls_left", 0, -32768 }, { "ls_right", 0, 32767 }, { "ls_down", 1, -32768 }, { "ls_up", 1, 32767 },
+        { "rs_left", 2, -32768 }, { "rs_right", 2, 32767 }, { "rs_down", 3, -32768 }, { "rs_up", 3, 32767 },
+    };
     struct KeyEvent { double at; uint16_t vk; uint16_t flags; const char* name; };
 
     std::mutex g_scriptLock;
     std::vector<Press> g_presses;
+    std::vector<StickHold> g_stickHolds;
     std::vector<KeyEvent> g_keyEvents; // sorted by time
     size_t g_nextKeyEvent = 0;
     const auto g_start = std::chrono::steady_clock::now();
@@ -94,6 +102,12 @@ namespace
         for (auto& press : g_presses)
             if (t >= press.at && t < press.at + kHoldSeconds)
                 p.buttons |= press.button->mask; // scripted presses add to the real pad
+        for (auto& h : g_stickHolds)
+            if (t >= h.at && t < h.at + h.duration)
+            {
+                int16_t* axes[4] = { &p.lx, &p.ly, &p.rx, &p.ry };
+                *axes[h.axis] = h.value; // scripted stick holds replace that axis
+            }
         return p;
     }
 
@@ -162,13 +176,29 @@ namespace hid
             p = q == std::string::npos ? script.size() : q + 1;
             size_t at = item.find('@');
             const Button* button = nullptr;
+            const Stick* stick = nullptr;
             if (at != std::string::npos)
+            {
                 for (auto& b : kButtons)
                     if (item.compare(0, at, b.name) == 0 && strlen(b.name) == at)
                         button = &b;
+                for (auto& s : kSticks)
+                    if (item.compare(0, at, s.name) == 0 && strlen(s.name) == at)
+                        stick = &s;
+            }
+            if (stick)
+            {
+                // stick@seconds[:duration]: hold the stick fully in that direction, then let go
+                double t = std::atof(item.c_str() + at + 1);
+                size_t colon = item.find(':', at);
+                double duration = colon == std::string::npos ? kHoldSeconds : std::atof(item.c_str() + colon + 1);
+                g_stickHolds.push_back({ t, duration, stick->axis, stick->value });
+                continue;
+            }
             if (!button)
             {
-                warn("--press: bad item \"%s\" (use button@seconds; buttons: a b x y start back up down left right lb rb ls rs)", item.c_str());
+                warn("--press: bad item \"%s\" (use button@seconds or stick@seconds[:duration]; buttons: a b x y start "
+                     "back up down left right lb rb ls rs; sticks: ls_/rs_ + left right up down)", item.c_str());
                 return false;
             }
             double t = std::atof(item.c_str() + at + 1);
@@ -177,7 +207,7 @@ namespace hid
             g_keyEvents.push_back({ t + kHoldSeconds, button->vk, XINPUT_KEYSTROKE_KEYUP, button->name });
         }
         std::sort(g_keyEvents.begin(), g_keyEvents.end(), [](auto& a, auto& b) { return a.at < b.at; });
-        info("[hid] scripted %zu button presses", g_presses.size());
+        info("[hid] scripted %zu button presses, %zu stick holds", g_presses.size(), g_stickHolds.size());
         return true;
     }
 }

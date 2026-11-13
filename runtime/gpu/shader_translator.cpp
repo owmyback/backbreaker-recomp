@@ -283,6 +283,16 @@ void xeMemExportFlush() {
                         e = "cubeOp(vec3(cube_src.z, cube_src.w, cube_src.x))";
                         break;
                     case 19: e = "vec4(smax(smax((" + s1 + ").x, (" + s1 + ").y), smax((" + s1 + ").z, (" + s1 + ").w)))"; break;
+                    case 20: case 21: case 22: case 23:
+                    {
+                        // setp_{eq,ne,gt,ge}_push, as Xenia's ucode.h describes them:
+                        // p0 = src0.w == 0 && (src1.w <op> 0); dest = (src0.x == 0 && (src1.x <op> 0)) ? 0 : src0.x + 1
+                        static const char* cmp[4] = { "==", "!=", ">", ">=" };
+                        std::string c = cmp[vop - 20];
+                        emit("p = (" + s1 + ").w == 0.0 && (" + s2 + ").w " + c + " 0.0;");
+                        e = "vec4(((" + s1 + ").x == 0.0 && (" + s2 + ").x " + c + " 0.0) ? 0.0 : (" + s1 + ").x + 1.0)";
+                        break;
+                    }
                     case 24: case 25: case 26: case 27:
                     {
                         static const char* cmp[4] = { "equal", "greaterThan", "greaterThanEqual", "notEqual" };
@@ -367,7 +377,11 @@ void xeMemExportFlush() {
                     case 28: emit("p = " + x + " != 0.0;"); e = "(p ? 0.0 : 1.0)"; break; // setp_ne
                     case 29: emit("p = " + x + " > 0.0;"); e = "(p ? 0.0 : 1.0)"; break;  // setp_gt
                     case 30: emit("p = " + x + " >= 0.0;"); e = "(p ? 0.0 : 1.0)"; break; // setp_ge
+                    // setp_inv, setp_pop, setp_rstr as Xenia's ucode.h describes them (x = src0.a)
+                    case 31: emit("p = " + x + " == 1.0;"); e = "(p ? 0.0 : (" + x + " == 0.0 ? 1.0 : " + x + "))"; break; // setp_inv
+                    case 32: emit("p = " + x + " - 1.0 <= 0.0;"); e = "(p ? 0.0 : " + x + " - 1.0)"; break;                 // setp_pop
                     case 33: emit("p = false;"); e = "3.402823466e38"; break;              // setp_clr
+                    case 34: emit("p = " + x + " == 0.0;"); e = "(p ? 0.0 : " + x + ")"; break;                                // setp_rstr
                     case 35: case 36: case 37: case 38:
                     {
                         static const char* cmp[4] = { "==", ">", ">=", "!=" };
@@ -618,48 +632,112 @@ void xeMemExportFlush() {
                 }
             }
 
+            // One control flow instruction other than a jump: exec blocks (conditional on a bool
+            // constant or the predicate), allocs and no-ops. False if it is not supported.
+            bool controlFlow(const Cf& cf)
+            {
+                switch (cf.op())
+                {
+                case CfOp::Alloc:
+                    emit("xeMemExportFlush();"); // an alloc ends the memory export in progress
+                    return true;
+                case CfOp::Nop: case CfOp::MarkVsFetchDone:
+                    return true;
+                case CfOp::Exec: case CfOp::ExecEnd:
+                    exec(cf);
+                    return true;
+                case CfOp::CondExec: case CfOp::CondExecEnd:
+                {
+                    uint32_t b = cf.condBoolAddress();
+                    emit(fmt("if (((boolc[%u].%c >> %uu) & 1u) == %uu) {", b / 128, kComp[(b % 128) / 32], b % 32, cf.condition() ? 1 : 0));
+                    indent++; exec(cf); indent--; emit("}");
+                    return true;
+                }
+                case CfOp::CondExecPred: case CfOp::CondExecPredEnd: case CfOp::CondExecPredClean: case CfOp::CondExecPredCleanEnd:
+                    emit(fmt("if (%sp) {", cf.condition() ? "" : "!"));
+                    indent++; exec(cf); indent--; emit("}");
+                    return true;
+                default:
+                    return false;
+                }
+            }
+
             void translate()
             {
-                // Control flow: straight-line exec blocks (conditional on bool constants or the predicate)
+                // The control flow instructions: two per three words, up to where the exec code starts
+                std::vector<Cf> cfs;
                 size_t cfEnd = w.size();
-                bool ended = false;
-                for (size_t i = 0; i + 3 <= w.size() && i < cfEnd && !ended; i += 3)
+                for (size_t i = 0; i + 3 <= w.size() && i < cfEnd; i += 3)
                 {
                     Cf pair[2];
                     unpackCf(&w[i], pair);
                     for (const Cf& cf : pair)
                     {
-                        if (ended) break;
-                        CfOp op = cf.op();
-                        if (isExec(op) && cf.execCount() && cf.execAddress() * 3 < cfEnd) cfEnd = cf.execAddress() * 3;
-                        switch (op)
-                        {
-                        case CfOp::Alloc:
-                            emit("xeMemExportFlush();"); // an alloc ends the memory export in progress
-                            break;
-                        case CfOp::Nop: case CfOp::MarkVsFetchDone:
-                            break;
-                        case CfOp::Exec: case CfOp::ExecEnd:
-                            exec(cf);
-                            break;
-                        case CfOp::CondExec: case CfOp::CondExecEnd:
-                        {
-                            uint32_t b = cf.condBoolAddress();
-                            emit(fmt("if (((boolc[%u].%c >> %uu) & 1u) == %uu) {", b / 128, kComp[(b % 128) / 32], b % 32, cf.condition() ? 1 : 0));
-                            indent++; exec(cf); indent--; emit("}");
-                            break;
-                        }
-                        case CfOp::CondExecPred: case CfOp::CondExecPredEnd: case CfOp::CondExecPredClean: case CfOp::CondExecPredCleanEnd:
-                            emit(fmt("if (%sp) {", cf.condition() ? "" : "!"));
-                            indent++; exec(cf); indent--; emit("}");
-                            break;
-                        default:
-                            fail(fmt("control flow %s not supported yet", cfName(op)));
-                        }
-                        ended = endsShader(op);
+                        if (isExec(cf.op()) && cf.execCount() && cf.execAddress() * 3 < cfEnd) cfEnd = cf.execAddress() * 3;
+                        cfs.push_back(cf);
                     }
                 }
-                if (!ended) fail("shader has no exec-end");
+                bool jumps = std::any_of(cfs.begin(), cfs.end(), [](const Cf& cf) { return cf.op() == CfOp::CondJmp; });
+
+                if (!jumps)
+                {
+                    // Straight-line exec blocks until the first one that ends the shader
+                    bool ended = false;
+                    for (const Cf& cf : cfs)
+                    {
+                        if (!controlFlow(cf)) fail(fmt("control flow %s not supported yet", cfName(cf.op())));
+                        if ((ended = endsShader(cf.op()))) break;
+                    }
+                    if (!ended) fail("shader has no exec-end");
+                    return;
+                }
+
+                // With jumps (jmp/cjmp): a state machine over the control flow instructions, as
+                // Xenia's translators do - xe_pc is the index of the next instruction, an
+                // instruction that ends the shader sets it to -1 so the code after the loop (the
+                // color and depth writes) still runs.
+                bool anyEnd = false;
+                emit("int xe_pc = 0;");
+                emit("while (xe_pc >= 0) {");
+                indent++;
+                emit("switch (xe_pc) {");
+                for (size_t k = 0; k < cfs.size(); k++)
+                {
+                    const Cf& cf = cfs[k];
+                    emit(fmt("case %u: {", uint32_t(k)));
+                    indent++;
+                    if (cf.op() == CfOp::CondJmp)
+                    {
+                        // Target: an absolute control flow index. Unconditional, on the predicate, or on
+                        // a bool constant, compared with the instruction's condition bit.
+                        uint32_t target = cf.target();
+                        if (target >= cfs.size()) fail(fmt("jump to control flow %u past the end (%zu)", target, cfs.size()));
+                        if (cf.isUnconditional())
+                            emit(fmt("xe_pc = %u; break;", target));
+                        else if (cf.isPredicated())
+                            emit(fmt("xe_pc = (p == %s) ? %u : %u; break;", cf.condition() ? "true" : "false", target, uint32_t(k + 1)));
+                        else
+                        {
+                            uint32_t b = cf.condBoolAddress();
+                            emit(fmt("xe_pc = (((boolc[%u].%c >> %uu) & 1u) == %uu) ? %u : %u; break;", b / 128, kComp[(b % 128) / 32], b % 32,
+                                     cf.condition() ? 1 : 0, target, uint32_t(k + 1)));
+                        }
+                    }
+                    else
+                    {
+                        if (!controlFlow(cf)) fail(fmt("control flow %s not supported yet", cfName(cf.op())));
+                        bool end = endsShader(cf.op());
+                        anyEnd |= end;
+                        emit(end ? std::string("xe_pc = -1; break;") : fmt("xe_pc = %u; break;", uint32_t(k + 1)));
+                    }
+                    indent--;
+                    emit("}");
+                }
+                emit("default: xe_pc = -1; break;");
+                emit("}");
+                indent--;
+                emit("}");
+                if (!anyEnd) fail("shader has no exec-end");
             }
 
             std::string assemble()

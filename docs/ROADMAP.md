@@ -24,12 +24,16 @@ Camp, Exhibition, Leagues, Tackle Alley, Xbox LIVE). Controllers work (phase 5).
 goes through side select, team select and stadium options, loads the match ("Loading..." with
 both teams' star players) and **plays**: the kickoff play call, the kicker's aim, the kickoff
 itself, and the next play call (Pass / Run / Special / Ask Coach) with the clock running
-(1st 4:55, 1st & 15). Memory stays flat during the match. The 3D view is still the magenta
-placeholder (see the blocker below). Audio is still silence.
+(1st 4:55, 1st & 15). Memory stays flat during the match. The 3D view renders across the whole
+screen (stadium, crowd, players, replays, the video board), with the artifacts in the blocker
+below. Kicking works with the right stick pulled back and then pushed forward (a plain release
+is not seen at the current frame rate, see phase 9). Audio is still silence.
 
-**Current blocker (2026-11-13):** the 3D view of a match is the magenta placeholder. The renderer
-does not support texture formats 3 (k_1_5_5_5), 22 (k_24_8), 32 (k_16_16_16_16_FLOAT) and 36
-(k_32_FLOAT) when tiled, nor depth resolves; the game logic underneath runs.
+**Current blocker (2026-11-13):** the match's picture has artifacts. White and garbled
+rectangles the size of EDRAM tiles (80x16 samples) show stale data where the game reuses EDRAM
+tiles between formats - mostly depth (D24S8) and color (8_8_8_8) on the same tiles - and the
+renderer skips transfers between different formats (phase 4, remaining step 2). The grass is
+dark. Distant textures shimmer (no mip levels yet). The match runs at about 15 fps.
 
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
@@ -243,7 +247,7 @@ multiplications follow Shader Model 3 (0 * anything = 0); unsupported features f
 with a reason. All 58 shaders of the current corpus translate, compile with glslc and pass
 spirv-val. A hand-checked vertex shader confirmed the swizzle decoding: the game's compiler keeps
 intermediate results in permuted component order and undoes it on export.
-Not yet: loops/calls/jumps, vector predicate-push ops, LOD/gradient fetches,
+Not yet: loops/calls, LOD/gradient fetches,
 texture fetch offsets, pixel shader param_gen, runtime compilation with shaderc + caching (comes
 with draw execution).
 
@@ -308,10 +312,29 @@ assembled from the six resolved images. Seen working: the title scene's 256x256 
 several 128x128 and 64x64 ones, and two rendered cube maps. Not yet: textures that read resolved
 data in another format or tiling than the resolve wrote, and CPU reads of resolved memory.
 
+**Step 10 - The match's 3D view: more formats, depth resolves, tiled resolves.** Textures in
+1_5_5_5, 2_10_10_10, 24_8 (depth, converted to float as Xenia's XeUNorm24To32), 16_16,
+16_16_16_16, the 16-bit float and EXPAND formats, 32_FLOAT and 32_32_FLOAT upload like the
+others, and every format gets Xenia's host swizzle composed with the fetch constant's
+(`GuestToHostSwizzle`: one-channel formats read RRRR, 8_8 RGGG, 5_6_5 RGBB). A texture at a
+resolve destination samples the resolved image whenever the channel layout matches, not only for
+8_8_8_8: the match's HDR scene (16_16_16_16_FLOAT), its 32_FLOAT targets, and 8_8_8_8 targets
+read as 1_5_5_5. Depth resolves exist: the depth plane (sample 0 of a multisampled target) goes
+through a buffer into an R32_SFLOAT image at the destination, which 24_8 / 32_FLOAT textures
+sample - the shadow maps (1024, 512 and 256 square) and the scene depth. The match renders its
+1152x640 2x MSAA scene in two 576x640 tiles (predicated tiling) and resolves the second with
+RB_COPY_DEST_BASE moved inside the same texture; such a resolve now lands at its place in the
+existing image (the tiled offset, Xenia's Tiled2D, inverted). The shader translator gained jumps
+(`jmp`/`cjmp`: a state machine over the control flow instructions), the vector predicate-push
+ops and setp_inv/pop/rstr, so every shader the match uses translates. Seen working: the menus
+with all their pictures, Team Select's 3D player, Stadium Select, the kickoff, live plays and
+replays.
+
 Remaining steps:
-1. More texture formats, mip levels, 3D (volume) textures.
-2. EDRAM transfers between different formats, resolves written back to guest memory (render-to-texture through memory, CPU reads), the resolve rectangle
-   from the vertex data, depth resolves.
+1. Mip levels, 3D (volume) textures, texture signedness (signed formats are read unsigned).
+2. EDRAM transfers between different formats (the match's white tile-sized blocks: depth <->
+   8_8_8_8 on the same tiles), resolves written back to guest memory (render-to-texture through
+   memory, CPU reads), the resolve rectangle from the vertex data.
 3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
    clears (`--resolution-scale N`, step 6). Still to check once 3D scenes render: effects that
    depend on pixel size (blur, bloom, shadow maps, half-pixel offsets in post-processing), and
