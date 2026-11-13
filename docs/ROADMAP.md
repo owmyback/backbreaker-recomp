@@ -81,11 +81,13 @@ Goal: every guest function translates to C++ that compiles.
 - Register save/restore helpers located by byte pattern (`config/backbreaker.toml`).
 - Result: 30,000+ functions -> 116 C++ files, 0 recompiler warnings, all compile with clang.
 - Tests: `tests/instr_semantics.cpp` checks the byte-order-sensitive vector ops and carry
-  arithmetic against hand-computed results (a deliberately broken variant is caught).
+  arithmetic against hand-computed results (a deliberately broken variant is caught). Builds
+  without game files against `tests/ppc_config_stub/` and runs in GitHub Actions on every
+  push (`.github/workflows/ci.yml`), which also builds the patched XenonRecomp.
 
 Verify: see README "Recompile" and "Tests".
 
-Open issues: #1 (tests without game files + CI), #2 (tests for the remaining new instructions).
+Open issues: #2 (tests for the remaining new instructions).
 
 ## Phase 2 - Host runtime boot (done)
 
