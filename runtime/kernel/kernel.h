@@ -39,6 +39,7 @@ namespace kernel
         uint32_t kthread;
         uint32_t stackBase;  // highest address
         uint32_t stackLimit; // lowest address
+        uint32_t stackSize;  // 0 once the stack has been returned to the heap
         uint32_t tlsSlots;   // guest array of 64 u32 slots
         uint32_t id;
         // Ring of recent profiler scope names (guest string addresses), see scopes.cpp

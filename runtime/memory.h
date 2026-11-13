@@ -32,11 +32,16 @@ namespace mem
     bool physicalFree(uint32_t guest);
     void usage(uint64_t& virtualMb, uint64_t& physicalMb);
 
-    // Allocation bookkeeping for NtQueryVirtualMemory / MmQueryAllocationSize
-    struct Allocation { uint32_t base, size, protect; };
+    constexpr uint32_t kProtectReadWrite = 0x04;
+
+    // Allocation bookkeeping for NtQueryVirtualMemory / MmQueryAllocationSize. The caller and
+    // its lr are kept so the crash/timeout report can show which import still holds memory.
+    struct Allocation { uint32_t base, size, protect; const char* caller; uint32_t lr; };
     bool findAllocation(uint32_t addr, Allocation& out);
-    void recordAllocation(uint32_t base, uint32_t size, uint32_t protect);
+    void recordAllocation(uint32_t base, uint32_t size, uint32_t protect, const char* caller, uint32_t lr = 0);
     void forgetAllocation(uint32_t base);
+    // Tracked allocations still held, grouped by (caller, lr), largest first
+    void printAllocationStats();
 
     inline uint8_t* host(uint32_t guest) { return base + guest; }
     // Physical address (as the GPU sees it) -> host pointer

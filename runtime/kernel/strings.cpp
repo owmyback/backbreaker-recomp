@@ -232,7 +232,9 @@ GUEST_IMPORT(RtlUnicodeStringToAnsiString)
     uint32_t chars = read16(src) / 2, buf = read32(src + 4);
     if (alloc)
     {
-        uint32_t b = virtualAlloc(chars + 1, 16);
+        uint32_t size = (chars + 1 + 15) & ~15u;
+        uint32_t b = virtualAlloc(size, 16);
+        recordAllocation(b, size, kProtectReadWrite, "RtlUnicodeStringToAnsiString", uint32_t(ctx.lr));
         write32(dst + 4, b);
         write16(dst + 2, chars + 1);
     }

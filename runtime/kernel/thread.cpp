@@ -38,6 +38,24 @@ namespace
 
     struct ThreadExit { uint32_t code; };
 
+    // A guest thread's stack is the only part of it that can be given back: no guest code can
+    // run on it once its entry point has returned. The PCR, TLS slots and KTHREAD stay in the
+    // kernel arena (the bump allocator there has no free), because handles, waits and
+    // ObReferenceObjectByHandle still reference the KTHREAD header. Nothing reads a dead
+    // thread's stack: the runtime's backtraces use the host stack, and the guest's own
+    // KTHREAD/PCR keep the old range but no longer point at memory we own.
+    void freeGuestStack(kernel::GuestThread* t)
+    {
+        if (!t->stackSize)
+            return;
+        uint32_t size = t->stackSize;
+        if (virtualFree(t->stackLimit))
+            info("thread %u: stack %08X (%u KB) freed", t->id, t->stackLimit, int(size >> 10));
+        else
+            warn("thread %u: stack %08X is not an allocation start", t->id, t->stackLimit);
+        t->stackSize = 0;
+    }
+
     struct StartInfo
     {
         kernel::Thread* thread;
@@ -85,6 +103,7 @@ namespace
 
         info("thread %u exited (code %08X)", th->guestThread->id, code);
         th->guestThread->hostRunning = false; // the thread sampler must not signal it any more
+        freeGuestStack(th->guestThread);
         std::lock_guard lock(kernel::g_dispatchLock);
         th->exited = true;
         th->exitCode = code;
@@ -101,6 +120,8 @@ namespace kernel
         t->id = g_nextThreadId++;
         t->stackLimit = virtualAlloc(stackSize, 0x10000);
         t->stackBase = t->stackLimit + stackSize;
+        t->stackSize = stackSize;
+        recordAllocation(t->stackLimit, stackSize, kProtectReadWrite, "ExCreateThread stack", uint32_t(ctx.lr));
         t->tlsSlots = kernelAlloc(64 * 4);
         t->pcr = kernelAlloc(kPcrSize, 0x1000);
         t->kthread = kernelAlloc(kThreadSize, 0x10);

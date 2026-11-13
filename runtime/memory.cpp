@@ -1,11 +1,15 @@
 #include "memory.h"
 #include "log.h"
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
 #include <sys/mman.h>
+#include <tuple>
 #include <unistd.h>
+#include <vector>
 
 namespace mem
 {
@@ -135,10 +139,10 @@ namespace mem
         std::map<uint32_t, Allocation> g_allocs; // keyed by base
     }
 
-    void recordAllocation(uint32_t b, uint32_t size, uint32_t protect)
+    void recordAllocation(uint32_t b, uint32_t size, uint32_t protect, const char* caller, uint32_t lr)
     {
         std::lock_guard guard(g_allocLock);
-        g_allocs[b] = { b, size, protect };
+        g_allocs[b] = { b, size, protect, caller, lr };
     }
 
     bool findAllocation(uint32_t addr, Allocation& out)
@@ -183,5 +187,29 @@ namespace mem
     {
         virtualMb = g_virtual.inUse >> 20;
         physicalMb = g_physical.inUse >> 20;
+    }
+
+    void printAllocationStats()
+    {
+        struct Row { const char* heap; uint64_t bytes; std::string caller; uint32_t lr; uint32_t blocks; };
+        std::lock_guard guard(g_allocLock);
+        std::map<std::pair<std::string, uint32_t>, std::pair<uint64_t, uint32_t>> byCaller; // -> (bytes, blocks)
+        std::map<std::pair<std::string, uint32_t>, const char*> heap;                        // -> which heap holds them
+        for (auto& [b, a] : g_allocs)
+        {
+            auto& r = byCaller[{a.caller, a.lr}];
+            r.first += a.size;
+            r.second++;
+            heap[{a.caller, a.lr}] = a.base >= kPhysicalBase ? "phys" : "virt";
+        }
+        std::vector<Row> rows;
+        for (auto& [k, v] : byCaller)
+            rows.push_back({heap[k], v.first, k.first, k.second, v.second});
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.bytes > b.bytes; });
+
+        std::fprintf(stderr, "---- allocations still held ----\n");
+        for (auto& r : rows)
+            std::fprintf(stderr, "  %c %8llu KB  %5u blocks  %-30s lr=%08X\n", r.heap[0],
+                         (unsigned long long)(r.bytes >> 10), r.blocks, r.caller.c_str(), r.lr);
     }
 }

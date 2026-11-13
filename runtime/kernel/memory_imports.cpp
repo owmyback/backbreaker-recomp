@@ -9,7 +9,6 @@ namespace
     constexpr uint32_t MEM_COMMIT = 0x1000;
     constexpr uint32_t MEM_LARGE_PAGES = 0x20000000; // 64 KB pages
     constexpr uint32_t MEM_16MB_PAGES = 0x80000000;
-    constexpr uint32_t PAGE_READWRITE = 0x04;
 
     uint32_t pageSizeFor(uint32_t type)
     {
@@ -42,7 +41,7 @@ GUEST_IMPORT(NtAllocateVirtualMemory)
     }
 
     uint32_t addr = virtualAlloc(size, page < 0x10000 ? 0x10000 : page);
-    recordAllocation(addr, size, protect ? protect : PAGE_READWRITE);
+    recordAllocation(addr, size, protect ? protect : kProtectReadWrite, "NtAllocateVirtualMemory", uint32_t(ctx.lr));
     write32(pBase, addr);
     write32(pSize, size);
     ctx.r3.u64 = STATUS_SUCCESS;
@@ -93,7 +92,7 @@ GUEST_IMPORT(MmAllocatePhysicalMemoryEx)
     uint32_t page = (protect & MEM_16MB_PAGES) ? 0x1000000 : (protect & MEM_LARGE_PAGES) ? 0x10000 : 0x1000;
     if (align < page) align = page;
     uint32_t addr = physicalAlloc(roundUp(size, page), align);
-    recordAllocation(addr, roundUp(size, page), protect & 0xFF);
+    recordAllocation(addr, roundUp(size, page), protect & 0xFF, "MmAllocatePhysicalMemoryEx", uint32_t(ctx.lr));
     ctx.r3.u64 = addr;
 }
 
@@ -116,7 +115,7 @@ GUEST_IMPORT(MmQueryAllocationSize)
 GUEST_IMPORT(MmQueryAddressProtect)
 {
     Allocation a;
-    ctx.r3.u64 = findAllocation(ctx.r3.u32, a) ? a.protect : PAGE_READWRITE;
+    ctx.r3.u64 = findAllocation(ctx.r3.u32, a) ? a.protect : kProtectReadWrite;
 }
 
 // void* ExAllocatePoolWithTag(size_t Size, u32 Tag)
@@ -124,7 +123,7 @@ GUEST_IMPORT(ExAllocatePoolWithTag)
 {
     uint32_t size = roundUp(ctx.r3.u32 ? ctx.r3.u32 : 1, 16);
     uint32_t addr = virtualAlloc(size, 16);
-    recordAllocation(addr, size, PAGE_READWRITE);
+    recordAllocation(addr, size, kProtectReadWrite, "ExAllocatePoolWithTag", uint32_t(ctx.lr));
     ctx.r3.u64 = addr;
 }
 
@@ -139,7 +138,7 @@ GUEST_IMPORT(XamAlloc)
 {
     uint32_t size = roundUp(ctx.r4.u32 ? ctx.r4.u32 : 1, 16);
     uint32_t addr = virtualAlloc(size, 16);
-    recordAllocation(addr, size, PAGE_READWRITE);
+    recordAllocation(addr, size, kProtectReadWrite, "XamAlloc", uint32_t(ctx.lr));
     write32(ctx.r5.u32, addr);
     ctx.r3.u64 = 0;
 }

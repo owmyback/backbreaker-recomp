@@ -33,14 +33,17 @@ their guest address, and the presenter shows the image resolved to the front buf
   features log one `[render] WARNING` each.
 
 On a crash or timeout it prints the host backtrace (sub_XXXXXXXX names are guest functions),
-the last 32 kernel calls and a per-import usage summary.
+the last 32 kernel calls, a per-import usage summary, and the allocations still held grouped by
+the import that made them.
 
 ## Layout
 - `runtime/main.cpp` - loader, indirect call table, crash handler
-- `runtime/memory.*` - 4 GB guest address space and allocators
+- `runtime/memory.*` - 4 GB guest address space and allocators; every tracked allocation records
+  the import that made it, which is what the report above can group by
 - `runtime/kernel/` - kernel/XAM imports
   - `objects.*` handles, events, semaphores, waits
-  - `thread.cpp` guest threads (PCR, KTHREAD, TLS, host pthreads)
+  - `thread.cpp` guest threads (PCR, KTHREAD, TLS, host pthreads); the stack is returned to the
+    heap when the thread exits
   - `files.cpp` file system (game:\ -> game/disc, cache:\ -> game/cache; saves mounted at runtime)
   - `xam_content.cpp` saves: content packages in game/saves/<type>/<name>/, mounted as save:\
   - `memory_imports.cpp`, `sync.cpp`, `strings.cpp`, `system.cpp`, `xex.cpp`, `variables.cpp`
@@ -50,7 +53,9 @@ the last 32 kernel calls and a per-import usage summary.
 Phase 3 (headless subsystems, see docs/ROADMAP.md) works end to end: the game boots, initializes graphics, audio, voice
 (XHV2), comms and input, plays the 505 and NaturalMotion logo movies at ~30 fps, loads its sound
 banks (~3 s), then runs its front end at a steady 30 fps (~65 draws per frame, likely the game's
-own cap). Tested for 4 minutes: memory stays flat (~135 MB virtual + 280 MB physical). Nothing is
+own cap). Tested for 5 minutes: memory stays flat (~106 MB virtual + 276 MB physical) once the
+load is done. It did not use to: a thread's stack was never returned, so the front end's movie
+player grew the virtual heap 1 MB per loop (issue #5). Nothing is
 drawn: the command processor executes PM4 packets only for their side effects.
 
 The earlier "slow menu" was a loading screen stuck forever: FMOD's sound-bank loader waited on the
@@ -142,6 +147,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - `--timeout N`: after N seconds print every thread's recent scopes and calls.
 
 ## Known shortcuts
+- Kernel objects (KTHREAD, PCR, TLS slots, events) are never freed; only a thread's stack is
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Physical memory is not aliased across 0xA0/0xC0/0xE0 ranges yet
 - KeTimeStampBundle is not updated; timer APC routines are not delivered

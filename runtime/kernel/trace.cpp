@@ -84,5 +84,6 @@ namespace kernel
             (c.second ? impl : unimpl)++;
         }
         std::fprintf(stderr, "  distinct imports called: %zu implemented, %zu unimplemented\n", impl, unimpl);
+        mem::printAllocationStats();
     }
 }
