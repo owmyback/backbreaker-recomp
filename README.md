@@ -46,8 +46,12 @@ included or provided here. Below, `<iso>` is the path to your image.
     mkdir -p ppc && third_party/XenonRecomp/build/XenonRecomp/XenonRecomp config/backbreaker.toml third_party/XenonRecomp/XenonUtils/ppc_context.h
 
 ## Tests
+No game files needed; CI runs this on every push (`.github/workflows/ci.yml`):
+
     X=third_party/XenonRecomp
-    mkdir -p build && clang++ -std=c++20 -O2 -march=x86-64-v3 -I ppc -I $X/XenonUtils -I $X/thirdparty/simde tests/instr_semantics.cpp -o build/instr_semantics && build/instr_semantics
+    mkdir -p build && clang++ -std=c++20 -O2 -march=x86-64-v3 -I tests/ppc_config_stub -I $X/XenonUtils -I $X/thirdparty/simde tests/instr_semantics.cpp -o build/instr_semantics && build/instr_semantics
+
+To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 ## Build and run the runtime
 See `docs/runtime.md` (import glue generation, CMake/Ninja build, `./build/backbreaker --timeout N`).
