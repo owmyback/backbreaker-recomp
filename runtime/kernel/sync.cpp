@@ -150,4 +150,46 @@ GUEST_IMPORT(KeReleaseSpinLockFromRaisedIrql) { __atomic_store_n(raw32(ctx.r3.u3
 GUEST_IMPORT(KeEnterCriticalRegion) {}
 GUEST_IMPORT(KeLeaveCriticalRegion) {}
 GUEST_IMPORT(KeLockL2) { ctx.r3.u64 = 0; }
+
+// ---- Interlocked singly linked lists (SLIST) ----
+// X_SLIST_HEADER { u32 next; u16 depth; u16 sequence } (big-endian, 8 bytes; Xenia's xbox.h).
+// Pop and flush as in Xenia's xboxkrnl_threading.cc: one 64-bit compare-and-swap of the whole
+// header, which also works against the game's push (the compiler inlines it with reservations on
+// the same memory, so InterlockedPushEntrySList is never imported). PhysX keeps its per-thread
+// contexts in such a list: while pop was a stub that returned "empty", every simulation step
+// allocated new ones (a 128 KB and a 64 KB cache each) and the game ran out of memory a minute
+// into a match.
+
+// PSINGLE_LIST_ENTRY InterlockedPopEntrySList(PSLIST_HEADER ListHead)
+GUEST_IMPORT(InterlockedPopEntrySList)
+{
+    auto* header = reinterpret_cast<uint64_t*>(host(ctx.r3.u32));
+    uint64_t raw = __atomic_load_n(header, __ATOMIC_SEQ_CST);
+    for (;;)
+    {
+        uint64_t old = __builtin_bswap64(raw);
+        uint32_t first = uint32_t(old >> 32);
+        if (!first)
+        {
+            ctx.r3.u64 = 0;
+            return;
+        }
+        uint16_t depth = uint16_t(old >> 16), sequence = uint16_t(old);
+        uint64_t next = (uint64_t(read32(first)) << 32) | (uint64_t(uint16_t(depth - 1)) << 16) | sequence;
+        if (__atomic_compare_exchange_n(header, &raw, __builtin_bswap64(next), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+        {
+            ctx.r3.u64 = first;
+            return;
+        }
+    }
+}
+
+// PSINGLE_LIST_ENTRY InterlockedFlushSList(PSLIST_HEADER ListHead): empties the list (next, depth
+// and sequence all 0, as Xenia) and returns the old first entry
+GUEST_IMPORT(InterlockedFlushSList)
+{
+    auto* header = reinterpret_cast<uint64_t*>(host(ctx.r3.u32));
+    uint64_t raw = __atomic_exchange_n(header, uint64_t(0), __ATOMIC_SEQ_CST);
+    ctx.r3.u64 = uint32_t(__builtin_bswap64(raw) >> 32);
+}
 GUEST_IMPORT(KeUnlockL2) {}
