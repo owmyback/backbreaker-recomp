@@ -74,10 +74,17 @@ Subsystems:
   crash and timeout reports list each thread's recent scopes
 - `runtime/debug/guest_trace.cpp` - GUEST_TRACE(addr) wraps a guest function to log args/result
 
+## Controllers
+Controllers are read through SDL3 (users 0-3 = the first four controllers SDL lists; a
+DualSense's Cross/Circle/Square/Triangle are A/B/X/Y, Create/Options are Back/Start). The log
+shows `[hid] controller on user 0: ...` when one is found. On KDE Plasma 6.7+, turn off System
+Settings -> Game Controller -> pointer navigation, or the stick also moves the mouse.
+
 ## Scripted input
 `--press "start@12,a@20,down@24.5"` presses each button that many seconds after launch (held
-150 ms), reported as pad state and as keystrokes. Buttons: a b x y start back up down left right
-lb rb ls rs. Example that gets past the title screen: `--press "a@20,a@26"`.
+150 ms), reported as pad state and as keystrokes, added to any real controller on user 0.
+Buttons: a b x y start back up down left right lb rb ls rs. Example that gets past the title
+screen to the main menu: `--press "a@20,a@26"`.
 
 ## GPU frame capture
 `./build/backbreaker --capture-frame 1200` (or a list: `--capture-frame 300,1200,2400`) records the

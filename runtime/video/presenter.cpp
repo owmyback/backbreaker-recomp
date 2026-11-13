@@ -8,6 +8,7 @@
 // submission order plus the barrier below order its writes before our read.
 #include "presenter.h"
 #include "vk_context.h"
+#include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
 
@@ -369,6 +370,7 @@ namespace video
         vk.window = SDL_CreateWindow("Backbreaker (recomp)", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
         if (!vk.window)
             fatal("[video] SDL_CreateWindow: %s (use --headless to run without a window)", SDL_GetError());
+        hid::initGamepads(); // controllers are polled in this loop (SDL events live on this thread)
         createInstanceAndDevice();
         bool haveSwapchain = createSwapchain();
         info("[video] window open (%ux%u)", vk.swapExtent.width, vk.swapExtent.height);
@@ -388,6 +390,7 @@ namespace video
                     haveSwapchain = false;
             }
             if (!running) break;
+            hid::pollGamepads();
 
             if (!haveSwapchain)
             {

@@ -204,6 +204,7 @@ int main(int argc, char** argv)
         {
             if (!hid::setScript(argv[++i]))
                 return 2;
+            hid::setVirtualPad(true); // user 0 stays connected for the scripted presses
         }
         else if (a == "--capture-frame" && i + 1 < argc)
         {
@@ -236,7 +237,11 @@ int main(int argc, char** argv)
         alarm(timeout);
 
     if (headless)
+    {
+        hid::setVirtualPad(true); // keep user 0 connected for headless test runs
+        hid::startInputThread();  // real controllers still work, polled on their own thread
         runGuestMain(); // no window: the game runs on the process main thread, as before
+    }
 
     vkctx::expectWindow(); // the renderer waits for the window's Vulkan device
 
