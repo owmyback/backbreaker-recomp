@@ -33,7 +33,7 @@ still silence.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-5 done: first picture) | `258ec24`, `7bf4023` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-6 done: first picture, resolution scaling) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -237,7 +237,7 @@ game's draws on the host GPU. The attract movie renders correctly (checked with
   asked. Linear textures (8, 8_8, 8_8_8_8, DXT1/3/5) upload once per frame they are used.
 - `--screenshot N` writes PNGs (headless too); `--no-render` turns the renderer off.
 
-**Step 6 - Internal resolution scaling (`STEP6`).** `--resolution-scale N` (1-4) multiplies
+**Step 6 - Internal resolution scaling (`9ac4cb9`).** `--resolution-scale N` (1-4) multiplies
 render targets, the host viewport, scissors, resolve rectangles and clears by N while the game
 still renders "1280x720"; the guest viewport math stays in guest pixels. Checked: the attract
 movie at 3x renders a full 3840x2160 front buffer at 30 fps.
