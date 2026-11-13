@@ -30,11 +30,14 @@ file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/runtime/gpu/generated/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/apu/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/hid/*.cpp
+    ${CMAKE_SOURCE_DIR}/runtime/video/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/debug/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/generated/*.cpp)
 add_executable(backbreaker ${RUNTIME_SOURCES})
 target_include_directories(backbreaker PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
 target_compile_options(backbreaker PRIVATE ${COMMON_FLAGS} -Wall -Wno-unused-function)
-target_link_libraries(backbreaker PRIVATE backbreaker_ppc)
+find_package(Vulkan REQUIRED)
+find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
+target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3)
 # export symbols so crash backtraces show guest function names
 target_link_options(backbreaker PRIVATE -rdynamic)

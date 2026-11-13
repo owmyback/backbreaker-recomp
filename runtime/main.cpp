@@ -8,6 +8,7 @@
 #include "apu/apu.h"
 #include "gpu/capture.h"
 #include "hid/hid.h"
+#include "video/presenter.h"
 #include "log.h"
 #include "memory.h"
 
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <execinfo.h>
 #include <fstream>
+#include <pthread.h>
 #include <string>
 #include <ucontext.h>
 #include <unistd.h>
@@ -133,16 +135,51 @@ namespace
     }
 }
 
+namespace
+{
+    PPCContext g_mainCtx{};
+    kernel::GuestThread* g_mainThread = nullptr;
+
+    // Runs the game's entry point on the calling host thread. Never returns.
+    void runGuestMain()
+    {
+        // Per-thread state: alternate signal stack, current guest thread, FPU mode
+        static thread_local std::vector<uint8_t> altStack(1 << 16);
+        stack_t ss{};
+        ss.ss_sp = altStack.data();
+        ss.ss_size = altStack.size();
+        sigaltstack(&ss, nullptr);
+        kernel::setCurrentThread(g_mainThread);
+        kernel::adoptCurrentThread(g_mainThread, &g_mainCtx);
+        g_mainCtx.fpscr.loadFromHost();
+
+        info("calling entry point _xstart");
+        _xstart(g_mainCtx, mem::base);
+        info("_xstart returned (r3=%08X)", g_mainCtx.r3.u32);
+        kernel::printSummary();
+        _exit(0);
+    }
+
+    void* guestThreadEntry(void*)
+    {
+        runGuestMain();
+        return nullptr;
+    }
+}
+
 int main(int argc, char** argv)
 {
     std::string image = "game/extracted/default.pe";
     std::string xex = "game/extracted/default.xex";
     int timeout = 0;
+    bool headless = false;
     for (int i = 1; i < argc; i++)
     {
         std::string a = argv[i];
         if (a == "--timeout" && i + 1 < argc)
             timeout = std::atoi(argv[++i]);
+        else if (a == "--headless")
+            headless = true;
         else if (a == "--press" && i + 1 < argc)
         {
             if (!hid::setScript(argv[++i]))
@@ -171,20 +208,28 @@ int main(int argc, char** argv)
     kernel::patchImports();
     kernel::initFileSystem("game/disc", "game/cache");
 
-    static PPCContext ctx{};
-    ctx.fpscr.loadFromHost();
-    kernel::GuestThread* mainThread = kernel::createGuestThread(ctx, 0x100000);
-    kernel::setCurrentThread(mainThread);
-    kernel::adoptCurrentThread(mainThread, &ctx);
+    g_mainThread = kernel::createGuestThread(g_mainCtx, 0x100000);
     gpu::init();
     apu::initXma();
 
     if (timeout > 0)
         alarm(timeout);
 
-    info("calling entry point _xstart");
-    _xstart(ctx, mem::base);
-    info("_xstart returned (r3=%08X)", ctx.r3.u32);
+    if (headless)
+        runGuestMain(); // no window: the game runs on the process main thread, as before
+
+    // Windowed: the game runs on its own host thread (large stack: recompiled code recurses on
+    // the host stack) and the process main thread drives the window, as SDL expects.
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 16 << 20);
+    pthread_t guest;
+    if (int err = pthread_create(&guest, &attr, guestThreadEntry, nullptr))
+        fatal("could not start the guest main thread: %s", strerror(err));
+    pthread_attr_destroy(&attr);
+
+    video::run();
+    info("window closed - exiting");
     kernel::printSummary();
-    return 0;
+    _exit(0);
 }

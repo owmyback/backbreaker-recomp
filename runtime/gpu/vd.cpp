@@ -99,6 +99,16 @@ GUEST_IMPORT(VdSwap)
     uint32_t ring = ctx.r3.u32, pFront = ctx.r8.u32;
     uint32_t pWidth = stackArg(ctx, 8), pHeight = stackArg(ctx, 9);
     uint32_t front = pFront ? read32(pFront) : 0;
+    static bool logged = false;
+    if (!logged && ctx.r4.u32)
+    {
+        // Front buffer texture fetch constant (Xenia xe_gpu_texture_fetch_t): log its layout once
+        uint32_t f = ctx.r4.u32, d0 = read32(f), d1 = read32(f + 4), d2 = read32(f + 8);
+        info("[gpu] VdSwap front buffer: base %08X format %u endian %u tiled %u pitch %u size %ux%u (fetch %08X %08X %08X)",
+             d1 & 0xFFFFF000, d1 & 0x3F, (d1 >> 6) & 3, d0 >> 31, ((d0 >> 22) & 0x1FF) * 32, (d2 & 0x1FFF) + 1,
+             ((d2 >> 13) & 0x1FFF) + 1, d0, d1, d2);
+        logged = true;
+    }
     uint32_t width = pWidth > 0x10000 ? read32(pWidth) : gpu::kDisplayWidth;
     uint32_t height = pHeight > 0x10000 ? read32(pHeight) : gpu::kDisplayHeight;
 

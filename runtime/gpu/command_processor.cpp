@@ -3,6 +3,7 @@
 // Packet formats follow Xenia's command_processor.cc.
 #include "gpu.h"
 #include "capture.h"
+#include "../video/presenter.h"
 #include "../kernel/objects.h"
 #include "../apu/apu.h"
 #include "../log.h"
@@ -324,6 +325,7 @@ namespace gpu
                 g_frames++;
                 g_counter++;
                 capture::onSwap(g_frames, g_frontBuffer, g_frontWidth, g_frontHeight);
+                video::publishFrame(g_frontBuffer, g_frontWidth, g_frontHeight, g_frames);
                 return;
             }
             default:

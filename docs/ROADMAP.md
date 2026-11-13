@@ -31,7 +31,7 @@ audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (step 0 done) | `258ec24` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-1 done) | `258ec24` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -153,15 +153,27 @@ shader loads, register changes, render targets and textures to `captures/frame_N
 - Front buffer is 1280x720 8_8_8_8 at physical 0x00840000.
 - Movies are drawn by the GPU, not decoded by us: their pictures come with the renderer.
 
+**Step 1 - Window + present (done, `STEP1`).** SDL3 window and Vulkan swapchain (FIFO) on the
+process main thread; the game runs on its own host thread and never waits on the window. Each
+guest swap publishes the front buffer; the presenter copies it into a staging buffer, uploads it
+and blits it letterboxed into the swapchain image. Window title: game fps and display fps (30 and
+240 on the dev machine). `--headless` keeps the old behavior. Findings:
+- The front buffer is the destination of the frame's last draw, an EDRAM resolve
+  (`RB_COPY_DEST_BASE` 0x00840000, pitch 1280, height 720, `RB_COPY_DEST_INFO`: format 8_8_8_8,
+  red/blue swapped).
+- `VdSwap`'s front-buffer texture fetch constant confirms: 8_8_8_8, **tiled**, pitch 1280,
+  1280x720. The presenter copies raw for now, so it will need untiling once pixels exist.
+- The picture is black: our command processor does not execute resolves or draws yet.
+
 Remaining steps:
-1. Window + present: open a Vulkan window and display the front buffer the game swaps to
-   (`[gpu]` line reports it at 0x00840000, 1280x720). Even before shaders, this shows whether
-   anything is drawn and lets us test resolves/EDRAM copies.
+1. Shader disassembler for the captured microcode (which Xenos instructions this game uses).
 2. Xenos state tracking: render targets (EDRAM), viewport, blend/depth state from the register file.
 3. Shader translation: Xenos microcode (vertex/pixel) -> SPIR-V. Xenia's shader translator is the
    reference.
-4. Textures: tiled formats, untiling, format conversion; vertex fetch.
-5. Draw calls (`DRAW_INDX`, `DRAW_INDX_2`), resolves, swap.
+4. Render targets in EDRAM, resolves to memory (including the front buffer); internal
+   resolution scaling.
+5. Textures: tiled formats, untiling, format conversion; vertex fetch.
+6. Draw calls (`DRAW_INDX`, `DRAW_INDX_2`). First picture expected: the attract movie.
 This is the largest phase (weeks to months).
 
 ## Phase 5 - Controller input (planned)
@@ -225,6 +237,7 @@ Open issues: #4 (one-step setup script).
 - XMA output is silence; XAudio frames are discarded.
 - Networking (`NetDll_*`), XAM content, achievements and guide UI are stubs.
 - `WAIT_REG_MEM` in the command processor spins with `yield`.
+- The presenter shows the front buffer raw (tiled, no format conversion).
 - Profile settings are returned empty.
 - Virtual memory grows ~1 MB per 20 s in the front end (not investigated).
 

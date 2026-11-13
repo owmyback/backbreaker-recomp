@@ -11,6 +11,11 @@
     ninja -C build
     ./build/backbreaker --timeout 15     # run from the repo root
 
+By default a window opens (SDL3 + Vulkan) showing the guest front buffer; its title shows the
+game's frame rate and the display rate. `--headless` runs without a window, exactly as before
+the window existed. Build dependencies for the window: Vulkan headers/loader and SDL3 development
+packages. Set `BB_VK_VALIDATION=1` to enable the Vulkan validation layer (if installed).
+
 On a crash or timeout it prints the host backtrace (sub_XXXXXXXX names are guest functions),
 the last 32 kernel calls and a per-import usage summary.
 
@@ -35,6 +40,11 @@ The earlier "slow menu" was a loading screen stuck forever: FMOD's sound-bank lo
 XMA hardware decoder, which did not exist. With XMA emulated (silent output) loading completes.
 
 Subsystems:
+- `runtime/video/presenter.cpp` - window and presentation: the process main thread runs SDL and
+  Vulkan, the guest's main thread runs on its own host thread (16 MB stack); at each swap the
+  command processor only publishes the front-buffer address/size (lock-free) and the presenter
+  copies it on its own schedule, so the game never waits on the window. Currently a raw copy:
+  the picture is black because nothing renders into the front buffer yet
 - `runtime/gpu/` - Vd* imports, PM4 command processor, register file at 0x7FC80000, 60 Hz vblank
   interrupt; MMIO stores reach it through `runtime/ppc_hooks.h` (force-included into ppc/)
 - `runtime/apu/` - XAudio render driver clock (256 samples @ 48 kHz), frames discarded
