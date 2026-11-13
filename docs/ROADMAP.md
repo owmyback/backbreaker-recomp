@@ -168,7 +168,7 @@ and blits it letterboxed into the swapchain image. Window title: game fps and di
 Open issues (separable from the renderer core): #9 (fullscreen toggle), #10 (screenshot key),
 #11 (Vulkan validation clean run), #12 (tested tiled/linear conversion).
 
-**Step 2 - Shader disassembler (done, `STEP2`).** `runtime/gpu/ucode.h` decodes Xenos microcode
+**Step 2 - Shader disassembler (done, `c5562a6`).** `runtime/gpu/ucode.h` decodes Xenos microcode
 (control flow, vertex/texture fetch, paired vector+scalar ALU; layouts from Xenia's `ucode.h`),
 `runtime/gpu/disasm.cpp` disassembles it and `build/xenos-disasm` summarizes coverage over a set
 of shaders. `--dump-shaders` collects every shader a run loads. Coverage of the 58 unique shaders
