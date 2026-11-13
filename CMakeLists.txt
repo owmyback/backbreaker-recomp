@@ -41,3 +41,7 @@ find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
 target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3)
 # export symbols so crash backtraces show guest function names
 target_link_options(backbreaker PRIVATE -rdynamic)
+
+# Shader disassembler / coverage tool for captured Xenos microcode (no game data needed to build)
+add_executable(xenos-disasm tools/xenos_disasm.cpp runtime/gpu/disasm.cpp)
+target_compile_options(xenos-disasm PRIVATE -Wall)

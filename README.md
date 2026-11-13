@@ -33,6 +33,7 @@ included or provided here. Below, `<iso>` is the path to your image.
 ## XenonRecomp setup
     git clone --recursive https://github.com/hedge-dev/XenonRecomp.git third_party/XenonRecomp
     git -C third_party/XenonRecomp checkout ddd128b
+    git -C third_party/XenonRecomp submodule update --init --recursive   # submodules as of ddd128b
     git -C third_party/XenonRecomp apply ../../patches/xenonrecomp-backbreaker-instructions.patch
     cmake -S third_party/XenonRecomp -B third_party/XenonRecomp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
     ninja -C third_party/XenonRecomp/build

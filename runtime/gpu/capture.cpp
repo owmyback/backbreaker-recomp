@@ -62,6 +62,7 @@ namespace gpu::capture
         std::map<uint64_t, Shader> g_shaders; // hash -> microcode (all shaders seen, big-endian words)
         uint64_t g_currentShader[2] = { 0, 0 }; // vertex, pixel
         std::set<uint64_t> g_targets_pending; // frames still to capture
+        std::string g_dumpDir;                // --dump-shaders target, empty = off
         std::string g_dir = "captures";
         bool g_active = false;
 
@@ -212,6 +213,14 @@ namespace gpu::capture
         }
     }
 
+    void dumpAllShaders(const std::string& dir)
+    {
+        std::lock_guard guard(g_lock);
+        fs::create_directories(dir);
+        g_dumpDir = dir;
+        info("[capture] dumping every shader to %s", dir.c_str());
+    }
+
     void request(uint64_t frame, const std::string& dir)
     {
         std::lock_guard guard(g_lock);
@@ -230,7 +239,19 @@ namespace gpu::capture
         std::lock_guard guard(g_lock);
         uint64_t h = fnv1a(words, dwords);
         if (!g_shaders.count(h))
+        {
             g_shaders[h] = { type, std::vector<uint32_t>(words, words + dwords) };
+            if (!g_dumpDir.empty())
+            {
+                char name[64];
+                snprintf(name, sizeof(name), "%s_%016llx.bin", type ? "ps" : "vs", (unsigned long long)h);
+                if (FILE* s = fopen((fs::path(g_dumpDir) / name).c_str(), "wb"))
+                {
+                    fwrite(words, 4, dwords, s); // big-endian dwords, as in guest memory
+                    fclose(s);
+                }
+            }
+        }
         if (type < 2) g_currentShader[type] = h;
         if (g_active && g_drawLog)
             fprintf(g_drawLog, "load %s shader %016llx (%u dwords at %u)\n", type ? "pixel" : "vertex",

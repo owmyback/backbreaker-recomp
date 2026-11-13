@@ -11,6 +11,9 @@ namespace gpu::capture
     // Can be called several times to capture several frames in one run.
     void request(uint64_t frame, const std::string& dir = "captures");
 
+    // Write every unique shader the game loads during the run to `dir` (vs_/ps_<hash>.bin).
+    void dumpAllShaders(const std::string& dir);
+
     // Hooks called by the command processor (cheap when no capture is active)
     void onPacket(uint32_t opcode);
     void onShaderLoad(uint32_t type, uint32_t start, uint32_t dwords, const uint32_t* bigEndianWords);

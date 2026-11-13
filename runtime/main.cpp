@@ -180,6 +180,8 @@ int main(int argc, char** argv)
             timeout = std::atoi(argv[++i]);
         else if (a == "--headless")
             headless = true;
+        else if (a == "--dump-shaders")
+            gpu::capture::dumpAllShaders("captures/shaders");
         else if (a == "--press" && i + 1 < argc)
         {
             if (!hid::setScript(argv[++i]))

@@ -31,7 +31,7 @@ audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-1 done) | `258ec24` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-2 done) | `258ec24` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -168,15 +168,31 @@ and blits it letterboxed into the swapchain image. Window title: game fps and di
 Open issues (separable from the renderer core): #9 (fullscreen toggle), #10 (screenshot key),
 #11 (Vulkan validation clean run), #12 (tested tiled/linear conversion).
 
+**Step 2 - Shader disassembler (done, `STEP2`).** `runtime/gpu/ucode.h` decodes Xenos microcode
+(control flow, vertex/texture fetch, paired vector+scalar ALU; layouts from Xenia's `ucode.h`),
+`runtime/gpu/disasm.cpp` disassembles it and `build/xenos-disasm` summarizes coverage over a set
+of shaders. `--dump-shaders` collects every shader a run loads. Coverage of the 58 unique shaders
+(30 vertex, 28 pixel) loaded from boot through the title screen to the storage-device prompt:
+- Control flow: straight-line `exec` blocks and `alloc` only - no loops, calls, jumps or
+  predicated execs yet.
+- Fetch: 72 vertex fetches (7 formats: 32_32/32_32_32/32_32_32_32/16_16/16_16_16_16 FLOAT,
+  8_8_8_8 and 2_10_10_10 normalized), 75 texture fetches (2D and cube).
+- Vector ALU (10 ops): mad, mul, max, add, cube, dp3, dp4, dp2add, min, cndeq.
+- Scalar ALU (15 ops): rcp, maxs, mulsc, rsq, adds_prev, muls, muls_prev, subsc, sgts, setp_gt,
+  log, exp, mins, addsc, setp_ge.
+- Exports: oPos, interpolators o0-o4, color outputs oC0/oC1. 9 predicated ALU instructions,
+  47 absolute-value sources. No pixel kills, relative addressing or memory export yet.
+So the translator can start small; gameplay shaders will extend this (re-run the coverage once
+the game gets further).
+
 Remaining steps:
-1. Shader disassembler for the captured microcode (which Xenos instructions this game uses).
-2. Xenos state tracking: render targets (EDRAM), viewport, blend/depth state from the register file.
-3. Shader translation: Xenos microcode (vertex/pixel) -> SPIR-V. Xenia's shader translator is the
+1. Xenos state tracking: render targets (EDRAM), viewport, blend/depth state from the register file.
+2. Shader translation: Xenos microcode (vertex/pixel) -> SPIR-V. Xenia's shader translator is the
    reference.
-4. Render targets in EDRAM, resolves to memory (including the front buffer); internal
+3. Render targets in EDRAM, resolves to memory (including the front buffer); internal
    resolution scaling.
-5. Textures: tiled formats, untiling, format conversion; vertex fetch.
-6. Draw calls (`DRAW_INDX`, `DRAW_INDX_2`). First picture expected: the attract movie.
+4. Textures: tiled formats, untiling, format conversion; vertex fetch.
+5. Draw calls (`DRAW_INDX`, `DRAW_INDX_2`). First picture expected: the attract movie.
 This is the largest phase (weeks to months).
 
 ## Phase 5 - Controller input (planned)
