@@ -15,15 +15,12 @@ Last updated: 2026-11-12 (phase 4 started)
 ## Current state
 
 The whole executable recompiles (0 warnings) and builds into one native binary. The runtime
-boots the game through its full initialization, runs through the two logo movies (timing only,
-nothing shown), loads all sound banks, and reaches the title screen, where it loops the attract
-movie (`attract.wmv`) with a 3D logo scene in between at a steady 30 fps. With scripted button
-presses (`--press`), the game leaves the title screen, asks for a storage device and starts
-looking for saves - where it stops, because save handling (phase 8) is not implemented yet.
-**The first picture is on screen**: the Vulkan renderer draws the attract movie correctly (the
-game decodes the video itself and draws it with its own shaders). Screens whose images are
-stored tiled (the logo screens) show magenta placeholders until untiling lands (#12). Audio is
-still silence.
+boots the game through its full initialization and renders it with Vulkan: the middleware logo
+screen, the attract movie and the title screen. With scripted button presses (`--press "a@20,a@26"`)
+the game leaves the title screen, picks the (emulated) hard drive, creates or loads its saves
+("Profile Options", "Custom Teams" in `game/saves/`) and reaches the **main menu** (Training
+Camp, Exhibition, Leagues, Tackle Alley, Xbox LIVE). Next: controller input (phase 5, #6) to
+actually play. Audio is still silence.
 
 ## Phase overview
 
@@ -37,7 +34,7 @@ still silence.
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
-| 8 | Saves and profile (XAM content) | **Next blocker** (device selector done) | - |
+| 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `STEP_SAVES` |
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | Planned | - |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Planned | - |
@@ -323,13 +320,16 @@ and any decoding the player expects hardware for.
 XamContent* (save devices, content creation/enumeration) mapped to a host directory; persist
 profile settings; device selector UI answered automatically.
 
-Status: the device selector is answered (one dummy hard drive, as in Xenia) and the XMP music
-player query is handled. The game then enumerates saves with `XamContentCreateEnumerator` /
-`XamEnumerate` and crashes on the stubs - this is the current blocker after the title screen.
-Next: enumerators (empty at first), `XamContentCreateEx` / `XamContentClose` mounting a save
-container as a drive (e.g. `save:`) backed by a host folder, `XamContentGetDeviceData`.
-
-Open issues: #7 (save system).
+Status - saves done (`STEP_SAVES`, issue #7): `runtime/kernel/xam_content.cpp` implements
+content enumerators (`XamContentCreateEnumerator` / `XamEnumerate`), `XamContentCreateEx` /
+`XamContentClose` (a package is mounted as a drive such as `save:` through a runtime device
+mount + symbolic link in `files.cpp`), `XamContentGetCreator`, `XamContentSetThumbnail` and the
+device queries, following Xenia's layouts. Packages live in
+`game/saves/<content type>/<file name>/`, with the display name in `<file name>.name` and the
+thumbnail in `<file name>.png`. The game creates "Profile Options" (`BBOPT15.SAV`, 1 KB) and
+"Custom Teams" (`BBCUST14`, 4 MB) on the first run and reopens them on the next, then reaches
+the main menu. Not yet: stored profile settings (`XamUserReadProfileSettings` still returns
+empty values), content on the disc device, `XamContentDelete`.
 
 ## Phase 9 - Gameplay correctness and performance (planned)
 

@@ -248,9 +248,42 @@ namespace
 
 namespace kernel
 {
-    void initFileSystem(const std::string& discRoot, const std::string& cacheRoot)
+    std::string g_savesRoot;
+    const std::string& savesRoot() { return g_savesRoot; }
+
+    void addMount(const std::string& devicePrefix, const std::string& hostRoot, bool writable)
+    {
+        std::lock_guard guard(g_fsLock);
+        std::string prefix = lower(devicePrefix);
+        g_mounts.erase(std::remove_if(g_mounts.begin(), g_mounts.end(), [&](auto& m) { return m.prefix == prefix; }), g_mounts.end());
+        g_mounts.push_back({ prefix, hostRoot, writable });
+        std::sort(g_mounts.begin(), g_mounts.end(), [](auto& a, auto& b) { return a.prefix.size() > b.prefix.size(); });
+    }
+
+    void removeMount(const std::string& devicePrefix)
+    {
+        std::lock_guard guard(g_fsLock);
+        std::string prefix = lower(devicePrefix);
+        g_mounts.erase(std::remove_if(g_mounts.begin(), g_mounts.end(), [&](auto& m) { return m.prefix == prefix; }), g_mounts.end());
+    }
+
+    void addSymbolicLink(const std::string& name, const std::string& target)
+    {
+        std::lock_guard guard(g_fsLock);
+        g_symlinks[lower(name)] = target;
+    }
+
+    void removeSymbolicLink(const std::string& name)
+    {
+        std::lock_guard guard(g_fsLock);
+        g_symlinks.erase(lower(name));
+    }
+
+    void initFileSystem(const std::string& discRoot, const std::string& cacheRoot, const std::string& savesRoot)
     {
         fs::create_directories(cacheRoot);
+        fs::create_directories(savesRoot);
+        g_savesRoot = savesRoot;
         // Longest prefixes first
         g_mounts = {
             { "\\device\\cdrom0", discRoot, false },

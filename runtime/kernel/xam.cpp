@@ -1,5 +1,6 @@
 // XAM: system notifications and the signed-in user. One local profile ("Player") is signed in
 // on controller 0; no Xbox LIVE. Behavior follows Xenia's xam_notify.cc / xam_user.cc.
+#include "kernel.h"
 #include "objects.h"
 #include "import_support.h"
 #include "../log.h"
@@ -83,8 +84,12 @@ namespace
     constexpr uint32_t ERROR_INVALID_PARAMETER = 87;
     constexpr uint32_t ERROR_IO_PENDING = 997;
 
+}
+
+namespace kernel
+{
     // XOVERLAPPED { u32 Result; u32 Length; u32 Context; HANDLE Event; void* Routine; u32 RoutineCtx; u32 ExtendedError; }
-    uint32_t completeOverlapped(uint32_t overlapped, uint32_t result, uint32_t length = 0)
+    uint32_t completeOverlapped(uint32_t overlapped, uint32_t result, uint32_t length)
     {
         if (!overlapped)
             return result;
@@ -150,7 +155,7 @@ GUEST_IMPORT(XamUserReadProfileSettings)
         }
     }
     info("[xam] read %u profile settings for title %08X", count, titleId);
-    ctx.r3.u64 = completeOverlapped(overlapped, ERROR_SUCCESS, needed);
+    ctx.r3.u64 = kernel::completeOverlapped(overlapped, ERROR_SUCCESS, needed);
 }
 
 // ---- Users ----
@@ -209,7 +214,7 @@ GUEST_IMPORT(XamShowDeviceSelectorUI)
     uint32_t pDevice = ctx.r7.u32, overlapped = ctx.r8.u32;
     if (pDevice) write32(pDevice, kDummyDeviceId);
     info("[xam] device selector: picked the hard drive (device %u)", kDummyDeviceId);
-    ctx.r3.u64 = completeOverlapped(overlapped, ERROR_SUCCESS);
+    ctx.r3.u64 = kernel::completeOverlapped(overlapped, ERROR_SUCCESS);
 }
 
 // ---- In-process XMsg calls to system apps ----

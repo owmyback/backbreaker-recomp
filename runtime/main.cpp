@@ -226,7 +226,7 @@ int main(int argc, char** argv)
     buildFunctionTable();
     kernel::loadXexHeader(xex);
     kernel::patchImports();
-    kernel::initFileSystem("game/disc", "game/cache");
+    kernel::initFileSystem("game/disc", "game/cache", "game/saves");
 
     g_mainThread = kernel::createGuestThread(g_mainCtx, 0x100000);
     gpu::init();

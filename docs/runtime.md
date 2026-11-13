@@ -41,7 +41,8 @@ the last 32 kernel calls and a per-import usage summary.
 - `runtime/kernel/` - kernel/XAM imports
   - `objects.*` handles, events, semaphores, waits
   - `thread.cpp` guest threads (PCR, KTHREAD, TLS, host pthreads)
-  - `files.cpp` file system (game:\ -> game/disc, cache:\ -> game/cache)
+  - `files.cpp` file system (game:\ -> game/disc, cache:\ -> game/cache; saves mounted at runtime)
+  - `xam_content.cpp` saves: content packages in game/saves/<type>/<name>/, mounted as save:\
   - `memory_imports.cpp`, `sync.cpp`, `strings.cpp`, `system.cpp`, `xex.cpp`, `variables.cpp`
 - `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py)
 
@@ -133,7 +134,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Physical memory is not aliased across 0xA0/0xC0/0xE0 ranges yet
 - KeTimeStampBundle is not updated; timer APC routines are not delivered
-- XAM content (saves), networking, movies (XMV) and real audio output are stubs; XMA output is silence
+- Networking, movies (XMV) and real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); EDRAM aliasing only transfers between targets of the same format; resolves are not written back to guest

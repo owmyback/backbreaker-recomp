@@ -13,8 +13,20 @@ namespace kernel
     // RtlImageXexHeaderField on the game module: value (key & 0xFF == 0) or guest pointer, 0 if absent
     uint32_t xexHeaderField(uint32_t key);
 
-    // Map guest devices (game:, d:, cache:) to host directories.
-    void initFileSystem(const std::string& discRoot, const std::string& cacheRoot);
+    // Map guest devices (game:, d:, cache:) to host directories. Saves (XAM content packages)
+    // live under savesRoot.
+    void initFileSystem(const std::string& discRoot, const std::string& cacheRoot, const std::string& savesRoot);
+    const std::string& savesRoot();
+    // Runtime mounts, used by XAM content packages: device path prefix such as
+    // "\Device\Content\1" -> host directory, and symbolic links such as "save:" -> device path.
+    void addMount(const std::string& devicePrefix, const std::string& hostRoot, bool writable);
+    void removeMount(const std::string& devicePrefix);
+    void addSymbolicLink(const std::string& name, const std::string& target);
+    void removeSymbolicLink(const std::string& name);
+
+    // Complete an XOVERLAPPED (sets result/length/extended error, signals its event); returns
+    // ERROR_IO_PENDING, or `result` itself when there is no overlapped.
+    uint32_t completeOverlapped(uint32_t overlapped, uint32_t result, uint32_t length = 0);
 
     // Patch variable and function-pointer import slots in the loaded image.
     void patchImports();
