@@ -30,7 +30,10 @@ current status are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
    relevant runtime log lines, test output, or a frame capture summary).
 5. If your change moves a phase forward, update `docs/ROADMAP.md` (status table, the phase's
    section, "Current state") in the same PR.
-6. A maintainer reviews before merging; please do not push to `main` directly.
+6. **Every change goes through a reviewed pull request - no exceptions, including one-line
+   documentation or `.gitignore` changes.** Do not push to `main`, and do not merge a pull
+   request yourself: the maintainer (or their review agent) approves and merges. GitHub can't
+   enforce this on this private repo, so it's on all of us.
 
 ## Working with Claude Code (or another agent)
 
@@ -43,6 +46,13 @@ gh issue view <number> --comments
 Give the agent the issue plus `docs/ROADMAP.md` and `docs/runtime.md`, and remind it of the ground
 rules above. Review its diff yourself before opening the PR, and make sure it ran the tests or
 the game as the issue's "Done when" list asks.
+
+Rules for agents:
+- Never push to `main` and never merge a pull request (`gh pr merge`), even your own small ones.
+  Open the PR and stop; the maintainer reviews and merges.
+- For every factual claim in a comment, test or PR description ("matches Xenia", "the ISA
+  defines...", "verified over N cases"), include the command or source that shows it, so a
+  reviewer can re-run it. State what you did not verify.
 
 ## Code conventions
 
