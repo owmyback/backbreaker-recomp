@@ -242,7 +242,7 @@ render targets, the host viewport, scissors, resolve rectangles and clears by N 
 still renders "1280x720"; the guest viewport math stays in guest pixels. Checked: the attract
 movie at 3x renders a full 3840x2160 front buffer at 30 fps.
 
-**Tiled 2D addressing (`runtime/gpu/tiling.h`, issue #12).** The byte offset of a block in a tiled
+**Tiled 2D addressing (`runtime/gpu/tiling.h`, issue #12, `f9566a7`).** The byte offset of a block in a tiled
 surface, following Xenia's `texture_address::Tiled2D` (BSD, docs/licenses/xenia-LICENSE.txt): the
 32x32 macro tile origin plus the micro tile position carried by the bank/pipe bits, for block sizes
 1, 2, 4, 8 and 16 bytes. `tile2D`/`untile2D` move a whole surface between the tiled storage and
