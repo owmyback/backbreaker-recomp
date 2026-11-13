@@ -261,7 +261,7 @@ Visible gap: the game clears the screen with a rectangle drawn at pitch 640 with
 on the console covers the same EDRAM as the 1280x720 target; without EDRAM aliasing (step 2
 below) that clear misses, so stale pixels show around the logos.
 
-**Step 8 - EDRAM aliasing (`STEP8`).** Each of the 2048 EDRAM tiles remembers the render target
+**Step 8 - EDRAM aliasing (`882ca1b`).** Each of the 2048 EDRAM tiles remembers the render target
 image that wrote it last (draw scissor rectangles, resolve clears). Before a target is drawn into
 or resolved from, tiles last written through another image are copied in by a transfer shader
 that maps each sample to its EDRAM address in both layouts (pitch, MSAA 1x/2x/4x, 32/64-bit
