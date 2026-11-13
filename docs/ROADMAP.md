@@ -10,7 +10,7 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-12 (phase 4 started)
+Last updated: 2026-11-13 (#3 closed)
 
 ## Current state
 
@@ -109,11 +109,12 @@ Goal: load the image and run the entry point with real kernel services.
   implemented: memory, XEX header queries, TLS, critical sections, spinlocks, events,
   semaphores, timers, waits (`objects.cpp`), real guest threads on host pthreads
   (`thread.cpp`), file system with case-insensitive device mapping (`files.cpp`), time,
-  strings, the game's printf-style logging.
+  strings, the game's printf-style logging, and `KeTimeStampBundle` kept current by a host
+  thread that rewrites InterruptTime, SystemTime and TickCount every millisecond (`#3`).
 - Result: CRT init completes, the game starts its file-system and pool threads and opens its
   data archives.
 
-Open issues: #3 (keep `KeTimeStampBundle` updated).
+Closed issues: #3 (keep `KeTimeStampBundle` updated, `00875cd`).
 
 ## Phase 3 - Headless subsystems (done)
 
@@ -404,7 +405,7 @@ stored). Parts 1 and 2 can start earlier and are good separable issues.
 ## Known shortcuts and technical debt
 
 - `NtSuspendThread` only works before a thread starts; memory decommits are ignored.
-- Timer APC routines are not delivered; `KeTimeStampBundle` is not updated.
+- Timer APC routines are not delivered.
 - XMA output is silence; XAudio frames are discarded.
 - Networking (`NetDll_*`), XAM content, achievements and guide UI are stubs.
 - `WAIT_REG_MEM` in the command processor spins with `yield`.

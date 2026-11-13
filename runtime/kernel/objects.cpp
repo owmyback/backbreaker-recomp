@@ -166,9 +166,9 @@ namespace kernel
         auto now = std::chrono::steady_clock::now();
         if (t <= 0)
             return now + std::chrono::nanoseconds(-t * 100);
-        // Absolute FILETIME: convert via the system clock
+        // Absolute FILETIME: convert via the system clock (same base as KeQuerySystemTime)
         using namespace std::chrono;
-        int64_t nowFt = 116444736000000000ll + duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count() / 100;
+        int64_t nowFt = int64_t(kernel::systemTime());
         return now + nanoseconds(std::max<int64_t>(0, t - nowFt) * 100);
     }
 

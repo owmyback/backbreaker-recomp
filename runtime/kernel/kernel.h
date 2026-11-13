@@ -32,6 +32,15 @@ namespace kernel
     // Patch variable and function-pointer import slots in the loaded image.
     void patchImports();
 
+    // Windows FILETIME: 100 ns intervals since 1601-01-01. Used by KeQuerySystemTime, the
+    // KeTimeStampBundle updater and absolute-timeout waits, so they all agree on "now".
+    uint64_t systemTime();
+
+    // KeTimeStampBundle: guest address of the bundle (0 when the game does not import it) and the
+    // host thread that keeps it current. Call startTimeStampThread() after patchImports().
+    uint32_t timeStampBundleAddress();
+    void startTimeStampThread();
+
     // Guest-visible thread state (PCR + KTHREAD + stack) for the calling host thread.
     struct GuestThread
     {

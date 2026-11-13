@@ -34,8 +34,12 @@ namespace
         }();
         return f;
     }
+}
 
-    // Windows FILETIME: 100 ns intervals since 1601-01-01
+namespace kernel
+{
+    // Windows FILETIME: 100 ns intervals since 1601-01-01. One definition, shared by
+    // KeQuerySystemTime, the time stamp bundle below and absolute-timeout waits.
     uint64_t systemTime()
     {
         using namespace std::chrono;
@@ -45,7 +49,7 @@ namespace
 }
 
 GUEST_IMPORT(KeQueryPerformanceFrequency) { ctx.r3.u64 = tscFrequency(); }
-GUEST_IMPORT(KeQuerySystemTime) { if (ctx.r3.u32) write64(ctx.r3.u32, systemTime()); }
+GUEST_IMPORT(KeQuerySystemTime) { if (ctx.r3.u32) write64(ctx.r3.u32, kernel::systemTime()); }
 
 // NTSTATUS KeDelayExecutionThread(u32 WaitMode, BOOL Alertable, i64* Interval)  (negative = relative, 100 ns)
 GUEST_IMPORT(KeDelayExecutionThread)
@@ -56,6 +60,47 @@ GUEST_IMPORT(KeDelayExecutionThread)
     else if (interval == 0)
         std::this_thread::yield();
     ctx.r3.u64 = STATUS_SUCCESS;
+}
+
+namespace
+{
+    // The real kernel refreshes KeTimeStampBundle from a DPC about every millisecond. Games read
+    // it for coarse timing without an import call, so keep it current from a host thread.
+    void timeStampLoop()
+    {
+        using namespace std::chrono;
+        using clock = std::chrono::steady_clock;
+        const uint32_t bundle = kernel::timeStampBundleAddress();
+        // "Since boot": the thread starts just before the entry point, which is as close to the
+        // guest's idea of process start as we get.
+        const auto boot = clock::now();
+        for (;;)
+        {
+            uint64_t since100ns = duration_cast<nanoseconds>(clock::now() - boot).count() / 100;
+            write64(bundle + 0x00, since100ns);                        // u64 InterruptTime
+            write64(bundle + 0x08, kernel::systemTime());              // u64 SystemTime (FILETIME)
+            // TickCount last: a guest that reads the bundle without stopping the world never sees
+            // a TickCount running ahead of the two fields written above it.
+            write32(bundle + 0x10, uint32_t(since100ns / 10000));      // u32 TickCount (ms)
+            std::this_thread::sleep_for(milliseconds(1));
+        }
+    }
+}
+
+namespace kernel
+{
+    void startTimeStampThread()
+    {
+        if (!timeStampBundleAddress())
+        {
+            info("KeTimeStampBundle not imported - no time stamp thread");
+            return;
+        }
+        // Left running: the guest mapping is never unmapped, so writing from this thread is safe
+        // right up to process exit (every exit path in the runtime ends in _exit/std::exit).
+        std::thread(timeStampLoop).detach();
+        info("time stamp bundle at %08X - updating it every millisecond", timeStampBundleAddress());
+    }
 }
 
 // TIME_FIELDS: u16 Year, Month, Day, Hour, Minute, Second, Milliseconds, Weekday

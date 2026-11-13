@@ -10,6 +10,9 @@ using namespace mem;
 
 namespace
 {
+    // Guest address of KeTimeStampBundle, kept so the updater thread can find it (see kernel.h).
+    uint32_t g_timeStampBundle = 0;
+
     uint32_t makeVariable(std::string_view name)
     {
         if (name == "XboxHardwareInfo")
@@ -32,8 +35,10 @@ namespace
         }
         if (name == "KeTimeStampBundle")
         {
-            // { u64 InterruptTime; u64 SystemTime; u32 TickCount; } - TODO: update from a timer thread
-            return kernelAlloc(0x18);
+            // { u64 InterruptTime; u64 SystemTime; u32 TickCount; u32 }, all big-endian. The fields
+            // are refreshed by a host thread: see kernel::startTimeStampThread (system.cpp).
+            g_timeStampBundle = kernelAlloc(0x18);
+            return g_timeStampBundle;
         }
         if (name == "XexExecutableModuleHandle")
         {
@@ -62,6 +67,8 @@ namespace
 
 namespace kernel
 {
+    uint32_t timeStampBundleAddress() { return g_timeStampBundle; }
+
     void patchImports()
     {
         size_t vars = 0, fptrs = 0;

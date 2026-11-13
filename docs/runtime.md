@@ -150,7 +150,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - Kernel objects (KTHREAD, PCR, TLS slots, events) are never freed; only a thread's stack is
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Physical memory is not aliased across 0xA0/0xC0/0xE0 ranges yet
-- KeTimeStampBundle is not updated; timer APC routines are not delivered
+- Timer APC routines are not delivered
 - Networking, movies (XMV) and real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
