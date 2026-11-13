@@ -97,6 +97,7 @@ namespace vkctx
             features.features.independentBlend = supported.independentBlend;
             features.features.fillModeNonSolid = supported.fillModeNonSolid;
             features.features.samplerAnisotropy = supported.samplerAnisotropy;
+            features.features.sampleRateShading = supported.sampleRateShading;
             if (!supported.geometryShader || !supported.depthClamp || !supported.independentBlend)
                 warn("[vulkan] GPU lacks geometry shaders, depth clamp or independent blend; some draws will be wrong");
 
@@ -107,6 +108,8 @@ namespace vkctx
             qci.pQueuePriorities = &priority;
             std::vector<const char*> exts = { VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME };
             if (surface) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+            c.stencilExport = hasExtension(c.gpu, VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+            if (c.stencilExport) exts.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
             VkDeviceCreateInfo dci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
             dci.pNext = &features;
             dci.queueCreateInfoCount = 1;

@@ -1,5 +1,6 @@
 // Vulkan renderer: the first-picture path of roadmap phase 4. Simplifications (see the ROADMAP):
-// - EDRAM: one Vulkan image per (base tile, pitch, samples, format); no aliasing between them.
+// - EDRAM: one Vulkan image per (base tile, pitch, samples, format). Tiles written through one
+//   image and then used through another are copied over by a transfer shader (same format only).
 // - Resolves stay on the GPU: the destination is a Vulkan image keyed by its guest address
 //   (nothing is written back to guest memory yet). The copy rectangle is the window scissor.
 // - Guest data is snapshotted at draw time into a per-frame upload buffer: vertex data (the
@@ -22,6 +23,7 @@
 #include <shaderc/shaderc.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -29,6 +31,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <tuple>
 #include <vector>
 
 namespace gpu::render
@@ -177,10 +180,14 @@ void main() {
             VkImage image = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
             VkImageView view = VK_NULL_HANDLE; // identity view of the whole image
+            VkImageView depthView = VK_NULL_HANDLE, stencilView = VK_NULL_HANDLE; // depth formats: per-aspect views for sampling
             VkFormat format = VK_FORMAT_UNDEFINED;
             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
             uint32_t width = 0, height = 0, samples = 1;
             VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            // EDRAM render targets only: where the image lives in EDRAM
+            bool edram = false, edramWide = false; // wide: 64 bits per sample
+            uint32_t edramBase = 0, edramPitch = 0;
         };
 
         Image createImage(VkImageType type, VkImageViewType viewType, VkFormat format, uint32_t w, uint32_t h, uint32_t depth,
@@ -217,6 +224,13 @@ void main() {
             vci.format = format;
             vci.subresourceRange = { img.aspect, 0, 1, 0, layers };
             VK_CHECK(vkCreateImageView(D, &vci, nullptr, &img.view));
+            if (format == kDepthFormat)
+            {
+                vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                VK_CHECK(vkCreateImageView(D, &vci, nullptr, &img.depthView));
+                vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+                VK_CHECK(vkCreateImageView(D, &vci, nullptr, &img.stencilView));
+            }
             return img;
         }
 
@@ -424,9 +438,13 @@ void main() {
             uint32_t tilesPerRow = std::max(1u, (k.pitch + tileW - 1) / tileW);
             uint32_t rows = k.base < 2048 ? (2048 - k.base) / tilesPerRow : 1;
             uint32_t height = std::clamp(rows * tileH, 16u, 4096u);
-            VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                       (k.depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
             Image img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, format, k.pitch * g_scale, height * g_scale, 1, 1, k.samples, usage);
+            img.edram = true;
+            img.edramWide = wide;
+            img.edramBase = k.base;
+            img.edramPitch = k.pitch;
             // EDRAM starts with undefined contents; clear for reproducible output
             endPass();
             VkCommandBuffer c = cmd();
@@ -445,6 +463,273 @@ void main() {
             info("[render] EDRAM %s target: tile %u, pitch %u, %ux msaa, format %u -> %ux%u image", k.depth ? "depth" : "color", k.base,
                  k.pitch, k.samples, k.format, img.width, img.height);
             return &(g_targets[k] = img);
+        }
+
+        // ---------------------------------------------------------------- EDRAM aliasing
+        //
+        // EDRAM is 2048 tiles of 80x16 samples (40x16 at 64 bits per sample). The game may draw
+        // into the same tiles with different pitches, MSAA modes or formats (it clears the
+        // 1280x720 screen as a 640-pitch 4x MSAA target, for example). Each tile remembers the
+        // image that wrote it last; before an image is used, tiles last written through another
+        // image are copied over by a shader that maps every sample to its EDRAM address in both
+        // layouts. Only same-format color->color and depth->depth transfers are done for now.
+
+        Image* g_owner[2048] = {};
+
+        struct EdramLayout { uint32_t sx, sy, tileSamplesX, tilesPerRow; };
+        EdramLayout edramLayout(const Image& t)
+        {
+            EdramLayout l;
+            l.sx = t.samples >= 4 ? 2 : 1;
+            l.sy = t.samples >= 2 ? 2 : 1;
+            l.tileSamplesX = t.edramWide ? 40 : 80;
+            l.tilesPerRow = std::max(1u, (t.edramPitch * l.sx + l.tileSamplesX - 1) / l.tileSamplesX);
+            return l;
+        }
+
+        // Calls fn(tile) for each EDRAM tile under guest pixel rectangle r of target t
+        template <typename F> void forEachTile(const Image& t, VkRect2D r, F fn)
+        {
+            if (!r.extent.width || !r.extent.height) return;
+            EdramLayout l = edramLayout(t);
+            uint32_t c0 = r.offset.x * l.sx / l.tileSamplesX, c1 = ((r.offset.x + r.extent.width) * l.sx - 1) / l.tileSamplesX;
+            uint32_t r0 = r.offset.y * l.sy / 16, r1 = ((r.offset.y + r.extent.height) * l.sy - 1) / 16;
+            c1 = std::min(c1, l.tilesPerRow - 1);
+            for (uint32_t row = r0; row <= r1; row++)
+                for (uint32_t col = c0; col <= c1; col++)
+                {
+                    uint32_t tile = t.edramBase + row * l.tilesPerRow + col;
+                    if (tile >= 2048) return;
+                    fn(tile);
+                }
+        }
+
+        void markWritten(Image* t, VkRect2D r)
+        {
+            if (t && t->edram) forEachTile(*t, r, [&](uint32_t tile) { g_owner[tile] = t; });
+        }
+
+        const char* kTransferVs = R"(#version 450
+void main() { vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }
+)";
+        // Prefixed with #defines DEPTH, SRC_MSAA, DEST_MSAA (0/1)
+        const char* kTransferFs = R"(
+#if DEPTH
+#extension GL_ARB_shader_stencil_export : require
+#endif
+layout(push_constant) uniform P { int dBase, dTpr, dSx, dSy, sBase, sTpr, sSx, sSy, tileSamplesX, scale; } p;
+#if SRC_MSAA
+layout(set = 0, binding = 0) uniform sampler2DMS src;
+layout(set = 0, binding = 1) uniform usampler2DMS srcStencil;
+#define FETCH(t, c, s) texelFetch(t, c, s)
+#else
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1) uniform usampler2D srcStencil;
+#define FETCH(t, c, s) texelFetch(t, c, 0)
+#endif
+layout(set = 0, binding = 2, std140) uniform Mask { uvec4 bits[16]; } m; // tiles to copy
+#if !DEPTH
+layout(location = 0) out vec4 o;
+#endif
+// Sample index <-> position in the pixel's sample grid (Vulkan standard sample positions:
+// 4x = 2x2 grid in reading order, 2x = sample 1 on top of sample 0)
+ivec2 subOf(int s, int sx, int sy) { return sx == 2 ? ivec2(s & 1, s >> 1) : sy == 2 ? ivec2(0, s == 0 ? 1 : 0) : ivec2(0); }
+int indexOf(ivec2 sub, int sx, int sy) { return sx == 2 ? sub.y * 2 + sub.x : sy == 2 ? (sub.y == 0 ? 1 : 0) : 0; }
+void main() {
+  ivec2 h = ivec2(gl_FragCoord.xy), g = h / p.scale, f = h % p.scale;
+#if DEST_MSAA
+  ivec2 sub = subOf(gl_SampleID, p.dSx, p.dSy);
+#else
+  ivec2 sub = ivec2(0);
+#endif
+  int X = g.x * p.dSx + sub.x, Y = g.y * p.dSy + sub.y; // destination sample in EDRAM sample rows
+  int tile = p.dBase + (Y >> 4) * p.dTpr + X / p.tileSamplesX;
+  if (tile >= 2048 || ((m.bits[tile >> 7][(tile >> 5) & 3] >> uint(tile & 31)) & 1u) == 0u) discard;
+  int rel = tile - p.sBase;
+  if (rel < 0) discard;
+  int Xs = (rel % p.sTpr) * p.tileSamplesX + X % p.tileSamplesX, Ys = (rel / p.sTpr) * 16 + (Y & 15);
+  ivec2 sp = ivec2(Xs / p.sSx, Ys / p.sSy) * p.scale + f;
+  int ss = indexOf(ivec2(Xs % p.sSx, Ys % p.sSy), p.sSx, p.sSy);
+#if DEPTH
+  gl_FragDepth = FETCH(src, sp, ss).r;
+  gl_FragStencilRefARB = int(FETCH(srcStencil, sp, ss).r);
+#else
+  o = FETCH(src, sp, ss);
+#endif
+}
+)";
+
+        VkDescriptorSetLayout g_transferSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout g_transferLayout = VK_NULL_HANDLE;
+        VkShaderModule g_transferVs = VK_NULL_HANDLE;
+        VkSampler g_nearest = VK_NULL_HANDLE;
+        std::map<std::tuple<VkFormat, uint32_t, bool>, VkPipeline> g_transferPipelines; // dest format, dest samples, src MSAA
+
+        VkPipeline transferPipeline(VkFormat format, uint32_t destSamples, bool srcMsaa)
+        {
+            auto key = std::make_tuple(format, destSamples, srcMsaa);
+            auto it = g_transferPipelines.find(key);
+            if (it != g_transferPipelines.end()) return it->second;
+            bool depth = format == kDepthFormat;
+            if (!g_transferLayout)
+            {
+                VkDescriptorSetLayoutBinding b[3] = {
+                    { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                    { 2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr } };
+                VkDescriptorSetLayoutCreateInfo dl{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+                dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+                dl.bindingCount = 3;
+                dl.pBindings = b;
+                VK_CHECK(vkCreateDescriptorSetLayout(D, &dl, nullptr, &g_transferSetLayout));
+                VkPushConstantRange pcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, 40 };
+                VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+                pli.setLayoutCount = 1;
+                pli.pSetLayouts = &g_transferSetLayout;
+                pli.pushConstantRangeCount = 1;
+                pli.pPushConstantRanges = &pcr;
+                VK_CHECK(vkCreatePipelineLayout(D, &pli, nullptr, &g_transferLayout));
+                std::string error;
+                g_transferVs = compile(kTransferVs, shaderc_vertex_shader, "edram_transfer.vert", error);
+                if (!g_transferVs) fatal("[render] EDRAM transfer vertex shader: %s", error.c_str());
+                VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+                VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_nearest));
+            }
+            std::string src = std::string("#version 450\n#define DEPTH ") + (depth ? "1" : "0") + "\n#define SRC_MSAA " + (srcMsaa ? "1" : "0") +
+                              "\n#define DEST_MSAA " + (destSamples > 1 ? "1" : "0") + "\n" + kTransferFs;
+            std::string error;
+            VkShaderModule fs = compile(src, shaderc_fragment_shader, "edram_transfer.frag", error);
+            if (!fs) fatal("[render] EDRAM transfer fragment shader: %s", error.c_str());
+
+            VkPipelineShaderStageCreateInfo stages[2]{};
+            stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, g_transferVs, "main" };
+            stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main" };
+            VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+            ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+            vp.viewportCount = vp.scissorCount = 1;
+            VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+            rs.lineWidth = 1.0f;
+            VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+            ms.rasterizationSamples = VkSampleCountFlagBits(destSamples);
+            ms.sampleShadingEnable = destSamples > 1;
+            ms.minSampleShading = 1.0f;
+            VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            ds.depthTestEnable = ds.depthWriteEnable = depth;
+            ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+            ds.stencilTestEnable = depth && C->stencilExport;
+            ds.front = ds.back = { VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS, 0xFF, 0xFF, 0 };
+            VkPipelineColorBlendAttachmentState att{};
+            att.colorWriteMask = 0xF;
+            VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+            cb.attachmentCount = depth ? 0 : 1;
+            cb.pAttachments = &att;
+            static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo dy{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            dy.dynamicStateCount = 2;
+            dy.pDynamicStates = dyn;
+            VkPipelineRenderingCreateInfo rci{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+            rci.colorAttachmentCount = depth ? 0 : 1;
+            rci.pColorAttachmentFormats = &format;
+            rci.depthAttachmentFormat = rci.stencilAttachmentFormat = depth ? format : VK_FORMAT_UNDEFINED;
+            VkGraphicsPipelineCreateInfo gci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+            gci.pNext = &rci;
+            gci.stageCount = 2;
+            gci.pStages = stages;
+            gci.pVertexInputState = &vi;
+            gci.pInputAssemblyState = &ia;
+            gci.pViewportState = &vp;
+            gci.pRasterizationState = &rs;
+            gci.pMultisampleState = &ms;
+            gci.pDepthStencilState = &ds;
+            gci.pColorBlendState = &cb;
+            gci.pDynamicState = &dy;
+            gci.layout = g_transferLayout;
+            VkPipeline pl;
+            VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
+            vkDestroyShaderModule(D, fs, nullptr);
+            return g_transferPipelines[key] = pl;
+        }
+
+        // Copy the given EDRAM tiles from src into dst (same format), with the layout mapping
+        void transfer(Image& src, Image& dst, const uint32_t mask[64], VkRect2D guestRect)
+        {
+            VkDeviceSize maskOff = uploadAlloc(256);
+            if (maskOff == UINT64_MAX) { warnOnce("upload buffer full: EDRAM transfer skipped"); return; }
+            std::memcpy(frame().uploadMap + maskOff, mask, 256);
+            bool depth = dst.format == kDepthFormat;
+            VkPipeline pl = transferPipeline(dst.format, dst.samples, src.samples > 1);
+            endPass();
+            VkCommandBuffer c = cmd();
+            VkImageLayout srcLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkImageLayout dstLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            transition(c, src, srcLayout);
+            transition(c, dst, dstLayout);
+            VkRenderingAttachmentInfo a{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+            a.imageView = dst.view;
+            a.imageLayout = dstLayout;
+            a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+            ri.renderArea = { { 0, 0 }, { dst.width, dst.height } };
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = depth ? 0 : 1;
+            ri.pColorAttachments = &a;
+            ri.pDepthAttachment = depth ? &a : nullptr;
+            ri.pStencilAttachment = depth && C->stencilExport ? &a : nullptr;
+            vkCmdBeginRendering(c, &ri);
+            vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
+            VkDescriptorImageInfo images[2] = { { g_nearest, depth ? src.depthView : src.view, srcLayout },
+                                                { g_nearest, depth ? src.stencilView : src.view, srcLayout } };
+            VkDescriptorBufferInfo maskInfo{ frame().upload, maskOff, 256 };
+            VkWriteDescriptorSet w[3]{};
+            for (uint32_t i = 0; i < 3; i++)
+            {
+                w[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+                w[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                if (i < 2) w[i].pImageInfo = &images[i];
+                else w[i].pBufferInfo = &maskInfo;
+            }
+            if (depth) C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_transferLayout, 0, 3, w);
+            else { w[1] = w[2]; C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_transferLayout, 0, 2, w); }
+            EdramLayout dl = edramLayout(dst), sl = edramLayout(src);
+            int32_t pc[10] = { int32_t(dst.edramBase), int32_t(dl.tilesPerRow), int32_t(dl.sx), int32_t(dl.sy), int32_t(src.edramBase),
+                               int32_t(sl.tilesPerRow), int32_t(sl.sx), int32_t(sl.sy), int32_t(dl.tileSamplesX), int32_t(g_scale) };
+            vkCmdPushConstants(c, g_transferLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);
+            VkViewport viewport{ 0, 0, float(dst.width), float(dst.height), 0.0f, 1.0f };
+            vkCmdSetViewport(c, 0, 1, &viewport);
+            VkRect2D scissor = scaled(guestRect);
+            scissor.extent.width = std::min(scissor.extent.width, dst.width - std::min<uint32_t>(dst.width, scissor.offset.x));
+            scissor.extent.height = std::min(scissor.extent.height, dst.height - std::min<uint32_t>(dst.height, scissor.offset.y));
+            vkCmdSetScissor(c, 0, 1, &scissor);
+            vkCmdDraw(c, 3, 1, 0, 0);
+            vkCmdEndRendering(c);
+        }
+
+        // Before target t is used inside guest rectangle r: bring in tiles another image wrote last
+        void syncTarget(Image* t, VkRect2D r)
+        {
+            if (!t || !t->edram) return;
+            std::map<Image*, std::array<uint32_t, 64>> masks;
+            forEachTile(*t, r, [&](uint32_t tile) {
+                Image* o = g_owner[tile];
+                if (o && o != t) masks[o][tile >> 5] |= 1u << (tile & 31);
+            });
+            for (auto& [owner, mask] : masks)
+            {
+                bool compatible = owner->format == t->format && owner->edramWide == t->edramWide;
+                if (!compatible)
+                {
+                    warnOnce("EDRAM transfer between different formats not supported yet");
+                    continue;
+                }
+                transfer(*owner, *t, mask.data(), r);
+                for (uint32_t tile = 0; tile < 2048; tile++)
+                    if ((mask[tile >> 5] >> (tile & 31)) & 1) g_owner[tile] = t;
+            }
         }
 
         // Resolve destinations, by guest physical address (the latest image written there).
@@ -941,6 +1226,7 @@ void main() {
                 warnOnce("depth resolves not supported yet");
             else if (color && command != 3 && destPitch && destHeight)
             {
+                syncTarget(color, rect); // EDRAM aliasing: latest contents of these tiles
                 // Destination image for this guest address (same format as the source)
                 uint32_t dw = std::max(destPitch, rect.offset.x + rect.extent.width), dh = std::max(destHeight, rect.offset.y + rect.extent.height);
                 auto it = g_resolved.find(destBase);
@@ -989,6 +1275,7 @@ void main() {
                 a.clearValue.color = { { (v & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, ((v >> 16) & 0xFF) / 255.0f, (v >> 24) / 255.0f } };
                 VkClearRect r{ hostRect, 0, 1 };
                 vkCmdClearAttachments(frame().cmd, 1, &a, 1, &r);
+                markWritten(color, rect);
             }
             if (clearDepth && (depth || (depth = target({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true }))))
             {
@@ -1001,7 +1288,10 @@ void main() {
                                                 std::min(hostRect.extent.height, depth->height - uint32_t(hostRect.offset.y)) } };
                 VkClearRect r{ dr, 0, 1 };
                 if (hostRect.offset.x < int32_t(depth->width) && hostRect.offset.y < int32_t(depth->height))
+                {
                     vkCmdClearAttachments(frame().cmd, 1, &a, 1, &r);
+                    markWritten(depth, rect);
+                }
             }
         }
 
@@ -1165,11 +1455,16 @@ void main() {
                     images[slot] = texture(slot, ((ps->t.textureSlots >> slot) & 1) ? ps->t.textureDims[slot] : vs->t.textureDims[slot]);
             if (g_outOfSpace) return false;
 
+            // Scissor over all attachments, in guest pixels
+            VkExtent2D guestExtent{ UINT32_MAX, UINT32_MAX };
+            for (Image* t : { color[0], color[1], color[2], color[3], depth })
+                if (t) guestExtent = { std::min(guestExtent.width, t->width / g_scale), std::min(guestExtent.height, t->height / g_scale) };
+            VkRect2D guestScissor;
+            if (!scissorRect(s, guestExtent, guestScissor)) return true;
+            for (Image* t : { color[0], color[1], color[2], color[3], depth }) syncTarget(t, guestScissor); // EDRAM aliasing
+
             beginPass(color, depth);
-            VkRect2D scissor;
-            VkExtent2D guestExtent{ g_pass.extent.width / g_scale, g_pass.extent.height / g_scale };
-            if (!scissorRect(s, guestExtent, scissor)) return true;
-            scissor = scaled(scissor);
+            VkRect2D scissor = scaled(guestScissor);
             VkCommandBuffer c = f.cmd;
             VkPipeline pl = pipeline({ &s, vs, ps, topology, rectangles, { formats[0], formats[1], formats[2], formats[3] }, depth != nullptr,
                                        s.msaaSamples });
@@ -1232,6 +1527,8 @@ void main() {
             }
             else
                 vkCmdDraw(c, s.indexCount, 1, 0, 0);
+            for (int i = 0; i < 4; i++) markWritten(color[i], guestScissor);
+            if (depth && (s.depthWrite || s.stencil)) markWritten(depth, guestScissor);
             g_drawsInFrame++;
             return true;
         }

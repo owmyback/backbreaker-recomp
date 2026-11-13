@@ -135,7 +135,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - KeTimeStampBundle is not updated; timer APC routines are not delivered
 - XAM content (saves), networking, movies (XMV) and real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
-- Renderer: EDRAM render targets don't alias each other; resolves are not written back to guest
+- Renderer: EDRAM aliasing only transfers between targets of the same format; resolves are not written back to guest
   memory and take their rectangle from the window scissor; 1D/3D/cube and some texture formats are
   placeholders; textures are re-uploaded once per frame they are used (no
   write-watching); only the base mip level; depth is 32-bit float instead of 24-bit

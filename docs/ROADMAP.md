@@ -33,7 +33,7 @@ still silence.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-7 done: first picture, resolution scaling, tiled textures) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-8 done: first picture, resolution scaling, tiled textures, EDRAM aliasing) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -261,10 +261,18 @@ Visible gap: the game clears the screen with a rectangle drawn at pitch 640 with
 on the console covers the same EDRAM as the 1280x720 target; without EDRAM aliasing (step 2
 below) that clear misses, so stale pixels show around the logos.
 
+**Step 8 - EDRAM aliasing (`STEP8`).** Each of the 2048 EDRAM tiles remembers the render target
+image that wrote it last (draw scissor rectangles, resolve clears). Before a target is drawn into
+or resolved from, tiles last written through another image are copied in by a transfer shader
+that maps each sample to its EDRAM address in both layouts (pitch, MSAA 1x/2x/4x, 32/64-bit
+samples, resolution scale); depth transfers keep stencil (VK_EXT_shader_stencil_export). With
+the game's 640-pitch 4x MSAA screen clear now reaching the 1280x720 target, the logo screen is
+clean black and the title screen shows its football-field background. Not yet: transfers
+between different formats (including color <-> depth), which are skipped with a warning.
+
 Remaining steps:
 1. More texture formats, mip levels, 1D/3D/cube (cube maps are used by the title scene).
-2. EDRAM aliasing between targets (next: the screen clear above needs it), resolves written
-   back to guest memory (render-to-texture through memory, CPU reads), the resolve rectangle
+2. EDRAM transfers between different formats, resolves written back to guest memory (render-to-texture through memory, CPU reads), the resolve rectangle
    from the vertex data, depth resolves.
 3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
    clears (`--resolution-scale N`, step 6). Still to check once 3D scenes render: effects that
@@ -337,8 +345,8 @@ Open issues: #4 (one-step setup script).
 - Networking (`NetDll_*`), XAM content, achievements and guide UI are stubs.
 - `WAIT_REG_MEM` in the command processor spins with `yield`.
 - The presenter falls back to the raw (tiled) front buffer when a swap was not rendered.
-- Renderer shortcuts: see phase 4 step 5 and the remaining steps (no EDRAM aliasing, resolves
-  not written to memory, tiled textures are placeholders, per-frame texture re-uploads).
+- Renderer shortcuts: see phase 4 steps 5-8 and the remaining steps (EDRAM transfers only
+  between same formats, resolves not written to memory, per-frame texture re-uploads).
 - Profile settings are returned empty.
 - Virtual memory grows ~1 MB per 20 s in the front end (not investigated).
 

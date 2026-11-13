@@ -20,6 +20,7 @@ namespace vkctx
         uint32_t queueFamily = 0;
         VkQueue queue = VK_NULL_HANDLE;
         PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
+        bool stencilExport = false; // VK_EXT_shader_stencil_export (EDRAM depth transfers keep stencil)
         std::mutex queueLock; // the queue is used by both threads (vkQueueSubmit, vkQueuePresentKHR)
 
         // Memory type with all of `flags` among `typeBits`; UINT32_MAX if there is none.
