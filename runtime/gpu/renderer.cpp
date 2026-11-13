@@ -187,6 +187,7 @@ void main() {
             VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
             // EDRAM render targets only: where the image lives in EDRAM
             bool edram = false, edramWide = false; // wide: 64 bits per sample
+            bool swapRB = false;                    // resolve destinations: red/blue swapped in memory (RB_COPY_DEST_INFO)
             uint32_t edramBase = 0, edramPitch = 0;
         };
 
@@ -815,6 +816,31 @@ void main() {
             return g_samplers[key] = s;
         }
 
+        VkComponentSwizzle swizzleComponent(uint32_t s, bool swapRB)
+        {
+            static const VkComponentSwizzle comps[8] = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B,
+                                                         VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE,
+                                                         VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO };
+            if (swapRB && (s == 0 || s == 2)) s ^= 2; // memory holds B, G, R, A
+            return comps[s & 7];
+        }
+
+        VkImageView createView(VkImage image, VkImageViewType type, VkFormat format, uint32_t layers, uint32_t swizzle, bool swapRB)
+        {
+            VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            vci.image = image;
+            vci.viewType = type;
+            vci.format = format;
+            vci.components = { swizzleComponent(swizzle & 7, swapRB), swizzleComponent((swizzle >> 3) & 7, swapRB),
+                               swizzleComponent((swizzle >> 6) & 7, swapRB), swizzleComponent((swizzle >> 9) & 7, swapRB) };
+            vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers };
+            VkImageView view;
+            VK_CHECK(vkCreateImageView(D, &vci, nullptr, &view));
+            return view;
+        }
+
+        std::map<std::pair<VkImage, uint32_t>, VkImageView> g_resolvedViews; // resolve images used as textures
+
         // Descriptor for texture fetch constant `slot` as a shader declaring dimension `dim`.
         // May record upload commands (ends the current pass).
         VkDescriptorImageInfo texture(uint32_t slot, uint32_t dim)
@@ -823,110 +849,180 @@ void main() {
             for (int i = 0; i < 6; i++) d[i] = readRegister(kFetchConstants + slot * 6 + i);
             VkDescriptorImageInfo out{ sampler(d), placeholder(dim).view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             uint32_t format = d[1] & 0x3F, endian = (d[1] >> 6) & 3, base = d[1] & 0xFFFFF000, fetchDim = (d[5] >> 9) & 3;
-            bool tiled = d[0] >> 31;
+            bool tiled = d[0] >> 31, cube = fetchDim == 3;
             uint32_t pitch = ((d[0] >> 22) & 0x1FF) * 32;
             uint32_t width = (d[2] & 0x1FFF) + 1, height = ((d[2] >> 13) & 0x1FFF) + 1;
+            uint32_t swizzle = (d[3] >> 1) & 0xFFF;
             TextureFormat tf = textureFormat(format);
-            if ((d[0] & 3) != 2 || fetchDim != 1 || dim != 1)
+            if ((d[0] & 3) != 2 || (fetchDim != 1 && fetchDim != 3) || dim != fetchDim)
             {
                 warnOnce("texture dimension " + std::to_string(fetchDim) + " (shader " + std::to_string(dim) + ") not supported yet");
                 return out;
             }
+
+            // Render to texture: a 2D 8_8_8_8 texture at a resolve destination samples the resolved
+            // image directly (resolves are not written to guest memory yet)
+            auto resolved = g_resolved.find(base & 0x1FFFFFFF);
+            if (!cube && format == 6 && resolved != g_resolved.end() && resolved->second.format == VK_FORMAT_R8G8B8A8_UNORM &&
+                width * g_scale <= resolved->second.width && height * g_scale <= resolved->second.height)
+            {
+                Image& r = resolved->second;
+                VkImageView& view = g_resolvedViews[{ r.image, swizzle | (r.swapRB ? 0x1000u : 0u) }];
+                if (!view)
+                {
+                    view = createView(r.image, VK_IMAGE_VIEW_TYPE_2D, r.format, 1, swizzle, r.swapRB);
+                    info("[render] render to texture: resolve %08X sampled as a %ux%u texture%s", base & 0x1FFFFFFF, width, height,
+                         r.swapRB ? " (red/blue swapped)" : "");
+                }
+                endPass();
+                transition(cmd(), r, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                out.imageView = view;
+                return out;
+            }
+
             if (tf.vk == VK_FORMAT_UNDEFINED || !pitch)
             {
                 warnOnce("texture format " + std::to_string(format) + (tiled ? " (tiled)" : " (linear)") +
                          " not supported yet: magenta placeholder");
                 return out;
             }
-            TextureKey key{ base, format | (tiled ? 0x100u : 0u), endian, width, height, pitch };
+            uint32_t layers = cube ? 6 : 1;
+            // Render to cube map: all six faces resolved to their slots (face stride = 4 KB-aligned
+            // 32-block-aligned face size) -> blit the resolved images into one cube image
+            if (cube && format == 6 && tiled)
+            {
+                uint32_t faceStride = (tiledBlocksAligned(std::max(pitch, width)) * tiledBlocksAligned(height) * 4 + 4095) & ~4095u;
+                Image* faces[6]{};
+                for (uint32_t f = 0; f < 6; f++)
+                {
+                    auto it = g_resolved.find((base + f * faceStride) & 0x1FFFFFFF);
+                    if (it == g_resolved.end() || it->second.format != VK_FORMAT_R8G8B8A8_UNORM || it->second.width < width * g_scale ||
+                        it->second.height < height * g_scale)
+                        break;
+                    faces[f] = &it->second;
+                }
+                if (faces[5])
+                {
+                    TextureKey ckey{ base, format | 0x2000u, endian, width, height, pitch };
+                    Texture& t = g_textures[ckey];
+                    if (!t.img.image)
+                    {
+                        t.img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R8G8B8A8_UNORM, width * g_scale, height * g_scale,
+                                            1, 6, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                            VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT);
+                        info("[render] render to cube map: 6 resolves from %08X (face stride %X) sampled as a %ux%u cube", base & 0x1FFFFFFF,
+                             faceStride, width, height);
+                    }
+                    if (t.uploadedFrame != g_frameSerial)
+                    {
+                        endPass();
+                        VkCommandBuffer c = cmd();
+                        transition(c, t.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                        for (uint32_t f = 0; f < 6; f++)
+                        {
+                            transition(c, *faces[f], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                            VkImageBlit b{};
+                            b.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                            b.srcOffsets[1] = { int32_t(width * g_scale), int32_t(height * g_scale), 1 };
+                            b.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, f, 1 };
+                            b.dstOffsets[1] = { int32_t(width * g_scale), int32_t(height * g_scale), 1 };
+                            vkCmdBlitImage(c, faces[f]->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                           1, &b, VK_FILTER_NEAREST);
+                        }
+                        transition(c, t.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        t.uploadedFrame = g_frameSerial;
+                    }
+                    VkImageView& view = t.views[swizzle | (faces[0]->swapRB ? 0x1000u : 0u)];
+                    if (!view) view = createView(t.img.image, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R8G8B8A8_UNORM, 6, swizzle, faces[0]->swapRB);
+                    out.imageView = view;
+                    return out;
+                }
+            }
+            TextureKey key{ base, format | (tiled ? 0x100u : 0u) | (fetchDim << 9), endian, width, height, pitch };
             Texture& t = g_textures[key];
             if (!t.img.image)
-                t.img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, tf.vk, width, height, 1, 1, 1,
-                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+                t.img = createImage(VK_IMAGE_TYPE_2D, cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, tf.vk, width, height, 1, layers, 1,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0);
             if (t.uploadedFrame != g_frameSerial)
             {
                 // Guest layout -> row-major blocks (byte-swapped), `rowBlocks` blocks per row.
                 // Linear: rows of `pitch` texels (blocks for compressed formats), 256-byte aligned.
                 // Tiled: 32x32-block tiles (runtime/gpu/tiling.h), pitch aligned to 32 blocks.
+                // Cube faces follow each other, each aligned to 4 KB (base level only for now).
                 uint32_t blocksW = (width + tf.blockW - 1) / tf.blockW, blocksH = (height + tf.blockH - 1) / tf.blockH;
-                uint32_t rowBlocks, srcBytes;
+                uint32_t rowBlocks, srcBytes, faceStride;
                 if (tiled)
                 {
                     rowBlocks = tiledBlocksAligned(std::max(pitch / tf.blockW, blocksW));
                     srcBytes = tiledUpperBound2D(blocksW, blocksH, rowBlocks, tf.bytes);
+                    faceStride = (rowBlocks * tiledBlocksAligned(blocksH) * tf.bytes + 4095) & ~4095u;
                 }
                 else
                 {
                     uint32_t rowBytes = ((pitch / tf.blockW) * tf.bytes + 255) & ~255u;
                     rowBlocks = rowBytes / tf.bytes;
                     srcBytes = rowBytes * blocksH;
+                    faceStride = (srcBytes + 4095) & ~4095u;
                 }
                 srcBytes = (srcBytes + 3) & ~3u;
-                if (base + uint64_t(srcBytes) > mem::kPhysicalSize)
+                if (base + uint64_t(faceStride) * (layers - 1) + srcBytes > mem::kPhysicalSize)
                 {
                     warnOnce("texture extends past physical memory: placeholder");
                     return out;
                 }
-                static std::vector<uint8_t> swapped, rows;
-                swapped.resize(srcBytes);
-                const uint32_t* src = (const uint32_t*)mem::physical(base);
-                for (uint32_t i = 0; i < srcBytes / 4; i++) ((uint32_t*)swapped.data())[i] = gpuSwap(src[i], endian);
-                const uint8_t* linear = swapped.data();
-                if (tiled)
-                {
-                    rows.assign(size_t(rowBlocks) * blocksH * tf.bytes, 0);
-                    untile2D(swapped.data(), rows.data(), blocksW, blocksH, rowBlocks, tf.bytes);
-                    linear = rows.data();
-                }
                 uint32_t outBytes = tf.convert == Convert::None ? tf.bytes : 4;
-                VkDeviceSize size = VkDeviceSize(rowBlocks) * blocksH * outBytes;
-                VkDeviceSize off = uploadAlloc(size);
+                VkDeviceSize faceSize = VkDeviceSize(rowBlocks) * blocksH * outBytes;
+                VkDeviceSize off = uploadAlloc(faceSize * layers);
                 if (off == UINT64_MAX) return out;
-                uint8_t* dst = frame().uploadMap + off;
-                if (tf.convert == Convert::None)
-                    std::memcpy(dst, linear, size);
-                else
-                    for (size_t i = 0; i < size_t(rowBlocks) * blocksH; i++)
+                static std::vector<uint8_t> swapped, rows;
+                for (uint32_t layer = 0; layer < layers; layer++)
+                {
+                    swapped.resize(srcBytes);
+                    const uint32_t* src = (const uint32_t*)mem::physical(base + layer * faceStride);
+                    for (uint32_t i = 0; i < srcBytes / 4; i++) ((uint32_t*)swapped.data())[i] = gpuSwap(src[i], endian);
+                    const uint8_t* linear = swapped.data();
+                    if (tiled)
                     {
-                        uint16_t v = ((const uint16_t*)linear)[i];
-                        uint8_t* o = dst + i * 4;
-                        if (tf.convert == Convert::From4444)
-                            for (int c = 0; c < 4; c++) o[c] = uint8_t(((v >> (4 * c)) & 0xF) * 17);
-                        else
-                        {
-                            o[0] = uint8_t((v & 0x1F) * 255 / 31);
-                            o[1] = uint8_t(((v >> 5) & 0x3F) * 255 / 63);
-                            o[2] = uint8_t((v >> 11) * 255 / 31);
-                            o[3] = 255;
-                        }
+                        rows.assign(size_t(rowBlocks) * blocksH * tf.bytes, 0);
+                        untile2D(swapped.data(), rows.data(), blocksW, blocksH, rowBlocks, tf.bytes);
+                        linear = rows.data();
                     }
+                    uint8_t* dst = frame().uploadMap + off + layer * faceSize;
+                    if (tf.convert == Convert::None)
+                        std::memcpy(dst, linear, faceSize);
+                    else
+                        for (size_t i = 0; i < size_t(rowBlocks) * blocksH; i++)
+                        {
+                            uint16_t v = ((const uint16_t*)linear)[i];
+                            uint8_t* o = dst + i * 4;
+                            if (tf.convert == Convert::From4444)
+                                for (int c = 0; c < 4; c++) o[c] = uint8_t(((v >> (4 * c)) & 0xF) * 17);
+                            else
+                            {
+                                o[0] = uint8_t((v & 0x1F) * 255 / 31);
+                                o[1] = uint8_t(((v >> 5) & 0x3F) * 255 / 63);
+                                o[2] = uint8_t((v >> 11) * 255 / 31);
+                                o[3] = 255;
+                            }
+                        }
+                }
                 endPass();
                 VkCommandBuffer c = cmd();
                 transition(c, t.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                VkBufferImageCopy copy{};
-                copy.bufferOffset = off;
-                copy.bufferRowLength = rowBlocks * tf.blockW;
-                copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                copy.imageExtent = { width, height, 1 };
-                vkCmdCopyBufferToImage(c, frame().upload, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+                VkBufferImageCopy copies[6]{};
+                for (uint32_t layer = 0; layer < layers; layer++)
+                {
+                    copies[layer].bufferOffset = off + layer * faceSize;
+                    copies[layer].bufferRowLength = rowBlocks * tf.blockW;
+                    copies[layer].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 };
+                    copies[layer].imageExtent = { width, height, 1 };
+                }
+                vkCmdCopyBufferToImage(c, frame().upload, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layers, copies);
                 transition(c, t.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 t.uploadedFrame = g_frameSerial;
             }
-            uint32_t swizzle = (d[3] >> 1) & 0xFFF;
             VkImageView& view = t.views[swizzle];
-            if (!view)
-            {
-                static const VkComponentSwizzle comps[8] = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B,
-                                                             VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE,
-                                                             VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO };
-                VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-                vci.image = t.img.image;
-                vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-                vci.format = tf.vk;
-                vci.components = { comps[swizzle & 7], comps[(swizzle >> 3) & 7], comps[(swizzle >> 6) & 7], comps[(swizzle >> 9) & 7] };
-                vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-                VK_CHECK(vkCreateImageView(D, &vci, nullptr, &view));
-            }
+            if (!view) view = createView(t.img.image, cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, tf.vk, layers, swizzle, false);
             out.imageView = view;
             return out;
         }
@@ -1245,6 +1341,7 @@ void main() {
                     info("[render] resolve destination %08X: %ux%u", destBase, dw, dh);
                 }
                 Image& dest = it->second;
+                dest.swapRB = (readRegister(0x231B) >> 24) & 1; // RB_COPY_DEST_INFO copy_dest_swap
                 endPass();
                 VkCommandBuffer c = cmd();
                 transition(c, *color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1597,6 +1694,7 @@ void main() {
         Image* front = it != g_resolved.end() ? &it->second : nullptr;
         uint32_t w = front ? std::min(width * g_scale, front->width) : 0, h = front ? std::min(height * g_scale, front->height) : 0;
         if (!front) warnOnce("swap of a front buffer the renderer did not produce: showing guest memory");
+        if (front) transition(cmd(), *front, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // presenter reads it in this layout
 
         // Screenshot: copy the front buffer image into a host-visible buffer in this submission
         VkBuffer shot = VK_NULL_HANDLE;

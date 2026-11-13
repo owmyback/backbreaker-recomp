@@ -33,7 +33,7 @@ still silence.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-8 done: first picture, resolution scaling, tiled textures, EDRAM aliasing) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-9 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -270,8 +270,17 @@ the game's 640-pitch 4x MSAA screen clear now reaching the 1280x720 target, the 
 clean black and the title screen shows its football-field background. Not yet: transfers
 between different formats (including color <-> depth), which are skipped with a warning.
 
+**Step 9 - Cube maps and render to texture on the GPU (`STEP9`).** Cube textures (6 faces,
+linear or tiled, base level) upload like 2D ones. Render to texture stays on the GPU: a 2D
+8_8_8_8 texture whose address is a resolve destination samples the resolved image directly
+(with the red/blue swap the resolve asked for, and at the internal resolution), and a cube map
+whose six face slots were all resolved (the game renders environment cube maps at 256x256) is
+assembled from the six resolved images. Seen working: the title scene's 256x256 render target,
+several 128x128 and 64x64 ones, and two rendered cube maps. Not yet: textures that read resolved
+data in another format or tiling than the resolve wrote, and CPU reads of resolved memory.
+
 Remaining steps:
-1. More texture formats, mip levels, 1D/3D/cube (cube maps are used by the title scene).
+1. More texture formats, mip levels, 3D (volume) textures.
 2. EDRAM transfers between different formats, resolves written back to guest memory (render-to-texture through memory, CPU reads), the resolve rectangle
    from the vertex data, depth resolves.
 3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
