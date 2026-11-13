@@ -27,7 +27,7 @@ GPU frame-capture tool.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `463a08a`, `3a430d9`, `be2b9ff`, `47eea11` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `ffd4677`, `b3682e6`, `d680bb6` |
 | 3 | Headless subsystems: game reaches the front end | Done | `be2b9ff`, `47eea11` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (step 0 done) | see phase 4 |
+| 4 | Rendering (Vulkan): see the game | **In progress** (step 0 done) | `288cb51` |
 | 5 | Controller input (SDL, DualSense) | Planned | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -130,7 +130,7 @@ shows fps, draws and memory.
 
 Goal: see the game, ideally at higher internal resolution than the console (see Goals).
 
-**Step 0 - GPU frame capture (done).** `--capture-frame N[,N...]` records a frame's draws,
+**Step 0 - GPU frame capture (done, `288cb51`).** `--capture-frame N[,N...]` records a frame's draws,
 shader loads, register changes, render targets and textures to `captures/frame_N/` (see
 `docs/runtime.md`). Register names and field layouts come from Xenia's register table and
 `xenos.h` (BSD). First findings:
