@@ -8,6 +8,7 @@
 // submission order plus the barrier below order its writes before our read.
 #include "presenter.h"
 #include "vk_context.h"
+#include "../debug/png.h"
 #include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
@@ -21,7 +22,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace video
@@ -65,6 +69,20 @@ namespace video
             VkSemaphore acquired = VK_NULL_HANDLE;
             std::vector<VkSemaphore> rendered; // one per swapchain image
             VkFence inFlight = VK_NULL_HANDLE;
+
+            // F12 screenshots. shotWant is set by the key handler, consumed by the next
+            // presentOnce, which copies the swapchain image it just drew into `shot`; the file
+            // writing happens on a helper thread so the presenter keeps presenting.
+            // Presenter-thread only, no atomics needed.
+            VkBuffer shot = VK_NULL_HANDLE;
+            VkDeviceMemory shotMemory = VK_NULL_HANDLE;
+            VkDeviceSize shotSize = 0;
+            bool shotWant = false, shotPending = false;
+            // Can this swapchain image be read back at all? F12 only works when it was created as a
+            // transfer source, which the surface decides - see createSwapchain.
+            bool shotSupported = false;
+            uint32_t shotWidth = 0, shotHeight = 0;
+            std::vector<std::thread> shotWriters;
         } vk;
 
         // ---- Window state remembered between runs (issue #9) ----
@@ -222,6 +240,20 @@ namespace video
             if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT))
                 fatal("[video] swapchain format %d cannot be a blit destination", int(chosen.format));
 
+            // F12 reads the picture back out of the swapchain image, so that image has to be usable
+            // as a copy source as well as a blit destination. The loader says which usage bits the
+            // surface takes at all (VUID-VkSwapchainCreateInfoKHR-imageUsage-01275) - every desktop
+            // driver allows reading one back, but the bit is asked for at vkCreateSwapchainKHR and
+            // a driver that refuses it would fail the swapchain, and presentation does not need it.
+            // So: ask only when allowed, and turn the screenshot key off instead of the window.
+            vk.shotSupported = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+            static bool shotWarned = false;
+            if (!vk.shotSupported && !shotWarned)
+            {
+                shotWarned = true;
+                warn("[video] the surface will not make a swapchain image a copy source: F12 screenshots are off");
+            }
+
             VkExtent2D extent = caps.currentExtent;
             if (extent.width == UINT32_MAX)
                 extent = { uint32_t(w), uint32_t(h) };
@@ -235,7 +267,7 @@ namespace video
             sci.imageColorSpace = chosen.colorSpace;
             sci.imageExtent = extent;
             sci.imageArrayLayers = 1;
-            sci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            sci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | (vk.shotSupported ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : VkImageUsageFlags(0));
             sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
             sci.preTransform = caps.currentTransform;
             sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -320,6 +352,98 @@ namespace video
             b.image = image;
             b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             vkCmdPipelineBarrier(vk.cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+        }
+
+        void destroyShotBuffer()
+        {
+            if (vk.shot) vkDestroyBuffer(vk.device, vk.shot, nullptr);
+            if (vk.shotMemory) vkFreeMemory(vk.device, vk.shotMemory, nullptr);
+            vk.shot = VK_NULL_HANDLE;
+            vk.shotMemory = VK_NULL_HANDLE;
+            vk.shotSize = 0;
+        }
+
+        void createShotBuffer(VkDeviceSize size)
+        {
+            destroyShotBuffer();
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size = size;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            VK_CHECK(vkCreateBuffer(vk.device, &bci, nullptr, &vk.shot));
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(vk.device, vk.shot, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VK_CHECK(vkAllocateMemory(vk.device, &mai, nullptr, &vk.shotMemory));
+            VK_CHECK(vkBindBufferMemory(vk.device, vk.shot, vk.shotMemory, 0));
+            vk.shotSize = size;
+        }
+
+        const char* swapFormatName(VkFormat f)
+        {
+            switch (f)
+            {
+            case VK_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+            case VK_FORMAT_B8G8R8A8_SRGB: return "B8G8R8A8_SRGB";
+            case VK_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+            case VK_FORMAT_R8G8B8A8_SRGB: return "R8G8B8A8_SRGB";
+            default: return "unknown";
+            }
+        }
+
+        bool swapToRedBlue(VkFormat f) { return f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB; }
+
+        // screenshots/<date-time>.png, "_2", "_3" ... on repeats within the same second. The writer
+        // thread creates the file later, so checking the disk alone would give two presses in one
+        // second the same name (the second PNG replacing the first): the names handed out are
+        // remembered here too. Presenter thread only, so no lock.
+        std::string shotPath()
+        {
+            static std::string lastStamp;
+            static int lastN = 0;
+            std::time_t now = std::time(nullptr);
+            std::tm tm{};
+            localtime_r(&now, &tm);
+            char stamp[32];
+            std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm);
+            for (int n = stamp == lastStamp ? lastN + 1 : 1;; n++)
+            {
+                std::string path = std::string("screenshots/") + stamp + (n > 1 ? "_" + std::to_string(n) : std::string()) + ".png";
+                if (std::filesystem::exists(path)) continue; // from an earlier run
+                lastStamp = stamp;
+                lastN = n;
+                return path;
+            }
+        }
+
+        // The copy is already in the command buffer of the frame we just submitted; wait for that
+        // frame (inFlight, the same fence the next present waits on), hand the pixels to a helper
+        // thread and get back to presenting. The guest threads are never involved.
+        void writeScreenshot()
+        {
+            VK_CHECK(vkWaitForFences(vk.device, 1, &vk.inFlight, VK_TRUE, UINT64_MAX));
+            void* map = nullptr;
+            VK_CHECK(vkMapMemory(vk.device, vk.shotMemory, 0, vk.shotSize, 0, &map));
+            std::vector<uint8_t> rgba((uint8_t*)map, (uint8_t*)map + vk.shotSize);
+            vkUnmapMemory(vk.device, vk.shotMemory);
+            if (swapToRedBlue(vk.swapFormat))
+                for (size_t i = 0; i + 3 < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);
+
+            std::string path = shotPath();
+            uint32_t w = vk.shotWidth, h = vk.shotHeight;
+            auto start = std::chrono::steady_clock::now();
+            // A PNG write is tens of milliseconds, so keeping every writer thread around would pile up
+            // handles on a mash of F12 presses: retire the oldest once there are a few.
+            if (vk.shotWriters.size() >= 4) { vk.shotWriters.front().join(); vk.shotWriters.erase(vk.shotWriters.begin()); }
+            vk.shotWriters.emplace_back([path, rgba = std::move(rgba), w, h, start]() mutable {
+                std::filesystem::create_directories("screenshots");
+                if (debug::writePng(path, rgba.data(), w, h))
+                    info("[video] screenshot %s (%ux%u, %.1f MB, %.0f ms)", path.c_str(), w, h, double(rgba.size()) / (1024 * 1024),
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+                else
+                    warn("[video] could not write %s", path.c_str());
+            });
         }
 
         // Returns false if the swapchain must be recreated.
@@ -412,6 +536,28 @@ namespace video
                     letterbox(vk.source, vk.sourceWidth, vk.sourceHeight);
             }
 
+            // F12: read back exactly what is on screen - the letterboxed, format-converted picture,
+            // whether it came from the renderer's front buffer or the raw front-buffer upload. We are
+            // inside the same command buffer, so this is ordered after the blit and before the present.
+            if (vk.shotWant && !vk.shotPending) // shotPending: the previous read-back is still being written; defer one frame
+            {
+                vk.shotWant = false;
+                VkDeviceSize size = VkDeviceSize(vk.swapExtent.width) * vk.swapExtent.height * 4;
+                if (!vk.shot || vk.shotSize != size) createShotBuffer(size);
+                barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                VkBufferImageCopy bic{};
+                bic.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                bic.imageExtent = { vk.swapExtent.width, vk.swapExtent.height, 1 };
+                vkCmdCopyImageToBuffer(vk.cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.shot, 1, &bic);
+                barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                vk.shotWidth = vk.swapExtent.width;
+                vk.shotHeight = vk.swapExtent.height;
+                vk.shotPending = true;
+                info("[video] screenshot requested (%ux%u, %s)", vk.swapExtent.width, vk.swapExtent.height, swapFormatName(vk.swapFormat));
+            }
+
             barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
             VK_CHECK(vkEndCommandBuffer(vk.cmd));
@@ -437,6 +583,7 @@ namespace video
             r = vkQueuePresentKHR(vk.queue, &pi);
             if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) return false;
             if (r != VK_SUCCESS) fatal("[video] vkQueuePresentKHR: %d", int(r));
+            if (vk.shotPending) { writeScreenshot(); vk.shotPending = false; }
             return true;
         }
     }
@@ -486,6 +633,10 @@ namespace video
             {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                     running = false;
+                else if (e.type == SDL_EVENT_KEY_DOWN && (e.key.scancode == SDL_SCANCODE_F12 || e.key.key == SDLK_F12) && vk.shotSupported)
+                {
+                    if (!e.key.repeat) vk.shotWant = true; // one per press, captured on the next present so the picture is complete
+                }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
                     haveSwapchain = false;
                 else if (e.type == SDL_EVENT_KEY_DOWN && e.key.down && !e.key.repeat &&
@@ -526,6 +677,9 @@ namespace video
             }
         }
 
+        if (vk.shotPending) { writeScreenshot(); vk.shotPending = false; } // closing right after a press still writes it
+        for (auto& t : vk.shotWriters) t.join(); // let any in-flight PNG finish writing
+        destroyShotBuffer();
         { std::lock_guard g(g_ctx->queueLock); vkDeviceWaitIdle(vk.device); }
         info("[video] window closed");
         saveSettings(); // what the window was when it closed, for the next run

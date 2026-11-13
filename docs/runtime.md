@@ -15,7 +15,12 @@ the commands are still listed individually because they are also useful on their
     ./build/backbreaker --timeout 15     # run from the repo root
 
 By default a window opens (SDL3 + Vulkan) showing what the game renders; its title shows the
-game's frame rate and the display rate. `--headless` runs without a window (the renderer still
+game's frame rate and the display rate. Press **F12** in that window to save the picture you see as
+`screenshots/<date-time>.png` (`_2`, `_3` ... for repeats within one second): the presenter copies
+the swapchain image it has just drawn and a helper thread writes the PNG, so no guest thread is
+involved and presentation does not stop. That read-back needs the swapchain image to be usable as a
+copy source, which is something the surface decides: where it will not allow it, the presenter says
+so once and F12 does nothing. `--headless` runs without a window (the renderer still
 runs if a Vulkan GPU is available, for screenshots). F11 or Alt+Enter toggles borderless
 fullscreen; window size, position and fullscreen state are remembered in `game/settings.ini`
 (written on toggle and on close - `game/` is gitignored), and `--fullscreen` starts fullscreen
@@ -29,7 +34,9 @@ window, `runtime/video/vk_context.cpp`): shaders are translated (see below) and 
 shaderc on first use, EDRAM render targets are Vulkan images, resolves copy into images keyed by
 their guest address, and the presenter shows the image resolved to the front buffer.
 - `--screenshot N[,N...]` writes `screenshots/frame_N.png` (the front buffer of swap N; works
-  headless). `screenshots/` is gitignored - pictures of the game are not committed.
+  headless). `screenshots/` is gitignored - pictures of the game are not committed. F12 in the
+  window writes the same kind of PNG from the swapchain image instead, i.e. what the window showed
+  (letterboxed and at the window's size).
 - `--resolution-scale N` (1-4) renders at N times the game's resolution: 2 = 2560x1440,
   3 = 3840x2160. The game still sees 1280x720; render targets, viewports, scissors, resolves and
   clears are scaled. (The attract movie itself is a 1280x720 video, so it only gets smoother

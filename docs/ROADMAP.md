@@ -10,7 +10,8 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff)
+Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9, validation clean #11 and the
+screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff)
 
 ## Current state
 
@@ -189,15 +190,16 @@ and blits it letterboxed into the swapchain image. Window title: game fps and di
   1280x720. The presenter copies raw for now, so it will need untiling once pixels exist.
 - The picture is black: our command processor does not execute resolves or draws yet.
 
-Open issues (separable from the renderer core): #10 (screenshot key),
-#12 (tested tiled/linear conversion). #11 (Vulkan validation clean run) is settled: the layer runs
-with `BB_VK_VALIDATION=1`, and a run into an Exhibition match reports no errors (docs/runtime.md,
-"Vulkan validation"; the two things it found - render pass attachments the draw has no image for, and a shader
-feature enabled without asking the GPU for it - are fixed; docs/runtime.md). Window polish #9 is
-done (`bf0641c`): F11 or Alt+Enter toggles borderless fullscreen, and the windowed size, position
-and fullscreen state are remembered in `game/settings.ini` between runs (`--fullscreen` to start
-fullscreen). Only the windowed geometry is remembered, so leaving fullscreen gives the same window
-back.
+Open issues (separable from the renderer core): #12 (tested tiled/linear conversion). #11 (Vulkan
+validation clean run) is settled: the layer runs with `BB_VK_VALIDATION=1`, and a run into an
+Exhibition match reports no errors (docs/runtime.md, "Vulkan validation"; the two things it found -
+render pass attachments the draw has no image for, and a shader feature enabled without asking the
+GPU for it - are fixed). #10 (screenshot key) is done: F12 reads back the swapchain image the
+presenter just drew and writes `screenshots/<date-time>.png` (what the window shows; `--screenshot N`
+saves the renderer's front buffer instead). Window polish #9 is done (`bf0641c`): F11 or Alt+Enter
+toggles borderless fullscreen, and the windowed size, position and fullscreen state are remembered
+in `game/settings.ini` between runs (`--fullscreen` to start fullscreen). Only the windowed geometry
+is remembered, so leaving fullscreen gives the same window back.
 
 **Step 2 - Shader disassembler (done, `c5562a6`).** `runtime/gpu/ucode.h` decodes Xenos microcode
 (control flow, vertex/texture fetch, paired vector+scalar ALU; layouts from Xenia's `ucode.h`),
@@ -454,3 +456,10 @@ stored). Parts 1 and 2 can start earlier and are good separable issues.
 Game data is not in the repository: you need your own Backbreaker ISO. See `README.md` for
 extraction, XenonRecomp setup, recompilation and tests, and `docs/runtime.md` for building and
 running the runtime and for its debugging aids.
+
+For the F12 screenshot key (#10): run without `--headless`, press F12 in the window (or focus it
+and `xdotool key F12`). The log prints `[video] screenshot requested (WxH, format)` and
+`[video] screenshot screenshots/<date-time>.png (...)`; the file is 1280x720 when the window is.
+Press twice inside one second to see the `_2` suffix: every press gives its own file (holding the
+key gives one). `--screenshot 140` as well writes the renderer's front buffer at that swap, for a
+side-by-side look.
