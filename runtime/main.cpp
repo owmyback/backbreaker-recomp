@@ -6,6 +6,7 @@
 #include "kernel/objects.h"
 #include "gpu/gpu.h"
 #include "apu/apu.h"
+#include "gpu/capture.h"
 #include "log.h"
 #include "memory.h"
 
@@ -141,6 +142,17 @@ int main(int argc, char** argv)
         std::string a = argv[i];
         if (a == "--timeout" && i + 1 < argc)
             timeout = std::atoi(argv[++i]);
+        else if (a == "--capture-frame" && i + 1 < argc)
+        {
+            // one frame number or a comma-separated list: --capture-frame 300,1500,3000
+            std::string list = argv[++i];
+            for (size_t p = 0; p < list.size();)
+            {
+                size_t q = list.find(',', p);
+                gpu::capture::request(std::strtoull(list.substr(p, q - p).c_str(), nullptr, 10));
+                p = q == std::string::npos ? list.size() : q + 1;
+            }
+        }
         else
             image = a;
     }

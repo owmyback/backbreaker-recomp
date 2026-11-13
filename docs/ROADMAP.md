@@ -7,15 +7,17 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 **Keep this file current:** when a phase changes status, update its row, its section and the
 "Current state" paragraph, and reference the commits.
 
-Last updated: 2026-11-12
+Last updated: 2026-11-12 (phase 4 started)
 
 ## Current state
 
 The whole executable recompiles (0 warnings) and builds into one native binary. The runtime
 boots the game through its full initialization, runs through the two logo movies (timing only,
-nothing shown), loads all sound banks, and runs the front end at a steady 30 fps for as long as tested (4 minutes,
-memory flat). **Nothing is visible or audible yet**: GPU commands are executed only for their
-side effects and audio is silence. The next phase is rendering.
+nothing shown), loads all sound banks, and reaches the title screen, where it loops the attract
+movie (`attract.wmv`) with a 3D logo scene in between at a steady 30 fps, waiting for **Press
+Start** (tested 4 minutes, memory flat). **Nothing is visible or audible yet**: GPU commands are
+executed only for their side effects and audio is silence. Rendering (phase 4) has started with a
+GPU frame-capture tool.
 
 ## Phase overview
 
@@ -25,7 +27,7 @@ side effects and audio is silence. The next phase is rendering.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `463a08a`, `3a430d9`, `be2b9ff`, `47eea11` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `ffd4677`, `b3682e6`, `d680bb6` |
 | 3 | Headless subsystems: game reaches the front end | Done | `be2b9ff`, `47eea11` |
-| 4 | Rendering (Vulkan): see the game | **Next** | - |
+| 4 | Rendering (Vulkan): see the game | **In progress** (step 0 done) | see phase 4 |
 | 5 | Controller input (SDL, DualSense) | Planned | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -35,6 +37,13 @@ side effects and audio is silence. The next phase is rendering.
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
 "Phase 2 (Vulkan renderer)". The numbering above replaces that.
+
+## Goals beyond running the game
+
+| Goal | Where | Notes |
+|------|-------|-------|
+| Higher internal resolution (1440p, 4K) | Phase 4 | The renderer can render at any internal resolution while the game is still told 1280x720. Needs consistent scaling of EDRAM resolves/copies and of resolution-dependent effects (blur, bloom, shadows, post-processing). 2D UI scales as-is. Ultrawide (beyond 16:9) would also need camera/layout patches. |
+| Higher frame rate (60+ fps) | Phase 9 | The title loop runs at 30 fps; the source of the cap is not confirmed yet (attract video rate, vblank interval, or game logic). Uncapping is easy; the risk is game logic and Euphoria physics assuming a 30 Hz step. Fix by patching timing code (function overrides / mid-asm hooks; profiler-scope names help find it) or by a fixed 30 Hz simulation with interpolated rendering. Must be verified by play-testing. |
 
 ---
 
@@ -117,9 +126,24 @@ Goal: everything the game needs to reach its main loop, without real output yet.
 Verify: `ninja -C build && ./build/backbreaker --timeout 60` - the once-per-second `[gpu]` line
 shows fps, draws and memory.
 
-## Phase 4 - Rendering (next)
+## Phase 4 - Rendering (in progress)
 
-Goal: see the game. Planned steps:
+Goal: see the game, ideally at higher internal resolution than the console (see Goals).
+
+**Step 0 - GPU frame capture (done).** `--capture-frame N[,N...]` records a frame's draws,
+shader loads, register changes, render targets and textures to `captures/frame_N/` (see
+`docs/runtime.md`). Register names and field layouts come from Xenia's register table and
+`xenos.h` (BSD). First findings:
+- Attract-movie frames: ~51 draws, mostly single-point draws plus a few rectangle lists; bound
+  textures are 8-bit planes at 1280x720 and 640x360 - the movie player's YUV planes and
+  motion-compensation shaders running on the GPU.
+- 3D logo frames between movie loops: ~65 draws, 4 large indexed triangle lists (9.5k-18.7k
+  indices), 4x MSAA render targets at reduced size with resolves (EDRAM copies), tiled
+  textures in 8_8_8_8, 4_4_4_4, 8 and DXT1 (including a cube map), 7 vertex + 5 pixel shaders.
+- Front buffer is 1280x720 8_8_8_8 at physical 0x00840000.
+- Movies are drawn by the GPU, not decoded by us: their pictures come with the renderer.
+
+Remaining steps:
 1. Window + present: open a Vulkan window and display the front buffer the game swaps to
    (`[gpu]` line reports it at 0x00840000, 1280x720). Even before shaders, this shows whether
    anything is drawn and lets us test resolves/EDRAM copies.
@@ -144,8 +168,10 @@ dev machine), vibration via `XamInputSetState`, keyboard fallback.
 
 ## Phase 7 - Movies (planned)
 
-The logo and attract movies are `.wmv` files played through the console's movie player; today
-they "play" silently with nothing shown. Decode with FFmpeg and draw as a texture.
+The logo and attract movies are `.wmv` files. The frame captures show the game's own movie player
+decodes them and draws the YUV planes on the GPU (motion-compensation shaders), so pictures should
+appear once the renderer handles those draws. This phase covers what remains: movie audio, timing,
+and any decoding the player expects hardware for.
 
 ## Phase 8 - Saves and profile (planned)
 
@@ -156,6 +182,8 @@ profile settings; device selector UI answered automatically.
 
 Play-test menus and matches; watch Euphoria/Morpheme physics for floating-point differences;
 profile hot paths; consider XenonRecomp's optimization flags once behavior is correct.
+High-frame-rate support (see Goals): find what caps the game at 30 fps, check whether game logic
+and physics use real elapsed time, then patch timing or interpolate.
 
 ## Phase 10 - Packaging (planned)
 
@@ -176,7 +204,9 @@ optional integration with a launcher such as recomplauncher.com.
 
 ## Open questions
 
-- Is 30 fps the game's real cap in the front end (likely), or are we pacing it?
+- What caps the title loop at 30 fps (attract video rate, vblank interval, or game logic)?
+- Reaching real menus needs a Start press: worth a debug option that presses Start after N
+  seconds, so captures and testing can go past the title screen before phase 5.
 - XMA2 decoder source for phase 6 (RPM Fusion FFmpeg vs. vendored decoder).
 - High-level (hook Direct3D calls) vs. low-level (emulate Xenos PM4, like Xenia) rendering:
   the current command processor follows the low-level route, which needs no knowledge of the

@@ -2,6 +2,7 @@
 // side effects: register writes, memory writes, fences, waits, interrupts and swaps.
 // Packet formats follow Xenia's command_processor.cc.
 #include "gpu.h"
+#include "capture.h"
 #include "../kernel/objects.h"
 #include "../apu/apu.h"
 #include "../log.h"
@@ -12,6 +13,8 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <vector>
+#include <algorithm>
 #include <map>
 #include <cstdio>
 
@@ -132,6 +135,7 @@ namespace gpu
             uint32_t op = (header >> 8) & 0x7F;
             uint32_t count = ((header >> 16) & 0x3FFF) + 1;
             g_packets++;
+            capture::onPacket(op);
             switch (op)
             {
             case PM4_INDIRECT_BUFFER:
@@ -266,10 +270,51 @@ namespace gpu
                 return;
             }
             case PM4_DRAW_INDX:
-            case PM4_DRAW_INDX_2:
+            {
+                // [0] viz query, [1] VGT_DRAW_INITIATOR, then for DMA indices: [2] base, [3] size
+                r.next();
+                uint32_t initiator = r.next(), indexBase = 0, indexSize = 0;
+                uint32_t used = 2;
+                if (((initiator >> 6) & 3) == 0 && count >= 4)
+                {
+                    indexBase = r.next();
+                    indexSize = r.next();
+                    used = 4;
+                }
+                r.skip(count - used);
                 g_draws++;
-                r.skip(count);
+                capture::onDraw(op, initiator, indexBase, indexSize);
                 return;
+            }
+            case PM4_DRAW_INDX_2:
+            {
+                // [0] VGT_DRAW_INITIATOR, then immediate indices
+                uint32_t initiator = r.next();
+                r.skip(count - 1);
+                g_draws++;
+                capture::onDraw(op, initiator, 0, 0);
+                return;
+            }
+            case PM4_IM_LOAD:
+            {
+                // [0] shader address | type, [1] start << 16 | size in dwords
+                uint32_t addrType = r.next(), startSize = r.next();
+                r.skip(count - 2);
+                uint32_t size = startSize & 0xFFFF;
+                capture::onShaderLoad(addrType & 3, startSize >> 16, size, (const uint32_t*)physical(addrType & ~3u));
+                return;
+            }
+            case PM4_IM_LOAD_IMMEDIATE:
+            {
+                // [0] type, [1] start << 16 | size in dwords, then the microcode
+                uint32_t type = r.next(), startSize = r.next();
+                uint32_t size = std::min<uint32_t>(startSize & 0xFFFF, count - 2);
+                std::vector<uint32_t> words(size);
+                for (uint32_t i = 0; i < size; i++) words[i] = __builtin_bswap32(r.next()); // keep big-endian
+                r.skip(count - 2 - size);
+                capture::onShaderLoad(type & 3, startSize >> 16, size, words.data());
+                return;
+            }
             case PM4_XE_SWAP:
             {
                 g_frontBuffer = r.next();
@@ -278,6 +323,7 @@ namespace gpu
                 r.skip(count - 3);
                 g_frames++;
                 g_counter++;
+                capture::onSwap(g_frames, g_frontBuffer, g_frontWidth, g_frontHeight);
                 return;
             }
             default:

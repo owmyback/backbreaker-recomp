@@ -27,6 +27,7 @@ file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/runtime/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/kernel/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/gpu/*.cpp
+    ${CMAKE_SOURCE_DIR}/runtime/gpu/generated/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/apu/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/hid/*.cpp
     ${CMAKE_SOURCE_DIR}/runtime/debug/*.cpp
