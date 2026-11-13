@@ -153,7 +153,7 @@ shader loads, register changes, render targets and textures to `captures/frame_N
 - Front buffer is 1280x720 8_8_8_8 at physical 0x00840000.
 - Movies are drawn by the GPU, not decoded by us: their pictures come with the renderer.
 
-**Step 1 - Window + present (done, `STEP1`).** SDL3 window and Vulkan swapchain (FIFO) on the
+**Step 1 - Window + present (done, `6ad24c9`).** SDL3 window and Vulkan swapchain (FIFO) on the
 process main thread; the game runs on its own host thread and never waits on the window. Each
 guest swap publishes the front buffer; the presenter copies it into a staging buffer, uploads it
 and blits it letterboxed into the swapchain image. Window title: game fps and display fps (30 and
@@ -164,6 +164,9 @@ and blits it letterboxed into the swapchain image. Window title: game fps and di
 - `VdSwap`'s front-buffer texture fetch constant confirms: 8_8_8_8, **tiled**, pitch 1280,
   1280x720. The presenter copies raw for now, so it will need untiling once pixels exist.
 - The picture is black: our command processor does not execute resolves or draws yet.
+
+Open issues (separable from the renderer core): #9 (fullscreen toggle), #10 (screenshot key),
+#11 (Vulkan validation clean run), #12 (tested tiled/linear conversion).
 
 Remaining steps:
 1. Shader disassembler for the captured microcode (which Xenos instructions this game uses).
