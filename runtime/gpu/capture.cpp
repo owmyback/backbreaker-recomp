@@ -2,6 +2,7 @@
 // (BSD 3-clause, see docs/licenses/xenia-LICENSE.txt).
 #include "capture.h"
 #include "gpu.h"
+#include "state.h"
 #include "../log.h"
 #include "../memory.h"
 
@@ -73,6 +74,7 @@ namespace gpu::capture
         std::map<std::string, uint64_t> g_prims;
         std::set<uint64_t> g_usedShaders[2];
         std::set<std::string> g_targets, g_textures;
+        std::map<std::string, uint64_t> g_pipelines; // pipeline key -> draws
         uint64_t g_draws = 0, g_copies = 0;
         FILE* g_drawLog = nullptr;
 
@@ -165,7 +167,7 @@ namespace gpu::capture
                 fprintf(f, "(ALU constants 0x4000-0x47FF: %u non-zero, not listed)\n", aluNonZero);
                 fclose(f);
             }
-            g_opcodes.clear(); g_prims.clear(); g_targets.clear(); g_textures.clear();
+            g_opcodes.clear(); g_prims.clear(); g_targets.clear(); g_textures.clear(); g_pipelines.clear();
             g_usedShaders[0].clear(); g_usedShaders[1].clear();
             g_draws = g_copies = 0;
             g_active = true;
@@ -205,6 +207,8 @@ namespace gpu::capture
             for (auto& t : g_targets) fprintf(f, "  %s\n", t.c_str());
             fprintf(f, "\ntextures seen at draws (format, dimension, size, tiling):\n");
             for (auto& t : g_textures) fprintf(f, "  %s\n", t.c_str());
+            fprintf(f, "\npipeline states (fixed-function state per draw, see runtime/gpu/state.cpp): %zu unique\n", g_pipelines.size());
+            for (auto& [k, v] : g_pipelines) fprintf(f, "  %4llu  %s\n", (unsigned long long)v, k.c_str());
             fprintf(f, "\nPM4 type-3 packets:\n");
             for (auto& [op, n] : g_opcodes) fprintf(f, "  0x%02X  %llu\n", op, (unsigned long long)n);
             fclose(f);
@@ -273,14 +277,16 @@ namespace gpu::capture
         g_usedShaders[1].insert(g_currentShader[1]);
         std::string target = describeTarget();
         g_targets.insert(target);
+        DrawState state = captureDrawState(initiator);
+        g_pipelines[pipelineKey(state)]++;
         FILE* f = g_drawLog;
         if (!f) return;
         fprintf(f, "\ndraw %llu  %s  prim=%s count=%u source=%s", (unsigned long long)g_draws,
                 opcode == 0x22 ? "DRAW_INDX" : "DRAW_INDX_2", primName, count, kSourceNames[source]);
         if (source == 0)
             fprintf(f, " indices=%s base=%08X size_word=%08X", indexSize ? "u32" : "u16", indexBase, indexSizeWord);
-        fprintf(f, "\n  vs=%016llx ps=%016llx\n  %s\n", (unsigned long long)g_currentShader[0],
-                (unsigned long long)g_currentShader[1], target.c_str());
+        fprintf(f, "\n  vs=%016llx ps=%016llx\n%s  raw register changes since the previous draw:\n", (unsigned long long)g_currentShader[0],
+                (unsigned long long)g_currentShader[1], describe(state).c_str());
         // Registers changed since the previous draw (ALU constants only counted)
         uint32_t aluChanged = 0;
         for (uint32_t i = 0; i < reg::kCount; i++)
