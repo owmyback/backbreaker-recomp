@@ -31,7 +31,7 @@ audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-2 done) | `258ec24` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-3 done) | `258ec24` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -185,14 +185,29 @@ of shaders. `--dump-shaders` collects every shader a run loads. Coverage of the 
 So the translator can start small; gameplay shaders will extend this (re-run the coverage once
 the game gets further).
 
+**Step 3 - Xenos state tracking (done, `a7b0bb8`).** `runtime/gpu/state.cpp` decodes the full draw
+state from the register file at each draw (primitive/indices, EDRAM mode, four color targets with
+format, EDRAM tile base, write mask and blending, depth/stencil front and back, rasterizer,
+alpha test, viewport, window/screen scissor, shader register counts, export modes and constant
+ranges) and builds a pipeline key from the fixed-function part. Register layouts are generated
+from Xenia's `registers.h` (`tools/gen_gpu_registers.py`, 44 registers, 27 enums, each layout
+checked against Xenia's bit-offset comments). The frame capture now prints the decoded state per
+draw and the distinct pipeline states per frame. Findings from the 3D logo frame:
+- 8 distinct pipeline states: 3D models (triangle lists, depth LessEqual + write, back-face
+  culling), EDRAM clears (rectangle lists writing all four targets with depth Always and stencil
+  Replace, also at 4x MSAA), resolves (rectangle lists in Copy mode), alpha-blended UI (triangle
+  strips / a quad list with alpha test), and the movie decoder's point draws.
+- EDRAM addressing checks out: a 256x256 8_8_8_8 target uses pitch 320 (80-pixel tiles) and its
+  depth buffer starts at tile 64 = 256/16 rows x 4 tiles.
+- Vertex shader constants live at 0-255 and pixel shader constants at 256-511.
+
 Remaining steps:
-1. Xenos state tracking: render targets (EDRAM), viewport, blend/depth state from the register file.
-2. Shader translation: Xenos microcode (vertex/pixel) -> SPIR-V. Xenia's shader translator is the
+1. Shader translation: Xenos microcode (vertex/pixel) -> SPIR-V. Xenia's shader translator is the
    reference.
-3. Render targets in EDRAM, resolves to memory (including the front buffer); internal
+2. Render targets in EDRAM, resolves to memory (including the front buffer); internal
    resolution scaling.
-4. Textures: tiled formats, untiling, format conversion; vertex fetch.
-5. Draw calls (`DRAW_INDX`, `DRAW_INDX_2`). First picture expected: the attract movie.
+3. Textures: tiled formats, untiling, format conversion; vertex fetch.
+4. Draw calls (`DRAW_INDX`, `DRAW_INDX_2`). First picture expected: the attract movie.
 This is the largest phase (weeks to months).
 
 ## Phase 5 - Controller input (planned)
