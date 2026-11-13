@@ -7,6 +7,7 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
 - `docs/ROADMAP.md` - phases, current status, what each phase did and what is next
 - `docs/runtime.md` - building and running the runtime, its layout and debugging aids
 - `docs/feasibility.md` - the original analysis and recompiler notes
+- `CONTRIBUTING.md` - rules (no game files, ever), workflow and testing for contributors
 
 ## Layout
 - `tools/`        - our own helper scripts (disc extraction, XEX decryption, switch tables, function bounds)
