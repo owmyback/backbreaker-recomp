@@ -7,6 +7,9 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 **Keep this file current:** when a phase changes status, update its row, its section and the
 "Current state" paragraph, and reference the commits.
 
+Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
+
 Last updated: 2026-11-12 (phase 4 started)
 
 ## Current state
@@ -82,6 +85,8 @@ Goal: every guest function translates to C++ that compiles.
 
 Verify: see README "Recompile" and "Tests".
 
+Open issues: #1 (tests without game files + CI), #2 (tests for the remaining new instructions).
+
 ## Phase 2 - Host runtime boot (done)
 
 Goal: load the image and run the entry point with real kernel services.
@@ -94,6 +99,8 @@ Goal: load the image and run the entry point with real kernel services.
   strings, the game's printf-style logging.
 - Result: CRT init completes, the game starts its file-system and pool threads and opens its
   data archives.
+
+Open issues: #3 (keep `KeTimeStampBundle` updated).
 
 ## Phase 3 - Headless subsystems (done)
 
@@ -126,6 +133,8 @@ Goal: everything the game needs to reach its main loop, without real output yet.
 
 Verify: `ninja -C build && ./build/backbreaker --timeout 60` - the once-per-second `[gpu]` line
 shows fps, draws and memory.
+
+Open issues: #5 (virtual memory grows ~1 MB per 20 s on the title screen).
 
 ## Phase 4 - Rendering (in progress)
 
@@ -164,6 +173,8 @@ Done early: scripted presses for testing (`--press "a@20,a@26"`, see `docs/runti
 both as pad state and as keystroke events (`XamInputGetKeystrokeEx`). The game accepts them:
 A on the title screen stops the attract loop and moves on to the storage-device prompt.
 
+Open issues: #6 (SDL3 controller backend).
+
 ## Phase 6 - Audio output (planned)
 
 - Real XMA2 decoding. Fedora's `ffmpeg-free` has no XMA decoder (WMA Pro family is excluded);
@@ -189,6 +200,8 @@ player query is handled. The game then enumerates saves with `XamContentCreateEn
 Next: enumerators (empty at first), `XamContentCreateEx` / `XamContentClose` mounting a save
 container as a drive (e.g. `save:`) backed by a host folder, `XamContentGetDeviceData`.
 
+Open issues: #7 (save system).
+
 ## Phase 9 - Gameplay correctness and performance (planned)
 
 Play-test menus and matches; watch Euphoria/Morpheme physics for floating-point differences;
@@ -200,6 +213,8 @@ and physics use real elapsed time, then patch timing or interpolate.
 
 Reproducible build from a user's own ISO (extract, decrypt, recompile, build) in one script;
 optional integration with a launcher such as recomplauncher.com.
+
+Open issues: #4 (one-step setup script).
 
 ---
 
