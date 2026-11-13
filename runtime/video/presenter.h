@@ -18,5 +18,7 @@ namespace video
 
     // Opens the window and presents until the window is closed. Returns normally on close;
     // calls fatal() if SDL/Vulkan cannot be initialized.
-    void run();
+    // Size, position and fullscreen state are read from game/settings.ini (issue #9) and written
+    // back when the window closes; startFullscreen forces fullscreen whatever the file says.
+    void run(bool startFullscreen = false);
 }

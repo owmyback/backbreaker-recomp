@@ -10,7 +10,7 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-13 (#3 closed)
+Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9 done)
 
 ## Current state
 
@@ -179,8 +179,11 @@ and blits it letterboxed into the swapchain image. Window title: game fps and di
   1280x720. The presenter copies raw for now, so it will need untiling once pixels exist.
 - The picture is black: our command processor does not execute resolves or draws yet.
 
-Open issues (separable from the renderer core): #9 (fullscreen toggle), #10 (screenshot key),
-#11 (Vulkan validation clean run), #12 (tested tiled/linear conversion).
+Open issues (separable from the renderer core): #10 (screenshot key), #11 (Vulkan validation clean
+run), #12 (tested tiled/linear conversion). Window polish #9 is done (`0858b6a`): F11 or Alt+Enter
+toggles borderless fullscreen, and the windowed size, position and fullscreen state are remembered
+in `game/settings.ini` between runs (`--fullscreen` to start fullscreen). Only the windowed geometry
+is remembered, so leaving fullscreen gives the same window back.
 
 **Step 2 - Shader disassembler (done, `c5562a6`).** `runtime/gpu/ucode.h` decodes Xenos microcode
 (control flow, vertex/texture fetch, paired vector+scalar ALU; layouts from Xenia's `ucode.h`),

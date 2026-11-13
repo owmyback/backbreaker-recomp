@@ -17,8 +17,11 @@
 #include <vulkan/vulkan.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace video
@@ -63,6 +66,97 @@ namespace video
             std::vector<VkSemaphore> rendered; // one per swapchain image
             VkFence inFlight = VK_NULL_HANDLE;
         } vk;
+
+        // ---- Window state remembered between runs (issue #9) ----
+        // game/settings.ini, plain key=value lines. game/ is gitignored, so this is per-machine
+        // state rather than project data.
+        struct Settings
+        {
+            int width = 1280, height = 720;
+            int x = 0, y = 0;
+            bool hasPosition = false;
+            bool fullscreen = false;
+        };
+        Settings g_settings;
+        bool g_fullscreen = false;
+
+        Settings loadSettings()
+        {
+            Settings s;
+            FILE* f = fopen("game/settings.ini", "r");
+            if (!f)
+                return s; // first run: defaults
+            char line[128];
+            while (fgets(line, sizeof(line), f))
+            {
+                char* eq = strchr(line, '=');
+                if (!eq)
+                    continue;
+                std::string key(line, eq);
+                int value = std::atoi(eq + 1);
+                if (key == "width") s.width = value;
+                else if (key == "height") s.height = value;
+                else if (key == "x") { s.x = value; s.hasPosition = true; }
+                else if (key == "y") { s.y = value; s.hasPosition = true; }
+                else if (key == "fullscreen") s.fullscreen = value != 0;
+            }
+            fclose(f);
+            if (s.width <= 0 || s.height <= 0) { s.width = 1280; s.height = 720; }
+            return s;
+        }
+
+        // Only the windowed geometry is worth remembering: in borderless fullscreen the window is
+        // the whole display, so what is stored is the size it was before going fullscreen.
+        void rememberWindowGeometry()
+        {
+            if (g_fullscreen)
+                return;
+            int w = 0, h = 0, x = 0, y = 0;
+            SDL_GetWindowSize(vk.window, &w, &h);
+            SDL_GetWindowPosition(vk.window, &x, &y);
+            if (w > 0 && h > 0) { g_settings.width = w; g_settings.height = h; }
+            if (x >= 0 && y >= 0) { g_settings.x = x; g_settings.y = y; g_settings.hasPosition = true; }
+        }
+
+        void saveSettings()
+        {
+            if (!g_fullscreen)
+                rememberWindowGeometry();
+            g_settings.fullscreen = g_fullscreen;
+            FILE* f = fopen("game/settings.ini", "w");
+            if (!f)
+            {
+                warn("[video] cannot write game/settings.ini: %s", strerror(errno));
+                return;
+            }
+            std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\n",
+                         g_settings.width, g_settings.height, g_settings.x, g_settings.y,
+                         int(g_settings.fullscreen));
+            fclose(f);
+        }
+
+        void setFullscreen(bool on)
+        {
+            if (on == g_fullscreen)
+                return;
+            if (on)
+                rememberWindowGeometry(); // the size we are about to leave
+            if (!SDL_SetWindowFullscreen(vk.window, on))
+            {
+                warn("[video] fullscreen %s: %s", on ? "on" : "off", SDL_GetError());
+                return;
+            }
+            g_fullscreen = on;
+            if (!on && g_settings.hasPosition)
+            {
+                // SDL restores the pre-fullscreen size on its own; putting the remembered size back
+                // is what makes the value in the file effective on the next run.
+                SDL_SetWindowSize(vk.window, g_settings.width, g_settings.height);
+                SDL_SetWindowPosition(vk.window, g_settings.x, g_settings.y);
+            }
+            info("[video] %s (window %dx%d)", on ? "borderless fullscreen" : "windowed", g_settings.width, g_settings.height);
+            saveSettings();
+        }
 
         uint32_t findMemory(uint32_t typeBits, VkMemoryPropertyFlags flags)
         {
@@ -363,13 +457,19 @@ namespace video
         g_frameNumber.store(frameNumber, std::memory_order_release);
     }
 
-    void run()
+    void run(bool startFullscreen)
     {
         if (!SDL_Init(SDL_INIT_VIDEO))
             fatal("[video] SDL_Init: %s (use --headless to run without a window)", SDL_GetError());
-        vk.window = SDL_CreateWindow("Backbreaker (recomp)", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+        g_settings = loadSettings();
+        vk.window = SDL_CreateWindow("Backbreaker (recomp)", g_settings.width, g_settings.height,
+                                     SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
         if (!vk.window)
             fatal("[video] SDL_CreateWindow: %s (use --headless to run without a window)", SDL_GetError());
+        if (g_settings.hasPosition)
+            SDL_SetWindowPosition(vk.window, g_settings.x, g_settings.y);
+        if (startFullscreen || g_settings.fullscreen)
+            setFullscreen(true);
         hid::initGamepads(); // controllers are polled in this loop (SDL events live on this thread)
         createInstanceAndDevice();
         bool haveSwapchain = createSwapchain();
@@ -388,6 +488,9 @@ namespace video
                     running = false;
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
                     haveSwapchain = false;
+                else if (e.type == SDL_EVENT_KEY_DOWN && e.key.down && !e.key.repeat &&
+                         (e.key.key == SDLK_F11 || (e.key.key == SDLK_RETURN && (e.key.mod & SDL_KMOD_ALT))))
+                    setFullscreen(!g_fullscreen); // the pixel size event recreates the swapchain
             }
             if (!running) break;
             hid::pollGamepads();
@@ -425,5 +528,6 @@ namespace video
 
         { std::lock_guard g(g_ctx->queueLock); vkDeviceWaitIdle(vk.device); }
         info("[video] window closed");
+        saveSettings(); // what the window was when it closed, for the next run
     }
 }

@@ -175,7 +175,7 @@ int main(int argc, char** argv)
     std::string image = "game/extracted/default.pe";
     std::string xex = "game/extracted/default.xex";
     int timeout = 0;
-    bool headless = false;
+    bool headless = false, fullscreen = false;
     for (int i = 1; i < argc; i++)
     {
         std::string a = argv[i];
@@ -183,6 +183,8 @@ int main(int argc, char** argv)
             timeout = std::atoi(argv[++i]);
         else if (a == "--headless")
             headless = true;
+        else if (a == "--fullscreen")
+            fullscreen = true; // windowed runs only; see game/settings.ini (issue #9)
         else if (a == "--sample-threads" && i + 1 < argc)
             debug::scheduleThreadSampling(std::atof(argv[++i])); // hang diagnosis: see docs/runtime.md
         else if (a == "--no-render")
@@ -259,7 +261,7 @@ int main(int argc, char** argv)
         fatal("could not start the guest main thread: %s", strerror(err));
     pthread_attr_destroy(&attr);
 
-    video::run();
+    video::run(fullscreen);
     info("window closed - exiting");
     kernel::printSummary();
     _exit(0);

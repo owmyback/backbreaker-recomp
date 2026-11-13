@@ -13,8 +13,11 @@
 
 By default a window opens (SDL3 + Vulkan) showing what the game renders; its title shows the
 game's frame rate and the display rate. `--headless` runs without a window (the renderer still
-runs if a Vulkan GPU is available, for screenshots). Build dependencies: Vulkan headers/loader,
-SDL3 and shaderc (Fedora: `libshaderc-devel`) development packages. Set `BB_VK_VALIDATION=1` to
+runs if a Vulkan GPU is available, for screenshots). F11 or Alt+Enter toggles borderless
+fullscreen; window size, position and fullscreen state are remembered in `game/settings.ini`
+(written on toggle and on close - `game/` is gitignored), and `--fullscreen` starts fullscreen
+whatever that file says. Build dependencies: Vulkan headers/loader, SDL3 and shaderc (Fedora:
+`libshaderc-devel`) development packages. Set `BB_VK_VALIDATION=1` to
 enable the Vulkan validation layer (needs it installed; Fedora: `vulkan-validation-layers`).
 
 ## Renderer
@@ -66,7 +69,8 @@ Subsystems:
   Vulkan, the guest's main thread runs on its own host thread (16 MB stack); at each swap the
   command processor only publishes the front-buffer address/size (lock-free) and the presenter
   copies it on its own schedule, so the game never waits on the window. Currently a raw copy:
-  the picture is black because nothing renders into the front buffer yet
+  the picture is black because nothing renders into the front buffer yet. Window size, position
+  and fullscreen state are read from `game/settings.ini` (issue #9)
 - `runtime/gpu/` - Vd* imports, PM4 command processor, register file at 0x7FC80000, 60 Hz vblank
   interrupt; MMIO stores reach it through `runtime/ppc_hooks.h` (force-included into ppc/)
 - `runtime/apu/` - XAudio render driver clock (256 samples @ 48 kHz), frames discarded
