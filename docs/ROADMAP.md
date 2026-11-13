@@ -33,7 +33,7 @@ still silence.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-5 done: first picture) | `258ec24`, `STEP5` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-5 done: first picture) | `258ec24`, `7bf4023` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -218,7 +218,7 @@ Not yet: loops/calls/jumps, vector predicate-push ops, LOD/gradient fetches, mem
 texture fetch offsets, pixel shader param_gen, runtime compilation with shaderc + caching (comes
 with draw execution).
 
-**Step 5 - Vulkan renderer, first picture (`STEP5`).** `runtime/gpu/renderer.cpp` runs the
+**Step 5 - Vulkan renderer, first picture (`7bf4023`).** `runtime/gpu/renderer.cpp` runs the
 game's draws on the host GPU. The attract movie renders correctly (checked with
 `--screenshot`). Design:
 - One Vulkan device shared by the window and the renderer (`runtime/video/vk_context.cpp`); the
