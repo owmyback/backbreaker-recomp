@@ -40,6 +40,7 @@ still silence.
 | 8 | Saves and profile (XAM content) | **Next blocker** (device selector done) | - |
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | Planned | - |
+| 11 | Achievements (unlocks, pop-ups, achievements screen) | Planned | - |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
 "Phase 2 (Vulkan renderer)". The numbering above replaces that.
@@ -343,6 +344,40 @@ Reproducible build from a user's own ISO (extract, decrypt, recompile, build) in
 optional integration with a launcher such as recomplauncher.com.
 
 Open issues: #4 (one-step setup script).
+
+## Phase 11 - Achievements (planned)
+
+Goal: the game's Xbox 360 achievements work again - unlocks are recorded, an "Achievement
+unlocked" pop-up appears in game, and an achievements screen lists them all.
+
+What the game provides (checked 2026-11-13):
+- Its achievement database is embedded in the executable as an XDBF (".spa") resource: 29
+  achievements worth 1000 gamerscore, with name/description strings (per language) and images.
+  It is read at startup from the user's own game files; nothing derived from it is committed.
+- Unlocks are reported to the system: the game imports `XMsgStartIORequest` (the XGI app's
+  write-achievements message, 0x000B0025 in Xenia's `xgi_app.cc`), and it lists existing unlocks
+  with `XamUserCreateAchievementEnumerator`. Both are unimplemented today, so unlocks are lost.
+- It imports `XamShowAchievementsUI` / `XamShowAchievementsUIEx` (the Guide's achievements
+  screen on the console).
+
+Planned parts:
+1. Database reader: parse the XDBF resource (achievements, strings, images) from the loaded
+   executable. No game files needed to test the parser beyond a tiny synthetic XDBF.
+2. Unlock tracking: handle the XGI write-achievements message and the achievement enumerator,
+   storing unlocks with timestamps per profile in a host file (next to the saves of phase 8),
+   so the game sees its earlier unlocks.
+3. Overlay layer: a small UI layer the presenter draws on top of the game at window
+   resolution (also useful later for settings, an fps counter, controller prompts).
+4. Pop-up: "Achievement unlocked" toast with icon, name and gamerscore, like the console's.
+5. Achievements screen: opened with a key / controller button and whenever the game calls
+   `XamShowAchievementsUI`; lists all achievements as locked or unlocked with descriptions,
+   gamerscore, unlock dates and a total. Secret achievements stay hidden until unlocked.
+
+A new entry inside the game's own menus would mean patching its menu code and assets, so the
+screen is an overlay instead (as the console's Guide was).
+
+Depends on: phase 5 (a button to open the screen), phase 8 (profiles and where unlocks are
+stored). Parts 1 and 2 can start earlier and are good separable issues.
 
 ---
 
