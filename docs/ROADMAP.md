@@ -31,7 +31,7 @@ audio is silence. Rendering (phase 4) has started with a GPU frame-capture tool.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-3 done) | `258ec24` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-3 done, 4 started) | `258ec24` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -201,9 +201,21 @@ draw and the distinct pipeline states per frame. Findings from the 3D logo frame
   depth buffer starts at tile 64 = 256/16 rows x 4 tiles.
 - Vertex shader constants live at 0-255 and pixel shader constants at 256-511.
 
+**Step 4 - Shader translation (first version, `STEP4`).** `runtime/gpu/shader_translator.cpp`
+emits GLSL 4.50 for Vulkan, compiled to SPIR-V with glslc/shaderc. Design: vertices are fetched
+in the vertex shader straight from guest memory (bound as one storage buffer, byte-swapped per
+the fetch constant's endianness, formats unpacked in the shader) instead of Vulkan vertex input
+state; cube-map fetches rebuild the direction from the `cube` op's (s, t, face) form;
+multiplications follow Shader Model 3 (0 * anything = 0); unsupported features fail translation
+with a reason. All 58 shaders of the current corpus translate, compile with glslc and pass
+spirv-val. A hand-checked vertex shader confirmed the swizzle decoding: the game's compiler keeps
+intermediate results in permuted component order and undoes it on export.
+Not yet: loops/calls/jumps, vector predicate-push ops, LOD/gradient fetches, memory export,
+texture fetch offsets, pixel shader param_gen, runtime compilation with shaderc + caching (comes
+with draw execution).
+
 Remaining steps:
-1. Shader translation: Xenos microcode (vertex/pixel) -> SPIR-V. Xenia's shader translator is the
-   reference.
+1. Shader translation: remaining control flow and features as gameplay shaders need them.
 2. Render targets in EDRAM, resolves to memory (including the front buffer); internal
    resolution scaling.
 3. Textures: tiled formats, untiling, format conversion; vertex fetch.

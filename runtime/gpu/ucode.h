@@ -141,6 +141,7 @@ namespace gpu::ucode
         uint32_t vfSrcSwizzle() const { return bits(d[0], 30, 2); }
         bool vfFormatCompAll() const { return bits(d[1], 12, 1); } // signed
         bool vfNumFormatAll() const { return bits(d[1], 13, 1); }  // 1 = integer, 0 = fraction
+        bool vfIsIndexRounded() const { return bits(d[1], 15, 1); }
         uint32_t vfFormat() const { return bits(d[1], 16, 6); }
         int32_t vfExpAdjust() const { return sbits(d[1], 24, 6); }
         bool vfIsMini() const { return bits(d[1], 30, 1); }

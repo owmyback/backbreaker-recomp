@@ -45,3 +45,7 @@ target_link_options(backbreaker PRIVATE -rdynamic)
 # Shader disassembler / coverage tool for captured Xenos microcode (no game data needed to build)
 add_executable(xenos-disasm tools/xenos_disasm.cpp runtime/gpu/disasm.cpp)
 target_compile_options(xenos-disasm PRIVATE -Wall)
+
+# Shader translator check tool: Xenos microcode -> GLSL files (compile them with glslc)
+add_executable(xenos-translate tools/xenos_translate.cpp runtime/gpu/shader_translator.cpp runtime/gpu/disasm.cpp)
+target_compile_options(xenos-translate PRIVATE -Wall)
