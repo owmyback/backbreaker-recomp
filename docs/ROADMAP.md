@@ -33,7 +33,7 @@ still silence.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-6 done: first picture, resolution scaling) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-7 done: first picture, resolution scaling, tiled textures) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Planned (scripted presses done) | - |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -254,7 +254,7 @@ offsets of a pitch-aligned surface forming a permutation, and the header buildin
 translation units (everything in it is inline/constexpr). Not used by the renderer or the presenter
 yet.
 
-**Step 7 - Tiled textures (`STEP7`).** Textures are untiled on upload with `runtime/gpu/tiling.h`
+**Step 7 - Tiled textures (`1f70840`).** Textures are untiled on upload with `runtime/gpu/tiling.h`
 (after byte-swapping guest memory); 4_4_4_4 and 5_6_5 are expanded to RGBA8. The middleware
 logo screen and the title screen ("BACKBREAKER", "(A) START") now render with their real images.
 Visible gap: the game clears the screen with a rectangle drawn at pitch 640 with 4x MSAA, which
