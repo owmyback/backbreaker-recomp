@@ -208,7 +208,9 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
 
                 // Scalar op -> sres, and ps
                 uint32_t sop = a.scalarOp();
-                bool scalarActive = sop != 50 && (smask || exp || (sop >= 27 && sop <= 39) || sop == 23 || sop == 24);
+                // Every scalar op except retain_prev updates ps (the previous-scalar register that
+                // *_prev ops read), even when nothing is written to a register
+                bool scalarActive = sop != 50;
                 if (scalarActive)
                 {
                     std::string x, y; // a (W) and b (X)
