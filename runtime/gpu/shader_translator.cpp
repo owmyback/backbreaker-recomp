@@ -424,7 +424,8 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
 
             void tfetch(const Fetch& f)
             {
-                if (f.op() != uint32_t(FetchOp::TextureFetch)) { fail(fmt("fetch op %s not supported", fetchName(f.op()))); return; }
+                bool weights = f.op() == uint32_t(FetchOp::GetTextureWeights);
+                if (f.op() != uint32_t(FetchOp::TextureFetch) && !weights) { fail(fmt("fetch op %s not supported", fetchName(f.op()))); return; }
                 uint32_t slot = f.constIndex(), dim = f.tfDimension();
                 if (out.textureSlots & (1u << slot) && out.textureDims[slot] != dim)
                     { fail(fmt("texture slot %u used with two dimensions", slot)); return; }
@@ -444,14 +445,52 @@ float logc(float x) { float r = log2(x); return isinf(r) && r < 0.0 ? -3.4028234
                 case 2: coord = src + "." + coords; break;
                 default: coord = "cubeDir(" + src + "." + coords + ")"; break;
                 }
-                if (f.tfCoordDenormalized() && dim != 3)
-                    coord = "(" + coord + ") / " + (dim == 0 ? "float" : dim == 1 ? "vec2" : "vec3") + "(textureSize(" + t + ", 0))";
+                // Fetch offsets: half-texel steps, added in texel space (Xenia's spirv translator, which
+                // also adds 1.5/1024 texel so point sampling between texels picks the console's texel)
+                bool hasOffset = f.tfOffsetX() || f.tfOffsetY() || f.tfOffsetZ();
+                if (hasOffset && dim == 3) fail("texture fetch offsets on cube maps not supported");
+                if (weights)
+                {
+                    // getWeights: bilinear lerp factors, fract(coordinate in texels + offset - 0.5) per
+                    // component (Xenia), the rest 0
+                    if (dim == 3) { fail("getWeights on cube maps not supported"); return; }
+                    const double eps = 1.5 / 1024.0;
+                    int n = dim == 0 ? 1 : dim == 1 ? 2 : 3;
+                    int32_t offs[3] = { f.tfOffsetX(), f.tfOffsetY(), f.tfOffsetZ() };
+                    emit("fres = vec4(0.0);");
+                    emit("cube_src.xyz = vec3(textureSize(" + t + ", 0)" + (dim == 0 ? ", 1.0, 1.0" : dim == 1 ? ", 1.0" : "") + ");");
+                    for (int c = 0; c < n; c++)
+                    {
+                        std::string coordC = src + "." + coords[c];
+                        if (!f.tfCoordDenormalized()) coordC += fmt(" * cube_src.%c", kComp[c]);
+                        emit(fmt("fres.%c = fract(%s + %.9g);", kComp[c], coordC.c_str(), offs[c] * 0.5 + eps - 0.5));
+                    }
+                    writeFetchResult(f, "fres");
+                    if (f.isPredicated()) { indent--; emit("}"); }
+                    return;
+                }
+                const char* vecType = dim == 0 ? "float" : dim == 1 ? "vec2" : "vec3";
+                std::string size = std::string(vecType) + "(textureSize(" + t + ", 0))";
+                std::string offset;
+                if (hasOffset)
+                {
+                    const double eps = 1.5 / 1024.0;
+                    double o[3] = { f.tfOffsetX() * 0.5 + eps, f.tfOffsetY() * 0.5 + eps, f.tfOffsetZ() * 0.5 + eps };
+                    offset = dim == 0 ? fmt("%.9g", o[0]) : dim == 1 ? fmt("vec2(%.9g, %.9g)", o[0], o[1])
+                                                                     : fmt("vec3(%.9g, %.9g, %.9g)", o[0], o[1], o[2]);
+                }
+                if (dim != 3)
+                {
+                    if (f.tfCoordDenormalized())
+                        coord = "(" + coord + (hasOffset ? " + " + offset : "") + ") / " + size;
+                    else if (hasOffset)
+                        coord = "(" + coord + " + " + offset + " / " + size + ")";
+                }
                 std::string sample;
                 bool lod = type == ShaderType::Vertex;
                 if (lod) sample = "textureLod(" + t + ", " + coord + ", 0.0)";
                 else if (f.tfLodBias()) sample = fmt("texture(%s, %s, %.4f)", t.c_str(), coord.c_str(), f.tfLodBias() / 16.0);
                 else sample = "texture(" + t + ", " + coord + ")";
-                if (f.tfOffsetX() || f.tfOffsetY() || f.tfOffsetZ()) fail("texture fetch offsets not supported");
                 writeFetchResult(f, sample);
                 if (f.isPredicated()) { indent--; emit("}"); }
             }
