@@ -10,7 +10,7 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9 done)
+Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9 done; setup script, phase 10 started)
 
 ## Current state
 
@@ -48,7 +48,7 @@ reverse the job in `sub_8241D320` to find the condition it waits for.
 | 7 | Movies (WMV / XMV playback) | Planned | - |
 | 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
 | 9 | Gameplay correctness and performance | Planned | - |
-| 10 | Packaging and launcher | Planned | - |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `4a6ccf1` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Planned | - |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
@@ -363,12 +363,20 @@ profile hot paths; consider XenonRecomp's optimization flags once behavior is co
 High-frame-rate support (see Goals): find what caps the game at 30 fps, check whether game logic
 and physics use real elapsed time, then patch timing or interpolate.
 
-## Phase 10 - Packaging (planned)
+## Phase 10 - Packaging (started)
 
-Reproducible build from a user's own ISO (extract, decrypt, recompile, build) in one script;
-optional integration with a launcher such as recomplauncher.com.
+`scripts/setup.sh "<iso>"` (`4a6ccf1`, #4) takes a checkout and an image of your own disc to a
+built `build/backbreaker` in one step: prerequisite check with the package names for the
+distribution, extraction, decryption, the XenonRecomp clone + patch + build at the pinned commit,
+the recompile, the import glue, the CMake build and the game-free tests. It skips a step whose
+output already exists, `--force` redoes everything, and `--regenerate` re-derives
+`config/backbreaker_switch_tables.toml` and the leaf-function block of `config/backbreaker.toml`
+from your image. The image path never reaches the output or a file. README ("One-step setup") and
+`docs/runtime.md` ("Build and run") document it; the per-command sections stay as the reference.
 
-Open issues: #4 (one-step setup script).
+Still open in this phase: optional integration with a launcher such as recomplauncher.com, and
+whatever a release build needs (install prefix, the game files next to the binary instead of
+`game:\` pointing into the checkout).
 
 ## Phase 11 - Achievements (planned)
 

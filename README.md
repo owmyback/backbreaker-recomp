@@ -11,6 +11,7 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
 
 ## Layout
 - `tools/`        - our own helper scripts (disc extraction, XEX decryption, switch tables, function bounds)
+- `scripts/`      - contributor setup (`setup.sh`: your image to a build in one step)
 - `config/`       - XenonRecomp configuration and generated switch tables
 - `patches/`      - our changes to XenonRecomp
 - `runtime/`      - the host runtime (kernel, GPU, audio, input)
@@ -23,6 +24,17 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
 ## Game files
 You need an ISO image made from your own retail Backbreaker (Xbox 360) disc. No game files are
 included or provided here. Below, `<iso>` is the path to your image.
+
+## One-step setup
+    scripts/setup.sh "<iso>"      # then: ./build/backbreaker --timeout 30
+
+`scripts/setup.sh` runs the steps documented below in order - prerequisite checks, extraction,
+decryption, the XenonRecomp clone + patch + build, the recompile, the import glue, the CMake
+build and the game-free tests. A step whose output already exists is skipped, so re-running it
+is cheap and safe; `--force` redoes everything, `--jobs N` limits the compile jobs and
+`--regenerate` re-derives `config/backbreaker_switch_tables.toml` and the leaf-function block of
+`config/backbreaker.toml` from your image (two recompile passes, see "Recompile"). The image path
+goes only into the two extraction commands: it is never printed, written to a file or committed.
 
 ## Reproduce extraction
     mkdir -p game/extracted game/disc

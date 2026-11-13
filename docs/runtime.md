@@ -3,6 +3,9 @@
 `build/backbreaker` runs the recompiled game on the host.
 
 ## Build and run
+The one step (`scripts/setup.sh "<iso>"` from the repo root, see README) does everything below;
+the commands are still listed individually because they are also useful on their own.
+
     python3 -I tools/xdvdfs.py "<iso>" game/disc --all        # once: extract the disc
     python3 -I tools/gen_imports.py game/extracted/default.xex game/extracted/default.pe \
         third_party/XenonRecomp/XenonUtils/xbox/xboxkrnl_table.inc \
