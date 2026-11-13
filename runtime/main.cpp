@@ -30,6 +30,14 @@ PPC_EXTERN_FUNC(_xstart);
 
 namespace
 {
+    // Every way the process ends prints this, so a run's last lines say what it was doing and
+    // whether the Vulkan validation layer had anything to complain about.
+    void printExitSummary()
+    {
+        kernel::printSummary();
+        vkctx::logValidationSummary();
+    }
+
     void crashHandler(int sig, siginfo_t* si, void* uctx)
     {
         // Only the first crashing thread reports; others wait to be torn down with the process.
@@ -67,7 +75,7 @@ namespace
         kernel::printScopes(gt);
         if (gt) kernel::printTrace(gt->id, 24);
         kernel::printTrace(0, 12);
-        kernel::printSummary();
+        printExitSummary();
         _exit(128 + sig);
     }
 
@@ -80,7 +88,7 @@ namespace
             kernel::printScopes(t);
             kernel::printTrace(t->id, 4);
         }
-        kernel::printSummary();
+        printExitSummary();
         _exit(124);
     }
 
@@ -122,7 +130,7 @@ namespace
         kernel::GuestThread* gt = kernel::currentThread();
         kernel::printScopes(gt);
         if (gt) kernel::printTrace(gt->id, 16);
-        kernel::printSummary();
+        printExitSummary();
         _exit(3);
     }
 
@@ -159,7 +167,7 @@ namespace
         info("calling entry point _xstart");
         _xstart(g_mainCtx, mem::base);
         info("_xstart returned (r3=%08X)", g_mainCtx.r3.u32);
-        kernel::printSummary();
+        printExitSummary();
         _exit(0);
     }
 
@@ -263,6 +271,6 @@ int main(int argc, char** argv)
 
     video::run(fullscreen);
     info("window closed - exiting");
-    kernel::printSummary();
+    printExitSummary();
     _exit(0);
 }

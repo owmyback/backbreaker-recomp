@@ -189,11 +189,15 @@ and blits it letterboxed into the swapchain image. Window title: game fps and di
   1280x720. The presenter copies raw for now, so it will need untiling once pixels exist.
 - The picture is black: our command processor does not execute resolves or draws yet.
 
-Open issues (separable from the renderer core): #10 (screenshot key), #11 (Vulkan validation clean
-run), #12 (tested tiled/linear conversion). Window polish #9 is done (`0858b6a`): F11 or Alt+Enter
-toggles borderless fullscreen, and the windowed size, position and fullscreen state are remembered
-in `game/settings.ini` between runs (`--fullscreen` to start fullscreen). Only the windowed geometry
-is remembered, so leaving fullscreen gives the same window back.
+Open issues (separable from the renderer core): #10 (screenshot key),
+#12 (tested tiled/linear conversion). #11 (Vulkan validation clean run) is settled: the layer runs
+with `BB_VK_VALIDATION=1`, and a run into an Exhibition match reports no errors (docs/runtime.md,
+"Vulkan validation"; the two things it found - render pass attachments the draw has no image for, and a shader
+feature enabled without asking the GPU for it - are fixed; docs/runtime.md). Window polish #9 is
+done (`bf0641c`): F11 or Alt+Enter toggles borderless fullscreen, and the windowed size, position
+and fullscreen state are remembered in `game/settings.ini` between runs (`--fullscreen` to start
+fullscreen). Only the windowed geometry is remembered, so leaving fullscreen gives the same window
+back.
 
 **Step 2 - Shader disassembler (done, `c5562a6`).** `runtime/gpu/ucode.h` decodes Xenos microcode
 (control flow, vertex/texture fetch, paired vector+scalar ALU; layouts from Xenia's `ucode.h`),

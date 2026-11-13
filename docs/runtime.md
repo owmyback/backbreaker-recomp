@@ -42,6 +42,70 @@ On a crash or timeout it prints the host backtrace (sub_XXXXXXXX names are guest
 the last 32 kernel calls, a per-import usage summary, and the allocations still held grouped by
 the import that made them.
 
+## Vulkan validation
+`BB_VK_VALIDATION=1` runs the process under the Khronos validation layer; `2` adds the layer's
+info messages. `runtime/video/vk_context.cpp` installs one `VK_EXT_debug_utils` messenger, both
+chained into `VkInstanceCreateInfo::pNext` (so instance creation itself is validated) and created
+with `vkCreateDebugUtilsMessengerEXT` (device-level messages). Messages go through the `[rt]`
+logger, not the layer's own stdout messenger; an identical message is logged three times and then
+counted only. Every way the process ends prints one line:
+
+    [rt] [vk-val] 1 validation message(s), 1 distinct: 0 error(s), 1 warning(s)
+
+A pipeline is named by its handle in these messages, and the `[render] pipeline N 0x...` line the
+renderer prints when it compiles one carries the same handle, which is how an error gets tied back
+to the guest state that made it.
+
+That is what a run has to look like to call itself clean, and the route it is measured on goes into
+a match: `--press "a@20,a@26,a@42,right@47,a@51,a@80,a@86,a@100,a@106,a@112,a@118,a@124,a@130,a@170,a@180,a@190,a@200"`
+is boot, the movies, the saves, the menus, Exhibition's side, team and stadium selection, the match
+load and the match itself, so the 3D scene's draws, the skinning export draws and the HDR and depth
+targets are added to the front end's transfers and clears. A headless run of it under the layer
+(8020 frames) ends with `5 validation message(s), 2 distinct: 0 error(s), 5 warning(s)`: the
+loader note below and one SPIR-V interface note the layer itself calls "not invalid" (a vertex
+shader output that one pixel shader does not read). It is not the whole check: a shader that
+fails to translate or compile is not a validation message - the renderer logs a `[render]` warning
+and carries on without those draws, which takes the front buffer and the screenshots with it. The
+log has to be read as well as the count line. On the route above the `[render]` warnings left are all
+"not supported yet" ones - texture formats, the EDRAM transfer between different formats and depth
+resolves - each logged once per thing missing, none of them API misuse.
+
+What is left in a clean run is loader noise, not our API use: `terminator_CreateInstance: ... libvulkan_dzn.so` (that driver cannot open
+here) and, at level 2, which ICDs were found and how the physical devices sorted.
+
+What the renderer keeps in step for this:
+- A dynamic render pass carries the color slots up to the last one that has an image
+  (`colorSlots` in `renderer.cpp`), and the pipeline for it is built with the same number; the two
+  counts have to be equal anyway (VUID-VkGraphicsPipelineCreateInfo-renderPass-06055,
+  VUID-vkCmdDraw-colorAttachmentCount-06179). A slot inside that range with no image keeps its entry:
+  no format (`VK_FORMAT_UNDEFINED`) in the pipeline, and no image view in the pass, in which case the
+  spec ignores the attachment's other members and discards writes to it.
+- A pixel shader used in a pass that has no image for one of the outputs it writes is compiled again
+  without that output (`BB_COLOR_MASK`, `Shader::colorVariant`): a write to a location the pass has
+  no attachment for is an undefined value, which the layer calls
+  `Undefined-Value-ShaderOutputNotConsumed-DynamicRendering`.
+- `shaderDemoteToHelperInvocation` is enabled only when the GPU offers it, and shaderc is told to
+  target Vulkan 1.2 on a GPU that does not (a 1.3 module that declares the demote capability is
+  invalid unless the device has it, VUID-VkShaderModuleCreateInfo-pCode-08740).
+- Features the renderer asks the device for are read with `vkGetPhysicalDeviceFeatures2` and only
+  requested when present, instead of asking for names the GPU may not have.
+- A pipeline with rasterizer discard (a memory export draw with no render targets) leaves the
+  fragment stage out: such a pipeline may not carry one
+  (VUID-VkGraphicsPipelineCreateInfo-pStages-06894), and the export comes from the vertex shader,
+  which runs anyway.
+- Every pipeline states its viewport, scissor, stencil masks and reference, constant blend color and
+  depth bias dynamically - the EDRAM transfer pipeline included, so a transfer after a scene draw is
+  a draw like any other - and a draw then sets a state only where the bound pipeline uses it: the
+  stencil ones only when its stencil test is on (a depth buffer used without a stencil test has no
+  stencil state, and setting it anyway is counted as drawing with a state the pipeline states statically,
+  VUID-vkCmdDraw-None-08608), the depth bias only on a polygon offset.
+
+Clean has to hold while the window is being driven, not only boot to movie: 1280x720 to 900x520 to
+1600x900 (each size goes through `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED`, which tears the swapchain
+down and makes another one after `vkDeviceWaitIdle`), iconified and back (the minimized path fails
+`createSwapchain` and retries every 50 ms), and closed. With the layer on, all of that ends
+with the same line: 0 errors, and only the loader's own note left.
+
 ## Layout
 - `runtime/main.cpp` - loader, indirect call table, crash handler
 - `runtime/memory.*` - 4 GB guest address space and allocators; every tracked allocation records

@@ -21,6 +21,7 @@ namespace vkctx
         VkQueue queue = VK_NULL_HANDLE;
         PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
         bool stencilExport = false; // VK_EXT_shader_stencil_export (EDRAM depth transfers keep stencil)
+        bool demoteHelper = false;  // VkPhysicalDeviceVulkan13Features::shaderDemoteToHelperInvocation
         // VK_EXT_external_memory_host + vertexPipelineStoresAndAtomics: shaders can write guest
         // memory directly (Xenos memory export)
         bool hostMemoryImport = false;
@@ -41,6 +42,13 @@ namespace vkctx
     // Renderer: the shared context (waits for the window's), or a headless one.
     // nullptr if Vulkan is unavailable in a headless run.
     Context* get();
+
+    // BB_VK_VALIDATION: 0 off, 1 errors+warnings, 2 also info/performance messages.
+    int validationLevel();
+
+    // One line per distinct validation message seen, with how many times it repeated.
+    // Called at shutdown so a run's log says whether it was clean.
+    void logValidationSummary();
 }
 
 #define VK_CHECK(x)                                                                     \

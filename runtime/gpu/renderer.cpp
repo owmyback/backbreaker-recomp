@@ -97,8 +97,10 @@ namespace gpu::render
             ShaderType type;
             std::vector<uint32_t> words; // host order
             bool built = false;
+            std::string name;                        // ps_<hash>, as in the shader dump; variants add _m<mask>
             TranslatedShader t;
             VkShaderModule module = VK_NULL_HANDLE; // null if translation or compilation failed
+            VkShaderModule colorVariant[16]{};     // [mask] same shader, writing only the color slots in that mask
         };
         std::unordered_map<uint64_t, Shader> g_shaders;
         uint64_t g_current[2] = { 0, 0 }; // vertex, pixel
@@ -115,9 +117,17 @@ namespace gpu::render
             return h;
         }
 
-        VkShaderModule compile(const std::string& glsl, shaderc_shader_kind kind, const char* name, std::string& error)
+        VkShaderModule compile(const std::string& glsl, shaderc_shader_kind kind, const char* name, std::string& error, uint32_t colorMask = 15)
         {
-            shaderc_compilation_result_t r = shaderc_compile_into_spv(g_compiler, glsl.data(), glsl.size(), kind, name, "main", g_options);
+            shaderc_compile_options_t options = shaderc_compile_options_clone(g_options);
+            if (colorMask != 15) // see BB_COLOR_MASK in the translated shader
+            {
+                char value[8];
+                snprintf(value, sizeof(value), "0x%X", colorMask);
+                shaderc_compile_options_add_macro_definition(options, "BB_COLOR_MASK", 13, value, strlen(value));
+            }
+            shaderc_compilation_result_t r = shaderc_compile_into_spv(g_compiler, glsl.data(), glsl.size(), kind, name, "main", options);
+            shaderc_compile_options_release(options);
             VkShaderModule m = VK_NULL_HANDLE;
             if (shaderc_result_get_compilation_status(r) == shaderc_compilation_status_success)
             {
@@ -142,6 +152,7 @@ namespace gpu::render
                 s.built = true;
                 char name[48];
                 snprintf(name, sizeof(name), "%s_%016llx", type ? "ps" : "vs", (unsigned long long)it->first);
+                s.name = name;
                 s.t = translateToGlsl(s.words, s.type);
                 if (!s.t.ok)
                     warn("[render] shader %s not translated: %s", name, s.t.error.c_str());
@@ -315,6 +326,7 @@ void main() {
             Image* color[4]{};
             Image* depth = nullptr;
             bool active = false;
+            uint32_t colorCount = 0; // color slots this pass actually carries (see colorSlots)
             VkExtent2D extent{};
         } g_pass;
 
@@ -323,6 +335,41 @@ void main() {
             if (!g_pass.active) return;
             vkCmdEndRendering(frame().cmd);
             g_pass.active = false;
+        }
+
+        // Xenon's four render target slots are used loosely: a draw that writes depth only leaves
+        // them all empty, and one may leave a slot in the middle empty as well (its write mask is
+        // off, or the shader does not write that output). A pass then carries the slots up to the
+        // last one with an image, and the pipeline is built with the same number, because a draw's
+        // pipeline and its pass have to agree (VUID-vkCmdDraw-colorAttachmentCount-06179). What is
+        // left inside that range without an image stays a slot with no format and no image.
+        uint32_t colorSlots(const Image* const color[4])
+        {
+            uint32_t n = 0;
+            for (uint32_t i = 0; i < 4; i++)
+                if (color[i]) n = i + 1;
+            return n;
+        }
+
+        // The pipeline side of the same rule, and it counts the same way: an empty slot has
+        // VK_FORMAT_UNDEFINED in pColorAttachmentFormats, which is allowed. The two are set in
+        // lockstep for a draw (one loop over s.color[] fills both), so the counts cannot disagree.
+        uint32_t colorSlots(const VkFormat* colors)
+        {
+            uint32_t n = 0;
+            for (uint32_t i = 0; i < 4; i++)
+                if (colors[i] != VK_FORMAT_UNDEFINED) n = i + 1;
+            return n;
+        }
+
+        // Which slots have something in them - what a pixel shader used in this pass may write
+        // (see psModule).
+        uint32_t colorMask(const VkFormat* colors)
+        {
+            uint32_t m = 0;
+            for (uint32_t i = 0; i < 4; i++)
+                if (colors[i] != VK_FORMAT_UNDEFINED) m |= 1u << i;
+            return m;
         }
 
         void beginPass(Image* const color[4], Image* depth)
@@ -336,6 +383,10 @@ void main() {
             {
                 ca[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
                 g_pass.color[i] = color[i];
+                // A slot the pass carries but has no image for (an empty target in front of a used
+                // one) stays zero-initialized: with imageView VK_NULL_HANDLE the other members are
+                // ignored and writes to it are discarded (VkRenderingAttachmentInfo in the spec).
+                // VK_ATTACHMENT_LOAD_OP_NONE would need Vulkan 1.4 or VK_KHR_load_store_op_none.
                 if (!color[i]) continue;
                 transition(c, *color[i], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
                 ca[i].imageView = color[i]->view;
@@ -360,7 +411,7 @@ void main() {
             VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
             ri.renderArea = { { 0, 0 }, { w, h } };
             ri.layerCount = 1;
-            ri.colorAttachmentCount = 4;
+            ri.colorAttachmentCount = g_pass.colorCount = colorSlots(color);
             ri.pColorAttachments = ca;
             ri.pDepthAttachment = depth ? &da : nullptr;
             ri.pStencilAttachment = depth ? &da : nullptr;
@@ -634,9 +685,15 @@ void main() {
             VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
             cb.attachmentCount = depth ? 0 : 1;
             cb.pAttachments = &att;
-            static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            // The same dynamic states as the 3D pipelines (see pipeline() below): those draws set
+            // stencil masks, blend constants and depth bias with their own commands, and drawing a
+            // pipeline that states any of them statically after that is an error
+            // (VUID-vkCmdDraw-None-08608). transfer(), below, sets them.
+            static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+                                                  VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+                                                  VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_DEPTH_BIAS };
             VkPipelineDynamicStateCreateInfo dy{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-            dy.dynamicStateCount = 2;
+            dy.dynamicStateCount = uint32_t(std::size(dyn));
             dy.pDynamicStates = dyn;
             VkPipelineRenderingCreateInfo rci{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
             rci.colorAttachmentCount = depth ? 0 : 1;
@@ -689,6 +746,18 @@ void main() {
             ri.pStencilAttachment = depth && C->stencilExport ? &a : nullptr;
             vkCmdBeginRendering(c, &ri);
             vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
+            // A state that is dynamic in this pipeline still has to be set before it is used, and
+            // only then: the blend factors are One and Zero (no constant color), depth bias is off,
+            // and there is no stencil state unless the transfer keeps the guest's stencil values.
+            if (depth && C->stencilExport)
+            {
+                vkCmdSetStencilReference(c, VK_STENCIL_FACE_FRONT_BIT, 0);
+                vkCmdSetStencilReference(c, VK_STENCIL_FACE_BACK_BIT, 0);
+                vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_FRONT_BIT, 0xFF);
+                vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_BACK_BIT, 0xFF);
+                vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_FRONT_BIT, 0xFF);
+                vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_BACK_BIT, 0xFF);
+            }
             VkDescriptorImageInfo images[2] = { { g_nearest, depth ? src.depthView : src.view, srcLayout },
                                                 { g_nearest, depth ? src.stencilView : src.view, srcLayout } };
             VkDescriptorBufferInfo maskInfo{ frame().upload, maskOff, 256 };
@@ -1075,6 +1144,26 @@ void main() {
             return { VkStencilOp(f.fail), VkStencilOp(f.zpass), VkStencilOp(f.zfail), VkCompareOp(f.func), f.mask, f.writeMask, f.ref };
         }
 
+        // A pixel shader writes the render targets Xenos gave it; a draw into a pass with no image
+        // in one of those slots needs the same shader without the outputs nobody reads. Which slots
+        // have an image, not how many the pass carries, is what decides: a hole in the middle drops
+        // that one output and keeps the ones after it.
+        VkShaderModule psModule(Shader* ps, uint32_t mask)
+        {
+            mask &= 15;
+            if (!(ps->t.colorOutputs & ~mask)) return ps->module;
+            VkShaderModule& m = ps->colorVariant[mask];
+            if (!m)
+            {
+                char vname[64];
+                snprintf(vname, sizeof(vname), "%s_m%x", ps->name.c_str(), mask);
+                std::string error;
+                m = compile(ps->t.glsl, shaderc_fragment_shader, vname, error, mask);
+                if (!m) warnOnce(std::string(vname) + " failed to compile: " + error);
+            }
+            return m ? m : ps->module;
+        }
+
         struct PipelineDesc
         {
             const DrawState* s;
@@ -1122,7 +1211,12 @@ void main() {
             };
             stage(VK_SHADER_STAGE_VERTEX_BIT, p.vs->module);
             if (p.rectangles) stage(VK_SHADER_STAGE_GEOMETRY_BIT, g_rectGs);
-            stage(VK_SHADER_STAGE_FRAGMENT_BIT, p.ps->module);
+            // Rasterizer discard (a memory export draw with no render targets) means no fragment
+            // shader state is required, and the spec forbids a fragment stage then anyway
+            // (VUID-VkGraphicsPipelineCreateInfo-pStages-06894). The export is done by the vertex
+            // shader, which still runs, so nothing here would have been read.
+            if (!p.discard)
+                stage(VK_SHADER_STAGE_FRAGMENT_BIT, psModule(p.ps, colorMask(p.colors)));
 
             VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO }; // vertices fetched in the shader
             VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
@@ -1163,8 +1257,9 @@ void main() {
                 att[i].alphaBlendOp = blendOp(t.blend.alphaOp);
             }
             VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-            cb.attachmentCount = 4;
-            cb.pAttachments = att;
+            uint32_t colorCount = colorSlots(p.colors); // must match the pass these draws go in
+            cb.attachmentCount = colorCount;
+            cb.pAttachments = colorCount ? att : nullptr;
             static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
                                                   VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
                                                   VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_DEPTH_BIAS };
@@ -1172,8 +1267,8 @@ void main() {
             dy.dynamicStateCount = uint32_t(std::size(dyn));
             dy.pDynamicStates = dyn;
             VkPipelineRenderingCreateInfo rci{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-            rci.colorAttachmentCount = 4;
-            rci.pColorAttachmentFormats = p.colors;
+            rci.colorAttachmentCount = colorCount;
+            rci.pColorAttachmentFormats = colorCount ? p.colors : nullptr;
             rci.depthAttachmentFormat = p.depth ? kDepthFormat : VK_FORMAT_UNDEFINED;
             rci.stencilAttachmentFormat = rci.depthAttachmentFormat;
 
@@ -1192,7 +1287,7 @@ void main() {
             gci.layout = g_layout;
             VkPipeline pl = VK_NULL_HANDLE;
             VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
-            info("[render] pipeline %zu: %s", g_pipelines.size() + 1, pipelineKey(s).c_str());
+            info("[render] pipeline %zu %p: %s", g_pipelines.size() + 1, (void*)pl, pipelineKey(s).c_str());
             return g_pipelines[key] = pl;
         }
 
@@ -1311,7 +1406,10 @@ void main() {
 
             g_compiler = shaderc_compiler_initialize();
             g_options = shaderc_compile_options_initialize();
-            shaderc_compile_options_set_target_env(g_options, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
+            shaderc_compile_options_set_target_env(g_options, shaderc_target_env_vulkan,
+                                                   C->demoteHelper ? shaderc_env_version_vulkan_1_3 : shaderc_env_version_vulkan_1_2);
+            if (!C->demoteHelper)
+                info("[render] GPU lacks shaderDemoteToHelperInvocation; shaders target Vulkan 1.2");
             shaderc_compile_options_set_optimization_level(g_options, shaderc_optimization_level_performance);
             std::string error;
             g_rectGs = compile(kRectangleGs, shaderc_geometry_shader, "rectangle_list.geom", error);
@@ -1755,15 +1853,25 @@ void main() {
             VkViewport viewport{ 0, 0, float(g_pass.extent.width), float(g_pass.extent.height), 0.0f, 1.0f };
             vkCmdSetViewport(c, 0, 1, &viewport);
             vkCmdSetScissor(c, 0, 1, &scissor);
-            vkCmdSetStencilReference(c, VK_STENCIL_FACE_FRONT_BIT, s.front.ref);
-            vkCmdSetStencilReference(c, VK_STENCIL_FACE_BACK_BIT, s.stencilBackface ? s.back.ref : s.front.ref);
-            vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_FRONT_BIT, s.front.mask);
-            vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_BACK_BIT, s.stencilBackface ? s.back.mask : s.front.mask);
-            vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_FRONT_BIT, s.front.writeMask);
-            vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_BACK_BIT, s.stencilBackface ? s.back.writeMask : s.front.writeMask);
+            // The states above are dynamic in every pipeline this draws with, but setting one a
+            // pipeline does not use is counted as drawing with a state the pipeline states
+            // statically (VUID-vkCmdDraw-None-08608) - stencil only when the pipeline's stencil test
+            // is on (a depth buffer without it has no stencil state at all), depth bias only when
+            // the rasterizer enables it. The constant blend color is always worth setting: any
+            // attachment of a draw may blend with it.
+            if (depth && s.stencil)
+            {
+                vkCmdSetStencilReference(c, VK_STENCIL_FACE_FRONT_BIT, s.front.ref);
+                vkCmdSetStencilReference(c, VK_STENCIL_FACE_BACK_BIT, s.stencilBackface ? s.back.ref : s.front.ref);
+                vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_FRONT_BIT, s.front.mask);
+                vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_BACK_BIT, s.stencilBackface ? s.back.mask : s.front.mask);
+                vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_FRONT_BIT, s.front.writeMask);
+                vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_BACK_BIT, s.stencilBackface ? s.back.writeMask : s.front.writeMask);
+            }
             float blend[4] = { regFloat(RB_BLEND_RED), regFloat(RB_BLEND_RED + 1), regFloat(RB_BLEND_RED + 2), regFloat(RB_BLEND_RED + 3) };
             vkCmdSetBlendConstants(c, blend);
-            vkCmdSetDepthBias(c, s.polyOffset, 0.0f, s.polyOffsetScale);
+            if (s.polyOffsetFront || s.polyOffsetBack)
+                vkCmdSetDepthBias(c, s.polyOffset, 0.0f, s.polyOffsetScale);
 
             if (ib.ok)
             {
