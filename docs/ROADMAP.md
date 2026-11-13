@@ -270,7 +270,7 @@ the game's 640-pitch 4x MSAA screen clear now reaching the 1280x720 target, the 
 clean black and the title screen shows its football-field background. Not yet: transfers
 between different formats (including color <-> depth), which are skipped with a warning.
 
-**Step 9 - Cube maps and render to texture on the GPU (`STEP9`).** Cube textures (6 faces,
+**Step 9 - Cube maps and render to texture on the GPU (`a450796`).** Cube textures (6 faces,
 linear or tiled, base level) upload like 2D ones. Render to texture stays on the GPU: a 2D
 8_8_8_8 texture whose address is a resolve destination samples the resolved image directly
 (with the red/blue swap the resolve asked for, and at the internal resolution), and a cube map
