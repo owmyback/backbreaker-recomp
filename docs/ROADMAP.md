@@ -201,7 +201,7 @@ draw and the distinct pipeline states per frame. Findings from the 3D logo frame
   depth buffer starts at tile 64 = 256/16 rows x 4 tiles.
 - Vertex shader constants live at 0-255 and pixel shader constants at 256-511.
 
-**Step 4 - Shader translation (first version, `STEP4`).** `runtime/gpu/shader_translator.cpp`
+**Step 4 - Shader translation (first version, `093c825`).** `runtime/gpu/shader_translator.cpp`
 emits GLSL 4.50 for Vulkan, compiled to SPIR-V with glslc/shaderc. Design: vertices are fetched
 in the vertex shader straight from guest memory (bound as one storage buffer, byte-swapped per
 the fetch constant's endianness, formats unpacked in the shader) instead of Vulkan vertex input
