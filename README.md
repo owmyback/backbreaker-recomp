@@ -71,5 +71,10 @@ header that is not inline:
 
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
+`scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`
+if your distro does not ship it):
+
+    shellcheck scripts/setup.sh
+
 ## Build and run the runtime
 See `docs/runtime.md` (import glue generation, CMake/Ninja build, `./build/backbreaker --timeout N`).

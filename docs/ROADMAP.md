@@ -112,7 +112,8 @@ Goal: every guest function translates to C++ that compiles.
 - Tests: `tests/instr_semantics.cpp` checks the byte-order-sensitive vector ops and carry
   arithmetic against hand-computed results (a deliberately broken variant is caught). Builds
   without game files against `tests/ppc_config_stub/` and runs in GitHub Actions on every
-  push (`.github/workflows/ci.yml`), which also builds the patched XenonRecomp.
+  push (`.github/workflows/ci.yml`), which also builds the patched XenonRecomp and lints
+  `scripts/setup.sh` with shellcheck (#26).
 
 Verify: see README "Recompile" and "Tests".
 

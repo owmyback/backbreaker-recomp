@@ -136,7 +136,7 @@ check_prerequisites() {
         flags="-I/usr/include/SDL3 -lSDL3 -lvulkan -lshaderc_shared"
     fi
     if [ -n "$flags" ]; then
-        # $flags is deliberately unquoted: it is a list of compiler switches.
+        # shellcheck disable=SC2086 # deliberately unquoted: $flags is a list of compiler switches
         clang++ -std=c++20 -o "$probe.bin" "$probe" $flags 2>/dev/null || rc=1
     else
         rc=1 # pkg-config could not find them; ask the compiler with the plain library names
@@ -261,7 +261,7 @@ recompile() { # one XenonRecomp pass over the image with the config in config/
     say "recompiling the executable to ppc/ (a few minutes)"
     run_quiet "$XENON_BIN" config/backbreaker.toml "$XENON/XenonUtils/ppc_context.h" \
         | tee build/recompile.log
-    say "recompiled: $(ls ppc/ppc_recomp.*.cpp | wc -l) C++ files, $(grep -cE '\{ 0x[0-9A-Fa-f]+, sub_' ppc/ppc_func_mapping.cpp || true) functions, $(grep -ciE 'warning|error' build/recompile.log || true) warnings (full output: build/recompile.log)"
+    say "recompiled: $(find ppc -maxdepth 1 -name 'ppc_recomp.*.cpp' | wc -l) C++ files, $(grep -cE '\{ 0x[0-9A-Fa-f]+, sub_' ppc/ppc_func_mapping.cpp || true) functions, $(grep -ciE 'warning|error' build/recompile.log || true) warnings (full output: build/recompile.log)"
 }
 
 step_recompile() {
