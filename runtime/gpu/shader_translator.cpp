@@ -760,7 +760,13 @@ void xeMemExportFlush() {
                     if (out.textureSlots & (1u << i))
                         s += fmt("layout(set = 1, binding = %u) uniform %s tex%u;\n", i, samplers[out.textureDims[i]], i);
                 if (type == ShaderType::Vertex)
+                {
                     s += "layout(location = 0) out XeInterpolators { vec4 v[16]; } xe_out;\n";
+                    // Multipass rendering (decals and markings drawn on the field with a less-equal
+                    // depth test) needs the same position from the same inputs in every shader; without
+                    // this the compiler may contract the math differently per shader (issue #54)
+                    s += "invariant gl_Position;\n";
+                }
                 else
                 {
                     s += "layout(location = 0) in XeInterpolators { vec4 v[16]; } xe_in;\n";

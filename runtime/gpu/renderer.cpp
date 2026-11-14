@@ -2708,7 +2708,16 @@ void main()
             float blend[4] = { regFloat(RB_BLEND_RED), regFloat(RB_BLEND_RED + 1), regFloat(RB_BLEND_RED + 2), regFloat(RB_BLEND_RED + 3) };
             vkCmdSetBlendConstants(c, blend);
             if (s.polyOffsetFront || s.polyOffsetBack)
-                vkCmdSetDepthBias(c, s.polyOffset, 0.0f, s.polyOffsetScale);
+            {
+                // Polygon offset as Direct3D 9 sets it (issue #54). The constant is in depth-range
+                // units (the match's shadow maps use 0.00025), and the slope scale is in 1/16-pixel
+                // units (they use 16, i.e. 1; Xenia's kPolygonOffsetScaleSubpixelUnit). Vulkan's
+                // constant factor counts the format's minimum resolvable difference instead:
+                // 2^(e - 23) for our D32_SFLOAT depth, 2^-24 for depths in [0.5, 1), where most of a
+                // perspective scene is, and D24's unit everywhere. Depth slopes are per host pixel:
+                // they get smaller at a higher resolution scale, so the slope factor grows with it.
+                vkCmdSetDepthBias(c, s.polyOffset * 16777216.0f, 0.0f, s.polyOffsetScale / 16.0f * float(g_scale));
+            }
 
             if (ib.ok)
             {
