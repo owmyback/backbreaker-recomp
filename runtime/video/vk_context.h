@@ -22,6 +22,7 @@ namespace vkctx
         PFN_vkCmdPushDescriptorSetKHR cmdPushDescriptorSet = nullptr;
         bool stencilExport = false; // VK_EXT_shader_stencil_export (EDRAM depth transfers keep stencil)
         bool demoteHelper = false;  // VkPhysicalDeviceVulkan13Features::shaderDemoteToHelperInvocation
+        bool samplerAnisotropy = false; // enabled when the GPU has it (texture fetch constants ask for up to 16:1)
         // VK_EXT_external_memory_host + vertexPipelineStoresAndAtomics: shaders can write guest
         // memory directly (Xenos memory export)
         bool hostMemoryImport = false;

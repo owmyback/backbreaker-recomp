@@ -226,8 +226,10 @@ frame ending with that swap into `captures/frame_N/` (gitignored):
 listing of each shader - control flow, vertex/texture fetches, paired vector+scalar ALU
 instructions, exports - followed by a coverage summary (which opcodes, export targets, vertex
 formats, texture dimensions and features appear, and how often). `--quiet` prints only the
-summary. The decoder (`runtime/gpu/ucode.h`) follows Xenia's `ucode.h`/`shader_translator.cc`
-(BSD) and will be shared with the shader translator.
+summary. Texture fetches show the filters an instruction sets itself (`mag=`, `min=`, `mip=`,
+`aniso=`); ones left to the fetch constant aren't printed (none of the match's shaders set any).
+The decoder (`runtime/gpu/ucode.h`) follows Xenia's `ucode.h`/`shader_translator.cc` (BSD) and
+will be shared with the shader translator.
 
 ## Shader translator
 `runtime/gpu/shader_translator.cpp` translates Xenos microcode to GLSL 4.50 for Vulkan (resource
@@ -277,8 +279,8 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); resolves take their rectangle from the window scissor; resolves to formats other
   than 8_8_8_8, 2_10_10_10 and D24S8 depth are not written back to guest memory (depth stencil is
-  written as 0), nor are destinations resolved every frame; a resolve's own format conversion is skipped on the GPU side (textures sample the resolve
-  image in the render target's format); 1D/3D textures and
-  some formats are placeholders; signed texture formats are read unsigned; textures are
-  re-uploaded once per frame they are used (no write-watching); only the base mip level; depth is
-  32-bit float instead of 24-bit
+  written as 0), nor are destinations resolved every frame; a resolve's own format conversion is
+  skipped on the GPU side (textures sample the resolve image in the render target's format); 1D/3D
+  textures and some formats are placeholders; signed texture formats are read unsigned; textures
+  are hashed once per frame they are used and re-uploaded only when their bytes changed (no
+  write-watching); depth is 32-bit float instead of 24-bit

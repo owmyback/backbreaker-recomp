@@ -9,8 +9,9 @@
 //   vertex fetch constants are rewritten to point into it), constants, indices, textures.
 // - Textures: 2D linear and tiled (runtime/gpu/tiling.h) 8, 8_8, 1_5_5_5, 5_6_5, 4_4_4_4,
 //   8_8_8_8, 2_10_10_10, DXT, 24_8 (depth), 16_16, 16_16_16_16, the 16-bit float and EXPAND
-//   formats, 32_FLOAT and 32_32_FLOAT (signedness is not applied yet),
-//   base level only, re-uploaded once per frame they are used. Other textures get a magenta
+//   formats, 32_FLOAT and 32_32_FLOAT (signedness is not applied yet), with their mip levels
+//   (runtime/gpu/mip_layout.h). Each frame a texture is used, its guest bytes are hashed, and it is
+//   re-uploaded only if they changed. Other textures get a magenta
 //   placeholder. A texture at a resolve destination samples the resolved image when the formats
 //   are compatible (render to texture), including depth resolves (R32_SFLOAT).
 // Register meanings follow Xenia (BSD; docs/licenses/xenia-LICENSE.txt).
@@ -18,6 +19,7 @@
 #include "gpu.h"
 #include "shader_translator.h"
 #include "state.h"
+#include "mip_layout.h"
 #include "tiling.h"
 #include "../debug/png.h"
 #include "../log.h"
@@ -207,7 +209,7 @@ void main() {
             VkImageView depthView = VK_NULL_HANDLE, stencilView = VK_NULL_HANDLE; // depth formats: per-aspect views for sampling
             VkFormat format = VK_FORMAT_UNDEFINED;
             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-            uint32_t width = 0, height = 0, samples = 1;
+            uint32_t width = 0, height = 0, samples = 1, levels = 1;
             VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
             // EDRAM render targets only: where the image lives in EDRAM
             bool edram = false, edramWide = false; // wide: 64 bits per sample
@@ -222,20 +224,21 @@ void main() {
         };
 
         Image createImage(VkImageType type, VkImageViewType viewType, VkFormat format, uint32_t w, uint32_t h, uint32_t depth,
-                          uint32_t layers, uint32_t samples, VkImageUsageFlags usage, VkImageCreateFlags flags = 0)
+                          uint32_t layers, uint32_t samples, VkImageUsageFlags usage, VkImageCreateFlags flags = 0, uint32_t levels = 1)
         {
             Image img;
             img.format = format;
             img.width = w;
             img.height = h;
             img.samples = samples;
+            img.levels = levels;
             img.aspect = format == kDepthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
             VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
             ici.flags = flags;
             ici.imageType = type;
             ici.format = format;
             ici.extent = { w, h, depth };
-            ici.mipLevels = 1;
+            ici.mipLevels = levels;
             ici.arrayLayers = layers;
             ici.samples = VkSampleCountFlagBits(samples);
             ici.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -253,7 +256,7 @@ void main() {
             vci.image = img.image;
             vci.viewType = viewType;
             vci.format = format;
-            vci.subresourceRange = { img.aspect, 0, 1, 0, layers };
+            vci.subresourceRange = { img.aspect, 0, levels, 0, layers };
             VK_CHECK(vkCreateImageView(D, &vci, nullptr, &img.view));
             if (format == kDepthFormat)
             {
@@ -1100,15 +1103,18 @@ void main() {
         struct TextureKey
         {
             uint32_t base, format, endian, width, height, pitch;
+            uint32_t mips = 0; // mip address | packed << 1 | level count - 1 (bits 0 and 5-11 of a 4 KB-aligned address are free)
             auto operator<=>(const TextureKey&) const = default;
         };
         struct Texture
         {
             Image img;
             uint64_t uploadedFrame = 0;
+            uint64_t hash = 0; // of the guest bytes last uploaded (0: never uploaded)
             std::map<uint32_t, VkImageView> views; // by fetch constant swizzle
         };
         std::map<TextureKey, Texture> g_textures;
+        uint64_t g_texturesUploaded = 0, g_texturesKept = 0; // for the stats line
         Image g_placeholder[4]; // per dimension: 1D, 2D, 3D, cube (magenta)
         std::map<uint64_t, VkSampler> g_samplers;
 
@@ -1130,10 +1136,16 @@ void main() {
             return p;
         }
 
+        // Sampler for a texture fetch constant: clamp modes, filters (mag/min/mip: 0 point, 1 linear,
+        // 2 base map = no mips), anisotropy (0 off, n = 2^(n-1):1), the mip range and the LOD bias
+        // (signed, 1/32 steps). Shader fetch instructions could override the filters; none of the
+        // match's do (all leave them to the fetch constant).
         VkSampler sampler(const uint32_t d[6])
         {
-            uint32_t clamp = (d[0] >> 10) & 0x1FF, filters = (d[3] >> 19) & 0x3F;
-            uint64_t key = clamp | (uint64_t(filters) << 9);
+            uint32_t clamp = (d[0] >> 10) & 0x1FF, filters = (d[3] >> 19) & 0x3F, aniso = (d[3] >> 25) & 7;
+            uint32_t mipMin = (d[4] >> 2) & 0xF, mipMax = (d[4] >> 6) & 0xF, lodBias = (d[4] >> 12) & 0x3FF;
+            uint64_t key = clamp | (uint64_t(filters) << 9) | (uint64_t(aniso) << 15) | (uint64_t(mipMin) << 18) | (uint64_t(mipMax) << 22) |
+                           (uint64_t(lodBias) << 26);
             auto it = g_samplers.find(key);
             if (it != g_samplers.end()) return it->second;
             static const VkSamplerAddressMode modes[8] = {
@@ -1143,15 +1155,26 @@ void main() {
             VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
             si.magFilter = (filters & 3) == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
             si.minFilter = ((filters >> 2) & 3) == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-            si.mipmapMode = ((filters >> 4) & 3) == 1 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            uint32_t mip = (filters >> 4) & 3;
+            si.mipmapMode = mip == 1 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
             si.addressModeU = modes[clamp & 7];
             si.addressModeV = modes[(clamp >> 3) & 7];
             si.addressModeW = modes[(clamp >> 6) & 7];
-            si.maxLod = 0.0f; // base level only for now
+            // Base map: the base level only. Otherwise the fetch constant's level range (Vulkan
+            // clamps it to the levels the image has).
+            si.minLod = mip == 2 ? 0.0f : float(mipMin);
+            si.maxLod = mip == 2 ? 0.0f : float(std::max(mipMin, mipMax));
+            si.mipLodBias = float(int32_t(lodBias << 22) >> 22) / 32.0f;
+            if (aniso >= 2 && aniso <= 5 && C->samplerAnisotropy)
+            {
+                si.anisotropyEnable = VK_TRUE;
+                si.maxAnisotropy = std::min(float(1u << (aniso - 1)), C->props.limits.maxSamplerAnisotropy);
+                si.minFilter = si.magFilter = VK_FILTER_LINEAR; // anisotropic filtering is linear
+            }
             si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-            VkSampler s;
-            VK_CHECK(vkCreateSampler(D, &si, nullptr, &s));
-            return g_samplers[key] = s;
+            VkSampler sm;
+            VK_CHECK(vkCreateSampler(D, &si, nullptr, &sm));
+            return g_samplers[key] = sm;
         }
 
         VkComponentSwizzle swizzleComponent(uint32_t s, bool swapRB)
@@ -1171,10 +1194,70 @@ void main() {
             vci.format = format;
             vci.components = { swizzleComponent(swizzle & 7, swapRB), swizzleComponent((swizzle >> 3) & 7, swapRB),
                                swizzleComponent((swizzle >> 6) & 7, swapRB), swizzleComponent((swizzle >> 9) & 7, swapRB) };
-            vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers };
+            vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, layers };
             VkImageView view;
             VK_CHECK(vkCreateImageView(D, &vci, nullptr, &view));
             return view;
+        }
+
+        // Fast 64-bit hash of guest bytes, for "did this texture change since its last upload"
+        // (four independent lanes; not cryptographic). Reading the bytes costs far less than
+        // swapping, untiling and uploading them.
+        uint64_t hashBytes(const uint8_t* p, size_t n, uint64_t seed)
+        {
+            constexpr uint64_t k = 0x9E3779B97F4A7C15ull;
+            uint64_t lane[4] = { seed ^ 0x243F6A8885A308D3ull, seed ^ 0x13198A2E03707344ull, seed ^ 0xA4093822299F31D0ull,
+                                 seed ^ 0x082EFA98EC4E6C89ull };
+            size_t i = 0;
+            for (; i + 32 <= n; i += 32)
+                for (int l = 0; l < 4; l++)
+                {
+                    uint64_t w;
+                    std::memcpy(&w, p + i + l * 8, 8);
+                    lane[l] = (lane[l] ^ w) * k;
+                    lane[l] ^= lane[l] >> 32;
+                }
+            uint64_t h = n;
+            for (; i < n; i++) h = (h ^ p[i]) * k; // the last few bytes
+            for (int l = 0; l < 4; l++) h = ((h ^ lane[l]) * k) ^ (h >> 29);
+            return h ? h : 1; // 0 means "never uploaded"
+        }
+
+        // Row-major guest blocks (already byte-swapped) -> the upload format (see Convert)
+        void convertBlocks(const uint8_t* linear, uint8_t* dst, size_t blocks, const TextureFormat& tf)
+        {
+            if (tf.convert == Convert::None)
+            {
+                std::memcpy(dst, linear, blocks * tf.bytes);
+                return;
+            }
+            for (size_t i = 0; i < blocks; i++)
+            {
+                if (tf.convert == Convert::FromDepth24)
+                {
+                    // XeUNorm24To32: (n + (n >> 23)) / 2^24, exact, unlike / (2^24 - 1)
+                    uint32_t n = ((const uint32_t*)linear)[i] >> 8;
+                    float f = float(n + (n >> 23)) * (1.0f / 16777216.0f);
+                    std::memcpy(dst + i * 4, &f, 4);
+                    continue;
+                }
+                uint16_t v = ((const uint16_t*)linear)[i];
+                uint8_t* o = dst + i * 4;
+                if (tf.convert == Convert::From4444)
+                    for (int c = 0; c < 4; c++) o[c] = uint8_t(((v >> (4 * c)) & 0xF) * 17);
+                else if (tf.convert == Convert::From1555)
+                {
+                    for (int c = 0; c < 3; c++) o[c] = uint8_t(((v >> (5 * c)) & 0x1F) * 255 / 31);
+                    o[3] = (v >> 15) ? 255 : 0;
+                }
+                else
+                {
+                    o[0] = uint8_t((v & 0x1F) * 255 / 31);
+                    o[1] = uint8_t(((v >> 5) & 0x3F) * 255 / 63);
+                    o[2] = uint8_t((v >> 11) * 255 / 31);
+                    o[3] = 255;
+                }
+            }
         }
 
         std::map<std::pair<VkImage, uint32_t>, VkImageView> g_resolvedViews; // resolve images used as textures
@@ -1276,101 +1359,105 @@ void main() {
                     return out;
                 }
             }
-            TextureKey key{ base, format | (tiled ? 0x100u : 0u) | (fetchDim << 9), endian, width, height, pitch };
+            // Mip levels (fetch constant: mip address in dword 5, packed mips bit, level range in dword 4)
+            uint32_t mipAddress = d[5] & 0xFFFFF000, packed = (d[5] >> 11) & 1;
+            uint32_t levels = 1;
+            if (mipAddress)
+            {
+                uint32_t sizeLevels = 31 - __builtin_clz(std::max(width, height)); // log2_floor of the longer side
+                levels = std::min((d[4] >> 6) & 0xF, sizeLevels) + 1;
+            }
+            TextureKey key{ base, format | (tiled ? 0x100u : 0u) | (fetchDim << 9), endian, width, height, pitch,
+                            levels > 1 ? (mipAddress | (packed << 1) | ((levels - 1) << 5)) : 0u };
             Texture& t = g_textures[key];
             if (!t.img.image)
                 t.img = createImage(VK_IMAGE_TYPE_2D, cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, tf.vk, width, height, 1, layers, 1,
-                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0);
+                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
+                                    levels);
+            std::vector<GuestRegion> regions;
+            uint64_t hash = 0;
             if (t.uploadedFrame != g_frameSerial)
             {
-                // Guest layout -> row-major blocks (byte-swapped), `rowBlocks` blocks per row.
-                // Linear: rows of `pitch` texels (blocks for compressed formats), 256-byte aligned.
-                // Tiled: 32x32-block tiles (runtime/gpu/tiling.h), pitch aligned to 32 blocks.
-                // Cube faces follow each other, each aligned to 4 KB (base level only for now).
-                uint32_t blocksW = (width + tf.blockW - 1) / tf.blockW, blocksH = (height + tf.blockH - 1) / tf.blockH;
-                uint32_t rowBlocks, srcBytes, faceStride;
-                if (tiled)
+                regions = mipRegions(width, height, pitch, tiled, { tf.blockW, tf.blockH, tf.bytes }, levels, packed, layers);
+                // Unchanged since the last upload (same bytes at every level and face): keep the image
+                for (const GuestRegion& r : regions)
+                    for (uint32_t layer = 0; layer < layers; layer++)
+                    {
+                        uint64_t at = uint64_t(r.mip ? mipAddress : base) + r.offset + uint64_t(layer) * r.sliceStride;
+                        if (at + r.srcBytes <= mem::kPhysicalSize) hash = hashBytes(mem::physical(uint32_t(at)), r.srcBytes, hash);
+                    }
+                if (hash && hash == t.hash)
                 {
-                    rowBlocks = tiledBlocksAligned(std::max(pitch / tf.blockW, blocksW));
-                    srcBytes = tiledUpperBound2D(blocksW, blocksH, rowBlocks, tf.bytes);
-                    faceStride = (rowBlocks * tiledBlocksAligned(blocksH) * tf.bytes + 4095) & ~4095u;
+                    t.uploadedFrame = g_frameSerial;
+                    g_texturesKept++;
                 }
-                else
-                {
-                    uint32_t rowBytes = ((pitch / tf.blockW) * tf.bytes + 255) & ~255u;
-                    rowBlocks = rowBytes / tf.bytes;
-                    srcBytes = rowBytes * blocksH;
-                    faceStride = (srcBytes + 4095) & ~4095u;
-                }
-                srcBytes = (srcBytes + 3) & ~3u;
-                if (base + uint64_t(faceStride) * (layers - 1) + srcBytes > mem::kPhysicalSize)
-                {
-                    warnOnce("texture extends past physical memory: placeholder");
-                    return out;
-                }
+            }
+            if (t.uploadedFrame != g_frameSerial)
+            {
+                // Guest regions -> row-major blocks (byte-swapped, converted), one after the other in
+                // the upload buffer; each level is a rectangle of its region's rows
+                VkDeviceSize total = 0;
                 uint32_t outBytes = tf.convert == Convert::None ? tf.bytes : 4;
-                VkDeviceSize faceSize = VkDeviceSize(rowBlocks) * blocksH * outBytes;
-                VkDeviceSize off = uploadAlloc(faceSize * layers);
+                for (const GuestRegion& r : regions)
+                {
+                    uint64_t end = uint64_t(r.mip ? mipAddress : base) + r.offset + uint64_t(r.sliceStride) * (layers - 1) + r.srcBytes;
+                    if (end > mem::kPhysicalSize)
+                    {
+                        warnOnce("texture extends past physical memory: placeholder");
+                        return out;
+                    }
+                    total = (total + 15) & ~VkDeviceSize(15);
+                    total += VkDeviceSize(r.rowBlocks) * r.yBlocks * outBytes * layers;
+                }
+                VkDeviceSize off = uploadAlloc(total);
                 if (off == UINT64_MAX) return out;
                 static std::vector<uint8_t> swapped, rows;
-                for (uint32_t layer = 0; layer < layers; layer++)
+                std::vector<VkBufferImageCopy> copies;
+                VkDeviceSize at = off;
+                for (const GuestRegion& r : regions)
                 {
-                    swapped.resize(srcBytes);
-                    const uint32_t* src = (const uint32_t*)mem::physical(base + layer * faceStride);
-                    for (uint32_t i = 0; i < srcBytes / 4; i++) ((uint32_t*)swapped.data())[i] = gpuSwap(src[i], endian);
-                    const uint8_t* linear = swapped.data();
-                    if (tiled)
+                    at = (at + 15) & ~VkDeviceSize(15);
+                    VkDeviceSize layerSize = VkDeviceSize(r.rowBlocks) * r.yBlocks * outBytes;
+                    for (uint32_t layer = 0; layer < layers; layer++)
                     {
-                        rows.assign(size_t(rowBlocks) * blocksH * tf.bytes, 0);
-                        untile2D(swapped.data(), rows.data(), blocksW, blocksH, rowBlocks, tf.bytes);
-                        linear = rows.data();
+                        swapped.resize(r.srcBytes);
+                        const uint32_t* src = (const uint32_t*)mem::physical((r.mip ? mipAddress : base) + r.offset + layer * r.sliceStride);
+                        for (uint32_t i = 0; i < r.srcBytes / 4; i++) ((uint32_t*)swapped.data())[i] = gpuSwap(src[i], endian);
+                        const uint8_t* linear = swapped.data();
+                        if (tiled)
+                        {
+                            rows.assign(size_t(r.rowBlocks) * r.yBlocks * tf.bytes, 0);
+                            untile2D(swapped.data(), rows.data(), r.xBlocks, r.yBlocks, r.rowBlocks, tf.bytes);
+                            linear = rows.data();
+                        }
+                        else if (size_t(r.rowBlocks) * r.yBlocks * tf.bytes > r.srcBytes)
+                        {
+                            // Linear: the last row may end before the pitch does
+                            rows.assign(size_t(r.rowBlocks) * r.yBlocks * tf.bytes, 0);
+                            std::memcpy(rows.data(), swapped.data(), r.srcBytes);
+                            linear = rows.data();
+                        }
+                        convertBlocks(linear, frame().uploadMap + at + layer * layerSize, size_t(r.rowBlocks) * r.yBlocks, tf);
+                        for (const GuestRegion::Level& l : r.levels)
+                        {
+                            VkBufferImageCopy c{};
+                            c.bufferOffset = at + layer * layerSize + (VkDeviceSize(l.yBlock) * r.rowBlocks + l.xBlock) * outBytes;
+                            c.bufferRowLength = r.rowBlocks * tf.blockW;
+                            c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l.level, layer, 1 };
+                            c.imageExtent = { std::max(width >> l.level, 1u), std::max(height >> l.level, 1u), 1 };
+                            copies.push_back(c);
+                        }
                     }
-                    uint8_t* dst = frame().uploadMap + off + layer * faceSize;
-                    if (tf.convert == Convert::None)
-                        std::memcpy(dst, linear, faceSize);
-                    else if (tf.convert == Convert::FromDepth24)
-                        for (size_t i = 0; i < size_t(rowBlocks) * blocksH; i++)
-                        {
-                            // XeUNorm24To32: (n + (n >> 23)) / 2^24, exact, unlike / (2^24 - 1)
-                            uint32_t n = ((const uint32_t*)linear)[i] >> 8;
-                            float f = float(n + (n >> 23)) * (1.0f / 16777216.0f);
-                            std::memcpy(dst + i * 4, &f, 4);
-                        }
-                    else
-                        for (size_t i = 0; i < size_t(rowBlocks) * blocksH; i++)
-                        {
-                            uint16_t v = ((const uint16_t*)linear)[i];
-                            uint8_t* o = dst + i * 4;
-                            if (tf.convert == Convert::From4444)
-                                for (int c = 0; c < 4; c++) o[c] = uint8_t(((v >> (4 * c)) & 0xF) * 17);
-                            else if (tf.convert == Convert::From1555)
-                            {
-                                for (int c = 0; c < 3; c++) o[c] = uint8_t(((v >> (5 * c)) & 0x1F) * 255 / 31);
-                                o[3] = (v >> 15) ? 255 : 0;
-                            }
-                            else
-                            {
-                                o[0] = uint8_t((v & 0x1F) * 255 / 31);
-                                o[1] = uint8_t(((v >> 5) & 0x3F) * 255 / 63);
-                                o[2] = uint8_t((v >> 11) * 255 / 31);
-                                o[3] = 255;
-                            }
-                        }
+                    at += layerSize * layers;
                 }
                 endPass();
                 VkCommandBuffer c = cmd();
                 transition(c, t.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                VkBufferImageCopy copies[6]{};
-                for (uint32_t layer = 0; layer < layers; layer++)
-                {
-                    copies[layer].bufferOffset = off + layer * faceSize;
-                    copies[layer].bufferRowLength = rowBlocks * tf.blockW;
-                    copies[layer].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 };
-                    copies[layer].imageExtent = { width, height, 1 };
-                }
-                vkCmdCopyBufferToImage(c, frame().upload, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layers, copies);
+                vkCmdCopyBufferToImage(c, frame().upload, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(copies.size()), copies.data());
                 transition(c, t.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 t.uploadedFrame = g_frameSerial;
+                t.hash = hash;
+                g_texturesUploaded++;
             }
             VkImageView& view = t.views[swizzle];
             if (!view) view = createView(t.img.image, cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, tf.vk, layers, swizzle, false);
@@ -2762,6 +2849,9 @@ void main()
         }
         g_frameSerial++;
         g_drawsInFrame = 0;
+        if (frameNumber % 300 == 0)
+            info("[render] textures: %llu uploads, %llu unchanged and kept so far", (unsigned long long)g_texturesUploaded,
+                 (unsigned long long)g_texturesKept);
         if (frameNumber % 300 == 0 && g_writebacks)
             info("[render] resolve writeback: %llu resolves written to guest memory, %llu kept on the GPU, %llu syncs so far",
                  (unsigned long long)g_writebacks, (unsigned long long)g_writebacksSkipped, (unsigned long long)g_writebackSyncs);

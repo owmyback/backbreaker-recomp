@@ -69,6 +69,10 @@ header that is not inline:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/tiling_test.cpp tests/tiling_test_odr.cpp -o build/tiling_test && build/tiling_test
 
+The mip level layout (`runtime/gpu/mip_layout.h`, issue #46) is header-only too:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/mip_layout_test.cpp -o build/mip_layout_test && build/mip_layout_test
+
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 `scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`

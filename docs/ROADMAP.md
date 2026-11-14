@@ -13,7 +13,7 @@ Work that can be picked up is tracked as GitHub issues and linked from each phas
 Last updated: 2026-11-14 (#3 closed; phase 4: window polish #9, validation clean #11 and the
 screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff;
 EDRAM transfers between formats #36: the match's tile blocks are gone; clear rectangles bounded by
-their vertices #37; resolves written back to guest memory #45: the grass renders)
+their vertices #37; resolves written back to guest memory #45: the grass renders; mip levels #46)
 
 ## Current state
 
@@ -33,10 +33,11 @@ is not seen at the current frame rate, see phase 9). Audio is still silence.
 
 **Current state of the picture (2026-11-14):** the field renders (grass, yard lines, end-zone
 logo, player shadows) since resolves are written back to guest memory (#45). Before that it was
-black: the game generates the field's texture on the GPU and compresses it on the CPU. Distant
-textures shimmer (no mip levels yet, #46) and replays show a fine grid pattern (#44). Live play
-runs at about 27 fps headless (26.9 in the last 60 s of the route, with the local agent's model
-unloaded).
+black: the game generates the field's texture on the GPU and compresses it on the CPU. Textures
+have their mip levels (#46), so distant grass and crowd no longer shimmer. Replays show a fine
+grid pattern (#44). Live play reaches the game's 30 fps cap headless (30.1 in the last 60 s of
+the route, with the local agent's model unloaded), since unchanged textures are no longer
+re-uploaded every frame.
 
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
@@ -57,7 +58,7 @@ caches) until the heap ran out a minute into the match.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-13 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-14 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -417,8 +418,40 @@ Result: the grass, yard lines, end-zone logo and player shadows render, as do th
 background and replays. In the route's four screenshots, near-black pixels in the middle band
 of the picture went from 49-100% (main) to 5-18% (what remains is the play-call menu).
 
+**Step 14 - Mip levels (#46).** Textures uploaded their base level only, so distant ones (the
+grass, the crowd) shimmered and looked pixelated. A frame capture of the match shows most mipped
+textures ask for trilinear filtering, and some for 4:1 anisotropic. None of the 368 texture
+fetches in the match's shaders override the fetch constant's filters (`xenos-disasm` now prints
+such overrides).
+- `runtime/gpu/mip_layout.h` (header-only) says where each level is in guest memory, following
+  Xenia's `GetGuestTextureLayout` / `GetPackedMipOffset`. Level 0 is at the base address with
+  the fetch constant's pitch. Levels 1 and up follow each other from the mip address, laid out
+  from the power-of-two size. With packed mips, the levels from the first one whose shorter side
+  is 16 texels or less share one 32x32-block tail, each at its own offset. A tail at level 0
+  also moves the base. Before this, tiny textures with packed mips were read from the tail's
+  corner instead of their real place.
+- `tests/mip_layout_test.cpp` (in CI) checks seven layouts against hand-computed values,
+  including the two examples Xenia's comments describe (an 80x260 tail whose level 6 ends at
+  Y = 36, and a 2x2 base at (16, 0) with its mip at (8, 0)).
+- The renderer reads and untiles each region once per face and copies every level out of it.
+  The level count comes from the fetch constant (`mip_max_level`, clamped to the size).
+- Samplers take the mip filter (point, linear, or base map = base level only), the fetch
+  constant's level range and LOD bias, and anisotropy up to the GPU's limit
+  (`samplerAnisotropy`, now recorded in the Vulkan context).
+- Render-to-texture images stay single-level.
+- Textures are no longer re-uploaded every frame they're used. The renderer hashes the guest
+  bytes of every level and face (a 4-lane 64-bit multiply hash), and uploads only when that
+  changed since the last upload. Any byte change still re-uploads, so the result is the same as
+  before.
+
+Measured on the Exhibition route (same session, sequential runs, last 60 s): live play was
+25.8 fps on main. With mips alone it fell to 22.5, since every frame re-uploaded about a third
+more data. With the unchanged-texture skip it's 30.1 fps, the game's own 30 fps cap: 865 uploads
+over the route, about 749,000 kept. In matching screenshots, the distant grass goes from grainy
+noise to smooth, with clean yard lines. Validation: 0 errors, the same two pre-existing warnings.
+
 Remaining steps:
-1. Mip levels, 3D (volume) textures, texture signedness (signed formats are read unsigned).
+1. 3D (volume) textures, texture signedness (signed formats are read unsigned).
 2. Resolves: written back to guest memory since step 13, except 16-bit, 16_16, 64-bit, float and
    D24FS8 destinations and destinations resolved every frame (lazy writeback would cover those).
    Still to do: the resolve rectangle from the vertex data, and resolve clears in the target's own
@@ -429,7 +462,8 @@ Remaining steps:
    scaling resolves back down when they are written to guest memory.
 4. Shader translation: remaining control flow and features as gameplay shaders need them;
    point sprites; pixel shader param_gen.
-5. Performance: texture write-watching instead of per-frame uploads, finer barriers.
+5. Performance: finer barriers. Textures are hashed every frame they're used (step 14) instead of
+   re-uploaded; write-watching would avoid even reading them.
 This is the largest phase (weeks to months).
 
 ## Phase 5 - Controller input (done)

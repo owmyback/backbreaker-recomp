@@ -173,9 +173,17 @@ namespace gpu
                 if (f.tfOffsetX() || f.tfOffsetY() || f.tfOffsetZ()) cov->add(cov->features, "texture fetch offset");
                 if (f.tfCoordDenormalized()) cov->add(cov->features, "unnormalized texture coordinates");
             }
-            return pred + fmt("%s %s, r%u.%s, tf%u (%s%s%s)", fetchName(op), fetchDst(f).c_str(), f.srcReg(), coords.c_str(), f.constIndex(),
+            // Filters the instruction sets itself (3 = "use the fetch constant's", not printed)
+            static const char* filters[4] = { "point", "linear", "basemap", "" };
+            static const char* aniso[8] = { "off", "1:1", "2:1", "4:1", "8:1", "16:1", "6?", "" };
+            std::string filter;
+            if (f.tfMagFilter() != 3) filter += fmt(" mag=%s", filters[f.tfMagFilter()]);
+            if (f.tfMinFilter() != 3) filter += fmt(" min=%s", filters[f.tfMinFilter()]);
+            if (f.tfMipFilter() != 3) filter += fmt(" mip=%s", filters[f.tfMipFilter()]);
+            if (f.tfAnisoFilter() != 7) filter += fmt(" aniso=%s", aniso[f.tfAnisoFilter()]);
+            return pred + fmt("%s %s, r%u.%s, tf%u (%s%s%s%s)", fetchName(op), fetchDst(f).c_str(), f.srcReg(), coords.c_str(), f.constIndex(),
                               dims[f.tfDimension()], f.tfCoordDenormalized() ? " unnormalized" : "",
-                              f.tfLodBias() ? fmt(" lod_bias=%d", f.tfLodBias()).c_str() : "");
+                              f.tfLodBias() ? fmt(" lod_bias=%d", f.tfLodBias()).c_str() : "", filter.c_str());
         }
     }
 
