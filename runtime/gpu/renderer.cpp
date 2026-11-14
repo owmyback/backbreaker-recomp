@@ -1266,6 +1266,114 @@ void main() {
             }
         }
 
+        // ---------------------------------------------------------------- depth resolves read as color
+
+        // Depth resolve destination -> its stencil plane (R8_UINT, same size), and a counter of
+        // resolves into it, so the packed view below is rebuilt only after a new resolve.
+        std::map<VkImage, Image> g_stencilOf;
+        std::map<VkImage, uint64_t> g_depthGeneration;
+
+        Image& stencilCompanion(const Image& dest)
+        {
+            Image& st = g_stencilOf[dest.image];
+            if (!st.image)
+                st = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8_UINT, dest.width, dest.height, 1, 1, 1,
+                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            return st;
+        }
+
+        // A texture can read a depth resolve as 8_8_8_8 (issue #60): the guest's resolve wrote the
+        // raw D24S8 words, depth in the upper 24 bits and stencil in the low byte, and the player
+        // highlight looks for the selected player's stencil value there (its first pass samples the
+        // scene's depth resolve that way and edge-detects the stencil). A compute pass packs the
+        // R32_SFLOAT depth and R8_UINT stencil planes back into those bytes, as R8G8B8A8_UNORM with
+        // component X = the low byte (stencil), as the texture upload would decode the words.
+        constexpr char kPackDepthCs[] = R"(#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D depthPlane;
+layout(set = 0, binding = 1) uniform usampler2D stencilPlane;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D packed;
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(packed)))) return;
+    uint d = uint(clamp(texelFetch(depthPlane, p, 0).r, 0.0, 1.0) * 16777215.0 + 0.5);
+    uint st = texelFetch(stencilPlane, p, 0).r;
+    imageStore(packed, p, vec4(float(st & 255u), float(d & 255u), float((d >> 8) & 255u), float(d >> 16)) / 255.0);
+}
+)";
+        struct PackedDepth { Image img; uint64_t generation = 0; };
+        std::map<VkImage, PackedDepth> g_packedDepth;
+        VkDescriptorSetLayout g_packSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout g_packLayout = VK_NULL_HANDLE;
+        VkPipeline g_packPipeline = VK_NULL_HANDLE;
+        VkSampler g_packSampler = VK_NULL_HANDLE;
+
+        // The packed RGBA8 image for depth resolve `dest`, current as of its latest resolve;
+        // nullptr if the depth resolve has no stencil plane (never resolved through resolveDepth)
+        Image* packedDepth(Image& dest)
+        {
+            auto st = g_stencilOf.find(dest.image);
+            if (st == g_stencilOf.end()) return nullptr;
+            if (!g_packPipeline)
+            {
+                VkDescriptorSetLayoutBinding b[3] = {
+                    { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                    { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                    { 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr } };
+                VkDescriptorSetLayoutCreateInfo dl{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+                dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+                dl.bindingCount = 3;
+                dl.pBindings = b;
+                VK_CHECK(vkCreateDescriptorSetLayout(D, &dl, nullptr, &g_packSetLayout));
+                VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+                pli.setLayoutCount = 1;
+                pli.pSetLayouts = &g_packSetLayout;
+                VK_CHECK(vkCreatePipelineLayout(D, &pli, nullptr, &g_packLayout));
+                std::string error;
+                VkShaderModule cs = compile(kPackDepthCs, shaderc_compute_shader, "pack_depth.comp", error);
+                if (!cs) fatal("[render] depth packing shader: %s", error.c_str());
+                VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+                ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs, "main", nullptr };
+                ci.layout = g_packLayout;
+                VK_CHECK(vkCreateComputePipelines(D, VK_NULL_HANDLE, 1, &ci, nullptr, &g_packPipeline));
+                vkDestroyShaderModule(D, cs, nullptr);
+                VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+                VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_packSampler));
+            }
+            PackedDepth& pd = g_packedDepth[dest.image];
+            if (!pd.img.image)
+                pd.img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, dest.width, dest.height, 1, 1, 1,
+                                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            uint64_t gen = g_depthGeneration[dest.image];
+            if (pd.generation != gen)
+            {
+                endPass();
+                VkCommandBuffer c = cmd();
+                transition(c, dest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                transition(c, st->second, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                transition(c, pd.img, VK_IMAGE_LAYOUT_GENERAL);
+                vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_packPipeline);
+                VkDescriptorImageInfo ii[3] = { { g_packSampler, dest.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                                { g_packSampler, st->second.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                                { VK_NULL_HANDLE, pd.img.view, VK_IMAGE_LAYOUT_GENERAL } };
+                VkWriteDescriptorSet w[3]{};
+                for (int i = 0; i < 3; i++)
+                {
+                    w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    w[i].dstBinding = i;
+                    w[i].descriptorCount = 1;
+                    w[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                    w[i].pImageInfo = &ii[i];
+                }
+                C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_packLayout, 0, 3, w);
+                vkCmdDispatch(c, (dest.width + 7) / 8, (dest.height + 7) / 8, 1);
+                transition(c, pd.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                pd.generation = gen;
+            }
+            return &pd.img;
+        }
+
         std::map<std::pair<VkImage, uint32_t>, VkImageView> g_resolvedViews; // resolve images used as textures
 
         // Descriptor for texture fetch constant `slot` as a shader declaring dimension `dim`.
@@ -1290,6 +1398,19 @@ void main() {
             // Render to texture: a 2D texture at a resolve destination samples the resolved image
             // directly when the formats are compatible (resolves are not written to guest memory yet)
             auto resolved = g_resolved.find(base & 0x1FFFFFFF);
+            if (!cube && format == 6 && resolved != g_resolved.end() && resolved->second.format == VK_FORMAT_R32_SFLOAT &&
+                width * g_scale <= resolved->second.width && height * g_scale <= resolved->second.height)
+                if (Image* packed = packedDepth(resolved->second))
+                {
+                    VkImageView& view = g_resolvedViews[{ packed->image, swizzle }];
+                    if (!view)
+                    {
+                        view = createView(packed->image, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 1, swizzle, false);
+                        info("[render] depth resolve %08X read as 8_8_8_8: raw D24S8 words (stencil in the low byte)", base & 0x1FFFFFFF);
+                    }
+                    out.imageView = view;
+                    return out;
+                }
             if (!cube && resolved != g_resolved.end() && resolveCompatible(format, resolved->second.format) &&
                 width * g_scale <= resolved->second.width && height * g_scale <= resolved->second.height)
             {
@@ -1951,6 +2072,17 @@ void main() {
             if (it != g_resolved.end() && (it->second.width != dw * g_scale || it->second.height != dh * g_scale || it->second.format != format))
             {
                 g_retired.push_back(it->second);
+                if (auto st = g_stencilOf.find(it->second.image); st != g_stencilOf.end())
+                {
+                    g_retired.push_back(st->second);
+                    g_stencilOf.erase(st);
+                }
+                if (auto pd = g_packedDepth.find(it->second.image); pd != g_packedDepth.end())
+                {
+                    g_retired.push_back(pd->second.img);
+                    g_packedDepth.erase(pd);
+                }
+                g_depthGeneration.erase(it->second.image);
                 g_resolved.erase(it);
                 it = g_resolved.end();
             }
@@ -2023,12 +2155,13 @@ void main() {
         void resolveDepth(Image& src, VkRect2D hostRect, Image& dest, VkOffset2D destAt)
         {
             VkDeviceSize need = VkDeviceSize(hostRect.extent.width) * hostRect.extent.height * 4;
-            if (need > g_depthScratchSize)
+            VkDeviceSize needAll = ((need + 255) & ~VkDeviceSize(255)) + VkDeviceSize(hostRect.extent.width) * hostRect.extent.height;
+            if (needAll > g_depthScratchSize)
             {
                 static VkDeviceMemory memory = VK_NULL_HANDLE;
                 if (g_depthScratch) g_retiredBuffers.push_back({ g_depthScratch, memory });
                 VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-                bci.size = std::max<VkDeviceSize>(need, 4u << 20);
+                bci.size = std::max<VkDeviceSize>(needAll, 4u << 20);
                 bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &g_depthScratch));
                 VkMemoryRequirements req;
@@ -2063,6 +2196,7 @@ void main() {
                 ri.renderArea = hostRect;
                 ri.layerCount = 1;
                 ri.pDepthAttachment = &da;
+                ri.pStencilAttachment = &da; // stencil too (sample zero is always supported), see depthStencilOf
                 vkCmdBeginRendering(c, &ri);
                 vkCmdEndRendering(c);
                 from = &one;
@@ -2085,6 +2219,28 @@ void main() {
             copy.imageOffset = { destAt.x, destAt.y, 0 };
             vkCmdCopyBufferToImage(c, g_depthScratch, dest.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // resting layout, as color resolves
+
+            // The stencil plane goes the same way into the destination's R8_UINT companion (issue
+            // #60): the player highlight reads the scene's depth resolve as 8_8_8_8, i.e. the raw
+            // D24S8 words, and finds the selected player by its stencil value in the low byte.
+            Image& st = stencilCompanion(dest);
+            VkDeviceSize stencilAt = (need + 255) & ~VkDeviceSize(255);
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            VkBufferImageCopy sc = copy;
+            sc.bufferOffset = stencilAt;
+            sc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+            sc.imageOffset = { hostRect.offset.x, hostRect.offset.y, 0 };
+            vkCmdCopyImageToBuffer(c, from->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_depthScratch, 1, &sc);
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            transition(c, st, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            sc.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            sc.imageOffset = { destAt.x, destAt.y, 0 };
+            vkCmdCopyBufferToImage(c, g_depthScratch, st.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &sc);
+            g_depthGeneration[dest.image]++;
         }
 
         // ---------------------------------------------------------------- resolve writeback

@@ -450,6 +450,22 @@ more data. With the unchanged-texture skip it's 30.1 fps, the game's own 30 fps 
 over the route, about 749,000 kept. In matching screenshots, the distant grass goes from grainy
 noise to smooth, with clean yard lines. Validation: 0 errors, the same two pre-existing warnings.
 
+**Step 15 - Player highlight: depth resolves keep their stencil (#60).** The red silhouette on
+the selected player (and on the QB's target receiver) never appeared. In a frame capture,
+`player_highlight.fx360`'s first pass samples the scene's depth resolve (`0ED6B000`, also read as
+24_8 for depth by other passes) as **8_8_8_8**: the raw D24S8 words, with the stencil value that
+marks the selected player in the low byte (the shader's component after the fetch swizzle). It
+edge-detects that stencil at five taps and colors the edges from a 256x1 palette indexed by it.
+Depth resolves kept only the depth plane (R32_SFLOAT), so there were no edges. Now:
+- The multisample-to-sample-zero pass resolves stencil too, and `resolveDepth` copies the stencil
+  aspect into an R8_UINT companion image of the destination.
+- An 8_8_8_8 fetch of a depth resolve gets an RGBA8 image that a compute pass packs from both
+  planes (X = stencil, then depth low to high byte), rebuilt only after a new resolve into it.
+
+Verified in the window by the maintainer (2026-11-14): the silhouette appears on the player you
+switch to, on offense and defense, and jumps between receivers as the QB changes target.
+Validation is clean. The CPU writeback of depth resolves (step 13) still writes stencil as 0.
+
 Remaining steps:
 1. 3D (volume) textures, texture signedness (signed formats are read unsigned).
 2. Resolves: written back to guest memory since step 13, except 16-bit, 16_16, 64-bit, float and
