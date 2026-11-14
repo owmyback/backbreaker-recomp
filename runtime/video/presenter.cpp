@@ -9,6 +9,7 @@
 #include "presenter.h"
 #include "vk_context.h"
 #include "../debug/png.h"
+#include "../gpu/capture.h"
 #include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
@@ -636,6 +637,14 @@ namespace video
                 else if (e.type == SDL_EVENT_KEY_DOWN && (e.key.scancode == SDL_SCANCODE_F12 || e.key.key == SDLK_F12) && vk.shotSupported)
                 {
                     if (!e.key.repeat) vk.shotWant = true; // one per press, captured on the next present so the picture is complete
+                }
+                else if (e.type == SDL_EVENT_KEY_DOWN && (e.key.scancode == SDL_SCANCODE_F10 || e.key.key == SDLK_F10) && !e.key.repeat)
+                {
+                    // F10: GPU frame capture (draws, state, textures) of a frame right after the
+                    // press, into captures/frame_N/ - for "it looks wrong right now" moments
+                    uint64_t f = g_frameNumber.load(std::memory_order_acquire) + 2;
+                    gpu::capture::request(f);
+                    info("[video] F10: capturing frame %llu into captures/frame_%llu/", (unsigned long long)f, (unsigned long long)f);
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
                     haveSwapchain = false;

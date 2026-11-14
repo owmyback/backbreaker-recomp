@@ -211,7 +211,9 @@ Exhibition route: `rs_down@196:1.0,rs_up@197:0.3` pulls the right stick back and
 
 ## GPU frame capture
 `./build/backbreaker --capture-frame 1200` (or a list: `--capture-frame 300,1200,2400`) records the
-frame ending with that swap into `captures/frame_N/` (gitignored):
+frame ending with that swap into `captures/frame_N/` (gitignored). In the window, **F10** captures
+a frame right after the press (the log names its folder), for a moment that is hard to reach by
+frame number:
 - `summary.txt` - draw count, primitive types, shaders used, render-target setups, textures
   (format, dimension, size, tiling), distinct pipeline states (fixed-function state per draw,
   with draw counts), PM4 packet histogram
