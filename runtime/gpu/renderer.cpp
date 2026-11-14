@@ -27,6 +27,7 @@
 #include <shaderc/shaderc.h>
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -1770,6 +1771,67 @@ void main() {
 
         // ---------------------------------------------------------------- draws
 
+        // a and b overlapping: their intersection; false if they do not overlap
+        bool intersect(VkRect2D a, VkRect2D b, VkRect2D& out)
+        {
+            int32_t x0 = std::max(a.offset.x, b.offset.x), y0 = std::max(a.offset.y, b.offset.y);
+            int32_t x1 = std::min(a.offset.x + int32_t(a.extent.width), b.offset.x + int32_t(b.extent.width));
+            int32_t y1 = std::min(a.offset.y + int32_t(a.extent.height), b.offset.y + int32_t(b.extent.height));
+            if (x1 <= x0 || y1 <= y0) return false;
+            out = { { x0, y0 }, { uint32_t(x1 - x0), uint32_t(y1 - y0) } };
+            return true;
+        }
+
+        // The screen rectangle a draw's vertices span, in guest pixels, when that can be read on the
+        // CPU: no clipping, no scissor (right and bottom at 8192 or beyond, Direct3D 9's "none"),
+        // auto-indexed triangles, rectangles or quads, and a vertex shader that only moves a fetched
+        // position into oPos (TranslatedShader::position). That is how the engine clears: a
+        // rectangle of the target's size, but with nothing else bounding it the draw would own every
+        // EDRAM tile from its base, and transfer them all in first. As Xenia's DrawExtentEstimator
+        // (execute_unclipped_draw_vs_on_cpu), with the position math of the translated shaders.
+        bool vertexBounds(const DrawState& s, const PositionFetch& p, VkRect2D& out)
+        {
+            bool area = s.primitive == 4 || s.primitive == 5 || s.primitive == 6 || s.primitive == 8 || s.primitive == 13 || s.primitive == 14;
+            if (!p.valid || !s.clipDisable || !area || s.indexSource != 2 || !s.indexCount || s.indexCount > 64) return false;
+            int32_t right = int32_t(s.scissorBR[0]), bottom = int32_t(s.scissorBR[1]);
+            if (!s.windowOffsetDisabled) { right += s.windowOffsetX; bottom += s.windowOffsetY; }
+            if (std::min(right, int32_t(s.screenScissorBR[0])) < 8192 || std::min(bottom, int32_t(s.screenScissorBR[1])) < 8192) return false;
+            uint32_t d0 = readRegister(kFetchConstants + p.slot * 2), d1 = readRegister(kFetchConstants + p.slot * 2 + 1);
+            uint64_t baseDw = d0 >> 2, sizeDw = (d1 >> 2) & 0xFFFFFF;
+            uint32_t endian = d1 & 3;
+            float x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
+            for (uint32_t i = 0; i < s.indexCount; i++)
+            {
+                int64_t at = (int64_t(i) + s.indexOffset) * p.stride + p.offset;
+                if (at < 0 || (sizeDw && uint64_t(at) + 4 > sizeDw)) return false;
+                const uint32_t* v = (const uint32_t*)mem::physical(uint32_t((baseDw + uint64_t(at)) * 4));
+                auto comp = [&](uint32_t c) {
+                    uint8_t k = p.comp[c];
+                    return k < 4 ? std::bit_cast<float>(gpuSwap(v[k], endian)) : k == 5 ? 1.0f : 0.0f;
+                };
+                float x = comp(0), y = comp(1);
+                if (!s.xyDividedByW) // as the translated shader: XY divided by W (W given as 1/W unless vtx_w0_fmt)
+                {
+                    if (p.comp[3] > 5) return false;
+                    float w = s.wNotReciprocal ? comp(3) : 1.0f / comp(3);
+                    if (!(w > 0.0f)) return false;
+                    x /= w, y /= w;
+                }
+                x = x * s.vpScale[0] + s.vpOffset[0], y = y * s.vpScale[1] + s.vpOffset[1];
+                if (!std::isfinite(x) || !std::isfinite(y)) return false;
+                x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+            }
+            // Pixel space as the host draws it (window offset, Direct3D's pixel centers at .0), one
+            // pixel of margin on every side
+            float ox = s.vertexWindowOffset ? float(s.windowOffsetX) : 0.0f, oy = s.vertexWindowOffset ? float(s.windowOffsetY) : 0.0f;
+            if (!s.pixelCenterHalf) ox += 0.5f, oy += 0.5f;
+            int32_t ix0 = int32_t(std::max(std::floor(x0 + ox) - 1.0f, 0.0f)), iy0 = int32_t(std::max(std::floor(y0 + oy) - 1.0f, 0.0f));
+            int32_t ix1 = int32_t(std::min(std::ceil(x1 + ox) + 1.0f, 8192.0f)), iy1 = int32_t(std::min(std::ceil(y1 + oy) + 1.0f, 8192.0f));
+            if (ix1 <= ix0 || iy1 <= iy0) return false;
+            out = { { ix0, iy0 }, { uint32_t(ix1 - ix0), uint32_t(iy1 - iy0) } };
+            return true;
+        }
+
         // Window scissor (+ window offset) intersected with the screen scissor and `limit`
         bool scissorRect(const DrawState& s, VkExtent2D limit, VkRect2D& out)
         {
@@ -2214,10 +2276,15 @@ void main() {
             for (Image* t : { color[0], color[1], color[2], color[3], depth })
                 if (t) guestExtent = { std::min(guestExtent.width, t->width / g_scale), std::min(guestExtent.height, t->height / g_scale) };
             VkRect2D guestScissor{ { 0, 0 }, { 1, 1 } };
+            VkRect2D edramRect = guestScissor; // what the draw can touch: the scissor, or less (vertexBounds)
             if (!noTargets)
             {
                 if (!scissorRect(s, guestExtent, guestScissor)) return true;
-                for (Image* t : { color[0], color[1], color[2], color[3], depth }) syncTarget(t, guestScissor); // EDRAM aliasing
+                edramRect = guestScissor;
+                VkRect2D vertices;
+                if (vertexBounds(s, vs->t.position, vertices) && !intersect(edramRect, vertices, edramRect))
+                    edramRect = { { 0, 0 }, { 0, 0 } }; // drawn outside the scissor: touches nothing
+                for (Image* t : { color[0], color[1], color[2], color[3], depth }) syncTarget(t, edramRect); // EDRAM aliasing
             }
 
             beginPass(color, depth);
@@ -2310,8 +2377,8 @@ void main() {
                 if (g_exportMap)
                     for (auto [start, bytes] : exportRanges) std::memcpy(mem::physical(start), g_exportMap + start, bytes);
             }
-            for (int i = 0; i < 4; i++) markWritten(color[i], guestScissor);
-            if (depth && (s.depthWrite || s.stencil)) markWritten(depth, guestScissor);
+            for (int i = 0; i < 4; i++) markWritten(color[i], edramRect);
+            if (depth && (s.depthWrite || s.stencil)) markWritten(depth, edramRect);
             g_drawsInFrame++;
             return true;
         }

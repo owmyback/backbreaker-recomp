@@ -813,12 +813,126 @@ void xeMemExportFlush() {
         };
     }
 
+    PositionFetch analyzePositionFetch(const std::vector<uint32_t>& w)
+    {
+        // Straight-line code only (exec / alloc / nop, no predication), tracking for each temp
+        // register whether it holds a vertex fetch result, and through which component swizzle
+        struct Reg { bool fetched = false; uint32_t slot = 0, stride = 0, format = 0; int32_t offset = 0; uint8_t comp[4] = { 6, 6, 6, 6 }; };
+        Reg regs[64];
+        PositionFetch none, pos;
+        bool r0xWritten = false, haveFull = false, indexDirect = false, exported = false;
+        uint32_t lastSlot = 0, lastStride = 0;
+        auto components = [](uint32_t format) { return format == 37 ? 2u : format == 57 ? 3u : format == 38 ? 4u : 0u; };
+        auto clobber = [&](uint32_t reg, uint32_t mask) {
+            Reg& r = regs[reg & 63];
+            for (uint32_t c = 0; c < 4; c++)
+                if ((mask >> c) & 1) r.comp[c] = 6;
+            if (mask & 3) r.fetched = false;
+            if ((reg & 63) == 0 && (mask & 1)) r0xWritten = true;
+        };
+        for (size_t i = 0;; i++)
+        {
+            if ((i / 2) * 3 + 3 > w.size()) return none;
+            Cf pair[2];
+            unpackCf(&w[(i / 2) * 3], pair);
+            const Cf& cf = pair[i & 1];
+            CfOp op = cf.op();
+            if (op == CfOp::Nop || op == CfOp::Alloc || op == CfOp::MarkVsFetchDone) continue;
+            if (op != CfOp::Exec && op != CfOp::ExecEnd) return none; // conditions, loops, calls, jumps
+            for (uint32_t k = 0; k < cf.execCount(); k++)
+            {
+                uint32_t slot = cf.execAddress() + k;
+                if (size_t(slot) * 3 + 3 > w.size()) return none;
+                const uint32_t* d = &w[slot * 3];
+                if ((cf.execSequence() >> (2 * k)) & 1)
+                {
+                    Fetch f{ { d[0], d[1], d[2] } };
+                    if (f.isPredicated() || f.dstRegRelative()) return none;
+                    uint32_t written = 0;
+                    for (uint32_t c = 0; c < 4; c++)
+                        if (((f.dstSwizzle() >> (3 * c)) & 7) != 7) written |= 1u << c;
+                    if (f.op() != uint32_t(FetchOp::VertexFetch)) { clobber(f.dstReg(), written); continue; }
+                    if (!f.vfIsMini())
+                    {
+                        haveFull = true;
+                        lastSlot = f.vfFetchSlot();
+                        lastStride = f.vfStride();
+                        indexDirect = f.srcReg() == 0 && !f.srcRegRelative() && f.vfSrcSwizzle() == 0 && !r0xWritten;
+                    }
+                    if (!haveFull) return none;
+                    uint32_t format = f.vfFormat(), n = components(format);
+                    Reg r = regs[f.dstReg() & 63];
+                    if ((written & 3) != 3 || !n || !indexDirect || f.vfExpAdjust()) { clobber(f.dstReg(), written); continue; }
+                    r.fetched = true;
+                    r.slot = lastSlot, r.stride = lastStride, r.format = format, r.offset = f.vfOffset();
+                    for (uint32_t c = 0; c < 4; c++)
+                    {
+                        uint32_t sw = (f.dstSwizzle() >> (3 * c)) & 7;
+                        if (sw == 7) r.comp[c] = 6; // kept from before: not this fetch
+                        else r.comp[c] = uint8_t(sw < 4 ? (sw < n ? sw : 6) : sw == 4 ? 4 : sw == 5 ? 5 : 6);
+                    }
+                    if (r.comp[0] > 3 || r.comp[1] > 3) r.fetched = false;
+                    regs[f.dstReg() & 63] = r;
+                    if ((f.dstReg() & 63) == 0 && (written & 1)) r0xWritten = true;
+                    continue;
+                }
+                Alu a{ { d[0], d[1], d[2] } };
+                if (a.isPredicated() || a.vectorDestRelative() || a.scalarDestRelative()) return none;
+                uint32_t vmask = a.vectorWriteMask(), smask = a.scalarWriteMask();
+                // A move: max(r, r) of one temp register, unswizzled, no abs / negate / clamp
+                bool move = a.vectorOp() == 2 && a.srcIsTemp(1) && a.srcIsTemp(2) && a.srcReg(1) == a.srcReg(2) && !(a.srcReg(1) & 0xC0) &&
+                            a.srcSwizzle(1) == 0 && a.srcSwizzle(2) == 0 && !a.srcNegate(1) && !a.srcNegate(2) && !a.vectorClamp();
+                const Reg src = move ? regs[a.srcReg(1) & 63] : Reg{};
+                if (a.isExport())
+                {
+                    if (a.vectorDest() == 62 && vmask)
+                    {
+                        exported = true;
+                        if ((vmask & 3) && !(move && src.fetched)) pos.valid = false;
+                        else if (vmask & 3)
+                        {
+                            pos.valid = true;
+                            pos.slot = src.slot, pos.stride = src.stride, pos.format = src.format, pos.offset = src.offset;
+                            for (uint32_t c = 0; c < 4; c++)
+                                if ((vmask >> c) & 1) pos.comp[c] = src.comp[c];
+                        }
+                        else if (vmask & 8) pos.comp[3] = move && src.fetched ? src.comp[3] : 6;
+                    }
+                    if (a.scalarDest() == 62 && smask)
+                    {
+                        if (smask & 3) pos.valid = false;
+                        if (smask & 8) pos.comp[3] = 6;
+                    }
+                    continue;
+                }
+                if (vmask)
+                {
+                    uint32_t dst = a.vectorDest() & 63;
+                    if (move && src.fetched && (vmask & 3) == 3)
+                    {
+                        Reg r = src;
+                        for (uint32_t c = 0; c < 4; c++)
+                            if (!((vmask >> c) & 1)) r.comp[c] = 6;
+                        regs[dst] = r;
+                        if (dst == 0) r0xWritten = true;
+                    }
+                    else
+                        clobber(dst, vmask);
+                }
+                if (smask) clobber(a.scalarDest(), smask);
+            }
+            if (op == CfOp::ExecEnd) break;
+        }
+        return exported && pos.valid ? pos : none;
+    }
+
     TranslatedShader translateToGlsl(const std::vector<uint32_t>& words, ShaderType type)
     {
         Translator t(words, type);
         t.translate();
         t.out.glsl = t.assemble();
         t.out.ok = !t.failed;
+        if (type == ShaderType::Vertex) t.out.position = analyzePositionFetch(words);
         return t.out;
     }
 }

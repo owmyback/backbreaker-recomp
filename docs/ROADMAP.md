@@ -12,7 +12,8 @@ Work that can be picked up is tracked as GitHub issues and linked from each phas
 
 Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9, validation clean #11 and the
 screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff;
-EDRAM transfers between formats #36: the match's tile blocks are gone)
+EDRAM transfers between formats #36: the match's tile blocks are gone; clear rectangles bounded by
+their vertices #37)
 
 ## Current state
 
@@ -32,8 +33,7 @@ is not seen at the current frame rate, see phase 9). Audio is still silence.
 
 **Current blocker (2026-11-13):** the field is black - the grass does not show (until #36 it was
 covered by stale EDRAM tiles, the white and striped blocks). Distant textures shimmer (no mip
-levels yet). Live play runs at about 22 fps headless, most of the frame's EDRAM transfers coming
-before the engine's clear rectangles (#37).
+levels yet). Live play runs at about 23 fps headless.
 
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
@@ -54,7 +54,7 @@ caches) until the heap ran out a minute into the match.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-11 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-12 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -362,6 +362,26 @@ creates 40 transfer pipelines, 29 of them converting, and validation is unchange
 Cost: about 180 transfers a frame in the match, and live play at 21.7 fps against 23.3 before
 (headless, last 60 s of the route). Most of those transfers come before the engine's clear
 rectangles, whose scissor spans all of EDRAM; bounding them by their vertex data is #37.
+
+**Step 12 - Clear rectangles bounded by their vertices (#37).** The engine clears with
+rectangle-list draws that have clipping off, the viewport transform off (screen-pixel positions)
+and the scissor left at (0,0)-(8192,8192). The renderer clamped that scissor to the target image,
+which runs to the end of EDRAM, so each clear first transferred in nearly every tile and then took
+them all over. As Xenia's `DrawExtentEstimator` does (`execute_unclipped_draw_vs_on_cpu`), such
+a draw is now bounded by its vertices:
+- `analyzePositionFetch` (`shader_translator.cpp`) recognizes a vertex shader whose `oPos` is a
+  fetched vertex moved through registers (straight-line code, no predication, moves only). That
+  matches 22 of the 75 vertex shaders dumped from the route, the clear shader among them.
+- For unclipped, unscissored, auto-indexed draws of up to 64 vertices with such a shader, the
+  renderer reads the positions from guest memory. It applies the same W, viewport, window-offset
+  and pixel-center math as the translated shader. The bounding box, plus a pixel of margin, is
+  then what the draw syncs and takes ownership of.
+
+Measured on the Exhibition route with a counting build, per frame in the match: about 81,000 tiles
+transferred before this step and about 27,000 after; samples shaded went from 104 M to 37 M.
+Transfer count is slightly up (~175 -> ~205), because ownership moves in smaller pieces. Live play
+is back to 23.2 fps (23.3 before #36, 21.7 with it; headless, last 60 s of the route). Screenshots
+are unchanged and validation is unchanged.
 
 Remaining steps:
 1. Mip levels, 3D (volume) textures, texture signedness (signed formats are read unsigned).

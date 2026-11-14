@@ -24,6 +24,17 @@
 
 namespace gpu
 {
+    // Where a vertex shader's position comes from when all it does with it is move a fetched
+    // vertex into oPos (screen-space rectangles such as the engine's clears): the renderer reads
+    // those positions on the CPU to bound the EDRAM a draw touches.
+    struct PositionFetch
+    {
+        bool valid = false;
+        uint32_t slot = 0, stride = 0, format = 0; // vertex fetch constant slot, dwords per vertex, xenos::VertexFormat
+        int32_t offset = 0;                        // dwords into the vertex
+        uint8_t comp[4] = { 6, 6, 6, 6 };          // oPos.xyzw: fetched component 0-3, 4 = 0.0, 5 = 1.0, 6 = unknown
+    };
+
     struct TranslatedShader
     {
         bool ok = false;
@@ -44,6 +55,7 @@ namespace gpu
         // Every vertex fetch is indexed by the untouched vertex index (r0.x): the fetched range
         // follows from the draw's index range
         bool vertexIndexDirect = true;
+        PositionFetch position; // vertex shaders: see PositionFetch
     };
 
     // Push constants of translated shaders (std430 layout, 48 bytes)
@@ -57,6 +69,9 @@ namespace gpu
         float alphaRef;
     };
     constexpr uint32_t kSysFlagXYDividedByW = 1, kSysFlagZDividedByW = 2, kSysFlagWNotReciprocal = 4;
+
+    // words: host-order dwords of the shader microcode (a vertex shader).
+    PositionFetch analyzePositionFetch(const std::vector<uint32_t>& words);
 
     // words: host-order dwords of the shader microcode.
     TranslatedShader translateToGlsl(const std::vector<uint32_t>& words, ShaderType type);
