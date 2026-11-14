@@ -219,6 +219,10 @@ void main() {
             // Resolve destinations: where pixel (0, 0) lives in guest memory, and the pitch and height
             // RB_COPY_DEST_PITCH gave it (the bounds of the writeback to guest memory)
             uint32_t guestBase = 0, guestPitch = 0, guestHeight = 0;
+            // Resolve destinations: a fingerprint of their guest memory as of the last resolve (and
+            // writeback), to notice when the CPU has since put something else there (issue #63)
+            uint64_t memSig = 0, memSigFrame = 0;
+            bool memSigPending = false; // a writeback into it is still to land; fingerprint after the sync
             uint32_t edramBase = 0, edramPitch = 0;
             bool edramDepth = false;
             uint32_t edramFormat = 0; // xenos::ColorRenderTargetFormat, or xenos::DepthRenderTargetFormat for depth
@@ -1374,6 +1378,81 @@ void main()
             return &pd.img;
         }
 
+        // ---------------------------------------------------------------- stale resolve images
+
+        // A texture at a resolve destination samples the resolve image (render to texture). But the
+        // guest can free that memory and load something else there: in a match, the team-colored
+        // jersey font sheet is rendered to an address that the in-game Controls screen later loads
+        // its controller picture into, and the picture showed the font sheet (issue #63). So each
+        // resolve image keeps a fingerprint of its guest memory as of its last resolve (after its
+        // writeback lands, if one is pending), and a texture lookup that finds the memory changed
+        // since drops the image and reads the guest's data instead. The fingerprint is 256 bytes at
+        // the start of each of the first 16 pages, leaving out a last page another allocation may
+        // share: cheap, and any texture load over it changes it.
+        uint32_t formatBytes(VkFormat f);
+
+        bool memRange(const Image& img, uint32_t& start, uint32_t& end)
+        {
+            if (!img.guestPitch) return false;
+            uint32_t bpp = formatBytes(img.format);
+            uint32_t w = std::min(img.width / g_scale, img.guestPitch);
+            uint32_t h = img.guestHeight ? std::min(img.height / g_scale, img.guestHeight) : img.height / g_scale;
+            if (!bpp || !w || !h) return false;
+            start = img.guestBase;
+            uint64_t e = uint64_t(start) + tiledUpperBound2D(w, h, tiledBlocksAligned(img.guestPitch), bpp);
+            if (e > mem::kPhysicalSize) return false;
+            end = uint32_t(e);
+            return true;
+        }
+
+        uint64_t memSignature(uint32_t start, uint32_t end)
+        {
+            uint64_t h = 0x5EED;
+            uint32_t lastPage = (end - 1) & ~0xFFFu;
+            int pages = 0;
+            for (uint32_t p = start; p < end && pages < 16; p = (p & ~0xFFFu) + 0x1000, pages++)
+            {
+                if ((p & ~0xFFFu) == lastPage && pages > 0) break;
+                h = hashBytes(mem::physical(p), std::min<uint32_t>(256, end - p), h);
+            }
+            return h;
+        }
+
+        void retireResolved(std::map<uint32_t, Image>::iterator it)
+        {
+            g_retired.push_back(it->second);
+            if (auto st = g_stencilOf.find(it->second.image); st != g_stencilOf.end())
+            {
+                g_retired.push_back(st->second);
+                g_stencilOf.erase(st);
+            }
+            if (auto pd = g_packedDepth.find(it->second.image); pd != g_packedDepth.end())
+            {
+                g_retired.push_back(pd->second.img);
+                g_packedDepth.erase(pd);
+            }
+            g_depthGeneration.erase(it->second.image);
+            g_resolved.erase(it);
+        }
+
+        // The resolve image at `base`, or end() if there is none or the guest has rewritten its
+        // memory since (checked at most once per frame)
+        std::map<uint32_t, Image>::iterator findResolved(uint32_t base)
+        {
+            auto it = g_resolved.find(base);
+            if (it == g_resolved.end()) return it;
+            Image& img = it->second;
+            if (img.memSigPending || img.memSigFrame == g_frameSerial) return it;
+            img.memSigFrame = g_frameSerial;
+            uint32_t start, end;
+            if (!memRange(img, start, end) || memSignature(start, end) == img.memSig) return it;
+            static std::set<uint32_t> logged;
+            if (logged.insert(base).second)
+                info("[render] resolve %08X was overwritten by the guest since: sampling its memory instead", base);
+            retireResolved(it);
+            return g_resolved.end();
+        }
+
         std::map<std::pair<VkImage, uint32_t>, VkImageView> g_resolvedViews; // resolve images used as textures
 
         // Descriptor for texture fetch constant `slot` as a shader declaring dimension `dim`.
@@ -1397,7 +1476,7 @@ void main()
 
             // Render to texture: a 2D texture at a resolve destination samples the resolved image
             // directly when the formats are compatible (resolves are not written to guest memory yet)
-            auto resolved = g_resolved.find(base & 0x1FFFFFFF);
+            auto resolved = findResolved(base & 0x1FFFFFFF);
             if (!cube && format == 6 && resolved != g_resolved.end() && resolved->second.format == VK_FORMAT_R32_SFLOAT &&
                 width * g_scale <= resolved->second.width && height * g_scale <= resolved->second.height)
                 if (Image* packed = packedDepth(resolved->second))
@@ -1443,7 +1522,7 @@ void main()
                 Image* faces[6]{};
                 for (uint32_t f = 0; f < 6; f++)
                 {
-                    auto it = g_resolved.find((base + f * faceStride) & 0x1FFFFFFF);
+                    auto it = findResolved((base + f * faceStride) & 0x1FFFFFFF);
                     if (it == g_resolved.end() || it->second.format != VK_FORMAT_R8G8B8A8_UNORM || it->second.width < width * g_scale ||
                         it->second.height < height * g_scale)
                         break;
@@ -2071,19 +2150,7 @@ void main()
             auto it = g_resolved.find(destBase);
             if (it != g_resolved.end() && (it->second.width != dw * g_scale || it->second.height != dh * g_scale || it->second.format != format))
             {
-                g_retired.push_back(it->second);
-                if (auto st = g_stencilOf.find(it->second.image); st != g_stencilOf.end())
-                {
-                    g_retired.push_back(st->second);
-                    g_stencilOf.erase(st);
-                }
-                if (auto pd = g_packedDepth.find(it->second.image); pd != g_packedDepth.end())
-                {
-                    g_retired.push_back(pd->second.img);
-                    g_packedDepth.erase(pd);
-                }
-                g_depthGeneration.erase(it->second.image);
-                g_resolved.erase(it);
+                retireResolved(it);
                 it = g_resolved.end();
             }
             if (it == g_resolved.end())
@@ -2491,6 +2558,20 @@ void main()
             }
         }
 
+        // After a resolve into `img`: fingerprint its guest memory now, or after the sync if a
+        // writeback into it is still to land (see "stale resolve images")
+        void markResolved(Image& img)
+        {
+            uint32_t start, end;
+            if (!memRange(img, start, end)) return;
+            img.memSigPending = pendingOverlap(start, end);
+            if (!img.memSigPending)
+            {
+                img.memSig = memSignature(start, end);
+                img.memSigFrame = g_frameSerial;
+            }
+        }
+
         void resolve(const DrawState& s)
         {
             uint32_t control = readRegister(RB_COPY_CONTROL);
@@ -2522,6 +2603,7 @@ void main()
                                  { hostRect.offset.x + tile.x * int32_t(g_scale), hostRect.offset.y + tile.y * int32_t(g_scale) });
                     writeBack(dest, { { rect.offset.x + tile.x, rect.offset.y + tile.y }, rect.extent },
                               depth->edramFormat == 0 ? uint32_t(kWriteDepth24) : UINT32_MAX); // D24FS8: not yet
+                    markResolved(dest);
                 }
             }
             else if (color && command != 3 && destPitch && destHeight)
@@ -2553,6 +2635,7 @@ void main()
                 }
                 transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // resting layout (presenter, screenshots)
                 writeBack(dest, { { rect.offset.x + tile.x, rect.offset.y + tile.y }, rect.extent }, colorWritebackKind());
+                markResolved(dest);
             }
 
             // Clears after the copy, of the copied rectangle
@@ -2950,6 +3033,17 @@ void main()
             for (auto [start, end] : g_pendingWrites) std::memcpy(mem::physical(start), g_exportMap + start, end - start);
         g_pendingWrites.clear();
         g_writebackSyncs++;
+        for (auto& [base, img] : g_resolved) // their writebacks have landed: fingerprint them now
+            if (img.memSigPending)
+            {
+                uint32_t start, end;
+                img.memSigPending = false;
+                if (memRange(img, start, end))
+                {
+                    img.memSig = memSignature(start, end);
+                    img.memSigFrame = g_frameSerial;
+                }
+            }
     }
 
     void onShaderLoad(uint32_t type, const uint32_t* words, uint32_t dwords)
