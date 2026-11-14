@@ -103,7 +103,10 @@ Goal: every guest function translates to C++ that compiles.
 - `tools/function_bounds.py`: explicit bounds for leaf functions with switches (no `.pdata`
   entry) and functions reachable only through pointers (vtables, exception funclets, and vtable
   thunks packed back to back after a `bctr`, like `0x8243A4D8`, called when a play starts):
-  58 entries in `config/backbreaker.toml`.
+  58 entries in `config/backbreaker.toml`. Running it on the committed config with a mapping of a
+  build of that same config writes those 58 entries back unchanged (#29), so
+  `scripts/setup.sh --regenerate` leaves `config/` clean; an entry that stops being re-derivable
+  is reported rather than silently dropped.
 - Register save/restore helpers located by byte pattern (`config/backbreaker.toml`).
 - Result: 30,000+ functions -> 116 C++ files, 0 recompiler warnings, all compile with clang.
 - Tests: `tests/instr_semantics.cpp` checks the byte-order-sensitive vector ops and carry

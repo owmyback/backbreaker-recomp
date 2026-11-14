@@ -15,6 +15,11 @@ Usage: function_bounds.py default.pe switch_tables.toml config.toml [ppc_func_ma
 The optional mapping (from a previous XenonRecomp run) adds the analyzer's own function
 starts as boundaries. Rewrites the block between '# BEGIN leaf functions' and
 '# END leaf functions' in the config.
+
+The mapping is the output of a build of this very config, so it lists every function the
+block already declares. Those are subtracted from 'known' before the pointer scan, otherwise
+a regeneration hides its own starts from itself and the block shrinks on every run; the
+addresses already in the block are still boundaries all the same.
 """
 import bisect
 import re
@@ -68,6 +73,15 @@ def pointer_functions(pe, known, case_labels):
     return sorted(found)
 
 
+def block_functions(cfg):
+    """Functions the config's generated block already declares: address -> end address."""
+    m = re.search(r'# BEGIN leaf functions.*?# END leaf functions', cfg, re.S)
+    if not m:
+        return {}
+    return {int(a, 16): int(a, 16) + int(s, 16)
+            for a, s in re.findall(r'\{ address = 0x([0-9A-F]+), size = 0x([0-9A-F]+) \}', m.group(0))}
+
+
 def main(pe_path, switch_path, config_path, mapping_path=None):
     pe = fst.PE(pe_path)
     sw = open(switch_path).read()
@@ -77,12 +91,19 @@ def main(pe_path, switch_path, config_path, mapping_path=None):
         labels = [int(x, 16) for x in re.findall(r'^\s+0x([0-9A-F]+),', block, re.M)]
         tables.append((base, labels))
 
+    cfg = open(config_path).read()
+    current = block_functions(cfg)
+
     starts = [s for s, _ in pe.funcs]
     known = set(starts) | set(call_targets(pe))
     if mapping_path:
         # the previous run's functions, import thunks (__imp__) included
         known |= {int(a, 16) for a in re.findall(r'0x([0-9A-F]{8}), (?:sub|__imp__)', open(mapping_path).read())}
-    pointers = pointer_functions(pe, known, {l for _, labels in tables for l in labels})
+    # Subtracting `current` matters: the mapping contains those addresses because XenonRecomp
+    # compiled the block we are about to rewrite, and a pointer-only candidate that is 'known'
+    # is skipped. Everything else in the mapping stays known, which is what keeps the
+    # thousands of functions XenonAnalyse finds on its own out of the block.
+    pointers = pointer_functions(pe, known - set(current), {l for _, labels in tables for l in labels})
     calls = sorted(set(call_targets(pe)) | set(pointers))
     funcs = {}
     problems = []
@@ -120,11 +141,16 @@ def main(pe_path, switch_path, config_path, mapping_path=None):
     lines += [']', '# END leaf functions']
     block = '\n'.join(lines)
 
-    cfg = open(config_path).read()
     pat = re.compile(r'# BEGIN leaf functions.*?# END leaf functions', re.S)
     cfg = pat.sub(block, cfg) if pat.search(cfg) else cfg.rstrip() + '\n\n' + block + '\n'
     open(config_path, 'w').write(cfg)
     print(f'functions written: {len(funcs)} ({len(pointers)} pointer-only); switches that did not fit: {len(problems)}')
+    dropped = sorted(set(current) - set(funcs))
+    if dropped:
+        # The usual cause is the mapping: a function the block declares is in any mapping of a
+        # build of that block, and if it stops being re-derivable here it used to vanish quietly.
+        print(f'note: {len(dropped)} functions in the previous block are no longer candidates: '
+              + ', '.join(f'0x{a:X}' for a in dropped))
     for p in problems:
         print(f'   0x{p:X}')
 
