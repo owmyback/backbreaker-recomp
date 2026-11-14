@@ -1,6 +1,7 @@
 #pragma once
 // Kernel dispatcher objects (events, semaphores, threads) shared by the Nt* (handle)
-// and Ke* (guest pointer) imports.
+// and Ke* (guest pointer) imports. NetDll sockets (xnet.cpp) are registered here too, so they get
+// handles from the same table; they carry no dispatcher state and are never signaled.
 #include "kernel.h"
 
 #include <chrono>
@@ -14,7 +15,7 @@ namespace kernel
 {
     struct Object
     {
-        enum class Type { Event, Semaphore, Thread, Timer, Other };
+        enum class Type { Event, Semaphore, Thread, Timer, Socket, Other };
         Type type;
         uint32_t guest = 0; // guest DISPATCHER_HEADER address
         explicit Object(Type t) : type(t) {}

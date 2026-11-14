@@ -32,14 +32,16 @@ namespace
         case T::Event: case T::Timer: return static_cast<kernel::Event*>(o)->signaled;
         case T::Semaphore: return static_cast<kernel::Semaphore*>(o)->count > 0;
         case T::Thread: return static_cast<kernel::Thread*>(o)->exited;
+        // A socket never becomes signaled: offline, no data arrives and no connection completes.
+        case T::Socket: return false;
         default: return true;
         }
     }
 
     void syncGuestState(kernel::Object* o)
     {
-        if (!o->guest || o->type == kernel::Object::Type::Thread)
-            return;
+        if (!o->guest || o->type == kernel::Object::Type::Thread || o->type == kernel::Object::Type::Socket)
+            return; // sockets have no DISPATCHER_HEADER signal state to write back
         uint32_t state = o->type == kernel::Object::Type::Semaphore ? uint32_t(static_cast<kernel::Semaphore*>(o)->count)
                                                                     : uint32_t(static_cast<kernel::Event*>(o)->signaled);
         write32(o->guest + 4, state); // SignalState

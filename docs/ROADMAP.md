@@ -37,7 +37,8 @@ dark. Distant textures shimmer (no mip levels yet). The match runs at about 15 f
 
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
-side-select load hung); offline networking (XNet/WSA startup, DNS); a byte-offset jump table
+side-select load hung); offline networking (XNet/WSA startup, DNS, and sockets as kernel objects so
+the game's three socket uses get real handles instead of a stub returning 0); a byte-offset jump table
 whose bounds check is on a copy of the index register; vtable thunks packed after a `bctr`; a
 failed virtual reservation now returns `STATUS_NO_MEMORY` (the heap halves the request and
 retries) instead of aborting; `KeSetAffinityThread` (CPU number in the PCR); and
@@ -461,7 +462,8 @@ stored). Parts 1 and 2 can start earlier and are good separable issues.
 - `NtSuspendThread` only works before a thread starts; memory decommits are ignored.
 - Timer APC routines are not delivered.
 - XMA output is silence; XAudio frames are discarded.
-- Networking (`NetDll_*`), XAM content, achievements and guide UI are stubs.
+- Sockets exist but carry no data offline (`NetDll_*`: connect refused, recv would block, sends
+  dropped); XAM content, achievements and guide UI are stubs.
 - `WAIT_REG_MEM` in the command processor spins with `yield`.
 - The presenter falls back to the raw (tiled) front buffer when a swap was not rendered.
 - Renderer shortcuts: see phase 4 steps 5-8 and the remaining steps (EDRAM transfers only

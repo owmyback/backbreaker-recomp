@@ -164,8 +164,17 @@ Subsystems:
 - `runtime/kernel/xam.cpp` - notifications, local profile "Player", profile settings (empty values)
 - `runtime/kernel/xnet.cpp` - networking, offline: XNet/WSA startup succeeds, no Ethernet link,
   DNS lookups fail (the game looks up "localhost" when a match loads), `WSACreateEvent` returns a
-  real event (as Xenia's xam_net.cc). Sockets are not implemented yet: the game creates and binds
-  UDP/TCP sockets and copes with the default stub (returns 0), but crashes if `socket()` fails
+  real event (as Xenia's xam_net.cc). Sockets are kernel objects with handles from the same table,
+  so `socket`/`closesocket`/`setsockopt`/`ioctlsocket` (FIONBIO)/`bind`/`listen` succeed and keep the
+  state asked for, but nothing is ever connected or received: `connect` is refused, `select` reports
+  nothing ready after at most 100 ms, `recv`/`recvfrom`/`WSARecvFrom`/`accept` give WSAEWOULDBLOCK,
+  sends succeed and are dropped, and an unknown handle gives WSAENOTSOCK. No host socket is opened.
+  Offline is the only mode this has ever been run in. To try online, each socket object would carry
+  a host socket (family and type as asked for, addresses converted since the guest keeps them in
+  network order), and `select`/`recv`/`accept` would report real readiness instead of inventing a
+  timeout - which also means waking on the guest's signalling rules through `kernel::waitForObjects`
+  rather than sleeping. Even then a match could not be hosted or joined: the Xbox Live half (XNet
+  signing, XNADDR/XID mapping, QoS, the `XMsg*` requests) is still stubbed.
 - `runtime/kernel/scopes.cpp` - the game's compiled-out profiler markers carry function names;
   crash and timeout reports list each thread's recent scopes
 - `runtime/debug/guest_trace.cpp` - GUEST_TRACE(addr) wraps a guest function to log args/result
@@ -252,7 +261,8 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Physical memory is not aliased across 0xA0/0xC0/0xE0 ranges yet
 - Timer APC routines are not delivered
-- Networking, movies (XMV) and real audio output are stubs; XMA output is silence
+- Networking carries no data (socket objects exist, nothing is ever connected); movies (XMV) and
+  real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); EDRAM aliasing only transfers between targets of the same format; resolves are not written back to guest
