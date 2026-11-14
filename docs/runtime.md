@@ -52,6 +52,10 @@ their guest address, and the presenter shows the image resolved to the front buf
   3 = 3840x2160. The game still sees 1280x720; render targets, viewports, scissors, resolves and
   clears are scaled. (The attract movie itself is a 1280x720 video, so it only gets smoother
   scaling; 3D scenes are where the extra resolution shows.)
+- `--anisotropy N` (2-16) gives every texture the game minifies with linear filtering and mips at
+  least N:1 anisotropic filtering (16 is the usual choice). The game asks for it on only a few
+  textures, so the field blurs toward the horizon without it. UI textures (base level only) are
+  left alone. Needs the GPU's `samplerAnisotropy`, and the log says if it's missing.
 - `--no-render` turns the renderer off (command stream side effects only, as in phase 3).
 - Unsupported textures (1D/3D/cube and some formats, for now) show as magenta, and unsupported
   features log one `[render] WARNING` each.

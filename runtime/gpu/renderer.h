@@ -11,6 +11,10 @@ namespace gpu::render
     void requestScreenshot(uint64_t frame); // write screenshots/frame_<N>.png when swap N is rendered
     // Internal resolution multiplier, 1-4 (2 = 2560x1440, 3 = 3840x2160 for the game's 1280x720)
     void setResolutionScale(uint32_t scale);
+    // --anisotropy N (2-16): at least N:1 anisotropic filtering on textures the game minifies with
+    // linear filtering and mips (the ground at a shallow angle stays sharp). Default: what the
+    // texture fetch constant asks for (mostly none).
+    void setAnisotropy(uint32_t n);
 
     void onShaderLoad(uint32_t type, const uint32_t* bigEndianWords, uint32_t dwords);
     // indexBase / indexSizeWord: DRAW_INDX DMA index buffer (physical address, VGT_DMA_SIZE)

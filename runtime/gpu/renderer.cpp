@@ -58,6 +58,7 @@ namespace gpu::render
         // Internal resolution scale: render targets and everything drawn into them are this many
         // times larger than the guest's (the game still sees 1280x720)
         uint32_t g_scale = 1;
+        uint32_t g_forcedAniso = 0; // --anisotropy
         VkRect2D scaled(VkRect2D r)
         {
             return { { r.offset.x * int32_t(g_scale), r.offset.y * int32_t(g_scale) }, { r.extent.width * g_scale, r.extent.height * g_scale } };
@@ -1165,11 +1166,16 @@ void main() {
             si.minLod = mip == 2 ? 0.0f : float(mipMin);
             si.maxLod = mip == 2 ? 0.0f : float(std::max(mipMin, mipMax));
             si.mipLodBias = float(int32_t(lodBias << 22) >> 22) / 32.0f;
-            if (aniso >= 2 && aniso <= 5 && C->samplerAnisotropy)
+            float wanted = aniso >= 2 && aniso <= 5 ? float(1u << (aniso - 1)) : 1.0f;
+            if (wanted > 1.0f) si.minFilter = si.magFilter = VK_FILTER_LINEAR; // the game's anisotropic filtering is linear
+            // --anisotropy: at least that much where the texture is minified linearly through mips
+            // (not base-map textures: the UI)
+            if (g_forcedAniso > 1 && si.minFilter == VK_FILTER_LINEAR && mip != 2) wanted = std::max(wanted, float(g_forcedAniso));
+            if (g_forcedAniso > 1 && !C->samplerAnisotropy) warnOnce("--anisotropy ignored: the GPU has no samplerAnisotropy");
+            if (wanted > 1.0f && C->samplerAnisotropy)
             {
                 si.anisotropyEnable = VK_TRUE;
-                si.maxAnisotropy = std::min(float(1u << (aniso - 1)), C->props.limits.maxSamplerAnisotropy);
-                si.minFilter = si.magFilter = VK_FILTER_LINEAR; // anisotropic filtering is linear
+                si.maxAnisotropy = std::min(wanted, C->props.limits.maxSamplerAnisotropy);
             }
             si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
             VkSampler sm;
@@ -2766,6 +2772,7 @@ void main()
 
     void disable() { g_disabled = true; }
     void setResolutionScale(uint32_t scale) { g_scale = std::clamp(scale, 1u, 4u); }
+    void setAnisotropy(uint32_t n) { g_forcedAniso = std::clamp(n, 1u, 16u); }
     void requestScreenshot(uint64_t frame) { g_screenshots.insert(frame); }
 
     void syncGuestMemory()
