@@ -553,7 +553,14 @@ namespace gpu
     void wakeCommandProcessor() { g_wake.notify_one(); }
 }
 
-// MMIO stores from recompiled code (PPC_MM_STORE_U32)
+// MMIO stores from recompiled code (PPC_MM_STORE_U32).
+// XenonRecomp emits PPC_MM_STORE_U32 for *any* store followed by `eieio`, but D3D also puts
+// `eieio` after ordinary writes: while an Exhibition match loads, its command-list code links
+// nodes in physical memory that way (the 0xA0../0xC0../0xE0.. views), and every one of those
+// stores used to be reported as an unhandled device register (issue #25). Only
+// 0x7F000000-0x7FFFFFFF (mem::kDeviceBase..kDeviceEnd) holds device registers - the GPU file at
+// 0x7FC80000 and the XMA block at 0x7FEA0000 below are inside it - so anything outside is
+// stored as normal memory, without a word about it.
 void GuestMmioStore32(uint8_t* base, uint32_t address, uint32_t value)
 {
     if (address >= mem::kGpuMmioBase && address < mem::kGpuMmioBase + 0x10000)
@@ -570,7 +577,9 @@ void GuestMmioStore32(uint8_t* base, uint32_t address, uint32_t value)
         apu::mmioStore((address - 0x7FEA0000) / 4, __builtin_bswap32(value));
         return;
     }
+    if (address >= mem::kDeviceBase && address < mem::kDeviceEnd)
     {
+        // A device-register store that no device claims: worth reporting, once per address.
         static std::mutex lk;
         static std::map<uint32_t, int> seen;
         std::lock_guard g(lk);

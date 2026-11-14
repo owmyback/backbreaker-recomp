@@ -11,6 +11,9 @@ namespace mem
     constexpr uint32_t kVirtualEnd       = 0x7F000000;
     constexpr uint32_t kKernelBase       = 0x7F000000; // kernel objects owned by the runtime
     constexpr uint32_t kKernelEnd        = 0x7FC00000;
+    constexpr uint32_t kDeviceBase       = 0x7F000000; // device register windows begin here (GPU 0x7FC80000, XMA 0x7FEA0000)
+    constexpr uint32_t kDeviceEnd        = 0x80000000; // ... and end here; a store outside it is plain RAM, not MMIO
+    // (the runtime's own kernel objects, kKernelBase-kKernelEnd, sit in the same range)
     constexpr uint32_t kGpuMmioBase      = 0x7FC80000; // GPU register file (CPU-visible MMIO window)
     constexpr uint32_t kPhysicalBase     = 0xA0000000; // MmAllocatePhysicalMemoryEx
     constexpr uint32_t kPhysicalEnd      = 0xC0000000;

@@ -147,6 +147,10 @@ Subsystems:
   and fullscreen state are read from `game/settings.ini` (issue #9)
 - `runtime/gpu/` - Vd* imports, PM4 command processor, register file at 0x7FC80000, 60 Hz vblank
   interrupt; MMIO stores reach it through `runtime/ppc_hooks.h` (force-included into ppc/).
+  `GuestMmioStore32` only warns about a store no device handles inside the device window
+  0x7F000000-0x7FFFFFFF (`mem::kDeviceBase`/`kDeviceEnd`): XenonRecomp turns every store followed
+  by `eieio` into `PPC_MM_STORE_U32`, and D3D also uses `eieio` after plain writes to physical
+  memory, so those are stored as normal memory with no warning (issue #25).
   Predicated tiling is honored: `SET_BIN_MASK`/`SET_BIN_SELECT` (and their `_LO`/`_HI` halves)
   set 64-bit masks, and a packet with the predicate bit (header bit 0) is skipped unless
   `select & mask` is non-zero, as in Xenia. D3D's replayed command buffers depend on it: without
