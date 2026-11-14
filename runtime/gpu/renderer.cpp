@@ -2,8 +2,9 @@
 // - EDRAM: one Vulkan image per (base tile, pitch, samples, format). Tiles written through one
 //   image and then used through another are copied over by a transfer shader, through the raw EDRAM
 //   bits when the two formats differ (depth <-> color, 32 <-> 64 bits per sample).
-// - Resolves stay on the GPU: the destination is a Vulkan image keyed by its guest address
-//   (nothing is written back to guest memory yet). The copy rectangle is the window scissor.
+// - Resolves: the destination is a Vulkan image keyed by its guest address, which textures at
+//   that address sample directly; the result is also written to guest memory for the CPU (see
+//   "resolve writeback"). The copy rectangle is the window scissor.
 // - Guest data is snapshotted at draw time into a per-frame upload buffer: vertex data (the
 //   vertex fetch constants are rewritten to point into it), constants, indices, textures.
 // - Textures: 2D linear and tiled (runtime/gpu/tiling.h) 8, 8_8, 1_5_5_5, 5_6_5, 4_4_4_4,
@@ -212,6 +213,9 @@ void main() {
             bool edram = false, edramWide = false; // wide: 64 bits per sample
             bool swapRB = false;                    // resolve destinations: red/blue swapped in memory (RB_COPY_DEST_INFO)
             uint32_t resolvePitch = 0;              // resolve destinations: guest pitch (RB_COPY_DEST_PITCH)
+            // Resolve destinations: where pixel (0, 0) lives in guest memory, and the pitch and height
+            // RB_COPY_DEST_PITCH gave it (the bounds of the writeback to guest memory)
+            uint32_t guestBase = 0, guestPitch = 0, guestHeight = 0;
             uint32_t edramBase = 0, edramPitch = 0;
             bool edramDepth = false;
             uint32_t edramFormat = 0; // xenos::ColorRenderTargetFormat, or xenos::DepthRenderTargetFormat for depth
@@ -1848,7 +1852,7 @@ void main() {
 
         // Destination image for a resolve to `destBase`: replaced when the size or format changes
         // (the old one is retired, the presenter may still show it)
-        Image& resolveDestination(uint32_t destBase, uint32_t dw, uint32_t dh, VkFormat format)
+        Image& resolveDestination(uint32_t destBase, uint32_t destPitch, uint32_t destHeight, uint32_t dw, uint32_t dh, VkFormat format)
         {
             auto it = g_resolved.find(destBase);
             if (it != g_resolved.end() && (it->second.width != dw * g_scale || it->second.height != dh * g_scale || it->second.format != format))
@@ -1865,6 +1869,9 @@ void main() {
                 info("[render] resolve destination %08X: %ux%u%s", destBase, dw, dh, format == VK_FORMAT_R32_SFLOAT ? " (depth)" : "");
             }
             it->second.resolvePitch = std::max(it->second.resolvePitch, dw);
+            it->second.guestBase = destBase;
+            it->second.guestPitch = destPitch;
+            it->second.guestHeight = destHeight;
             return it->second;
         }
 
@@ -1987,6 +1994,254 @@ void main() {
             transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // resting layout, as color resolves
         }
 
+        // ---------------------------------------------------------------- resolve writeback
+
+        // Resolves are also written to guest memory (issue #45), because the CPU reads some of them:
+        // the game's "Stadium texture generator" thread renders the field lightmap, resolves it
+        // and compresses the result to DXT1 on the CPU, so a resolve that stays on the GPU gives a
+        // black field. A compute shader writes the resolved pixels into the imported guest memory
+        // buffer (the one memory export uses), tiled as runtime/gpu/tiling.h and packed as
+        // RB_COPY_DEST_INFO says: format, endian, red/blue swap, exponent bias. That is the inverse
+        // of the texture upload, so a texture read from memory sees what the resolve image holds.
+        // The GPU writes land when the frame's commands run; syncGuestMemory() (called by the command
+        // processor before the CPU can see its progress) waits for them.
+        // Where guest memory can't be imported (RADV fails the import with
+        // VK_ERROR_INVALID_EXTERNAL_HANDLE, probably because the physical views are a shared memfd
+        // mapping), the buffer is memory export's 512 MB staging copy: the destination range
+        // is copied into it when the resolve is recorded and back out at the sync. A writeback that
+        // overlaps one still pending syncs first, so the copy-in can't undo the earlier one.
+        // Formats: 8_8_8_8 and 2_10_10_10 color, D24S8 depth (stencil not kept: written as 0).
+        // Others are left on the GPU, as before, with a warning.
+        // Cost: every writeback means a sync (a GPU drain) at the next fence. A match frame resolves
+        // about 34 times, and writing all of them back took live play from 26.6 to 22.2 fps. Those
+        // are the scene, shadow maps, bloom and front buffer, resolved every frame and sampled by
+        // the GPU. So a destination resolved in each of the last kGpuOnlyAfterFrames frames is
+        // treated as GPU-only: its writebacks stop until it misses a frame (logged once per address).
+        // The CPU-read resolves seen so far come from load-time texture generators, a few frames each.
+        // A CPU read of a resolve made every frame would need lazy writeback (write-protect the
+        // destination, write it back on the first CPU access) instead.
+        constexpr char kWritebackCs[] = R"(#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, std430) buffer Guest { uint words[]; } guest;
+layout(push_constant) uniform Params
+{
+    uint base;    // guest physical address of pixel (0, 0)
+    uint pitch;   // tiled pitch in pixels, 32-aligned
+    ivec2 origin; // first pixel written (guest pixels)
+    uvec2 size;
+    uint scale;   // host pixels per guest pixel (--resolution-scale)
+    uint flags;   // bits 0-1 endian, bit 2 red/blue swap, bits 4-5 kind: 0 8_8_8_8, 1 2_10_10_10, 2 D24S8 depth
+    float bias;   // 2^copy_dest_exp_bias
+} pc;
+
+// tiledOffset2D (runtime/gpu/tiling.h) for 4 bytes per block
+uint tiledOffset(uint x, uint y, uint pitch)
+{
+    uint outerBlocks = ((y >> 5) * (pitch >> 5) + (x >> 5)) << 6;
+    uint innerBlocks = (((y >> 1) & 7u) << 3) | (x & 7u);
+    uint oi = (outerBlocks | innerBlocks) << 2;
+    uint bank = (y >> 4) & 1u;
+    uint pipe = ((x >> 3) & 3u) ^ (((y >> 3) & 1u) << 1);
+    return ((y & 1u) << 4) | (oi & 15u) | (((oi >> 4) & 1u) << 5) | (((oi >> 5) & 7u) << 8) | (bank << 11) | (pipe << 6) |
+           ((oi >> 8) << 12);
+}
+
+uint swapEndian(uint v, uint mode)
+{
+    if (mode == 1u) return ((v >> 8) & 0x00FF00FFu) | ((v << 8) & 0xFF00FF00u);
+    if (mode == 2u) return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
+    if (mode == 3u) return (v >> 16) | (v << 16);
+    return v;
+}
+
+void main()
+{
+    uvec2 g = gl_GlobalInvocationID.xy;
+    if (g.x >= pc.size.x || g.y >= pc.size.y) return;
+    uvec2 p = uvec2(pc.origin) + g;
+    vec4 c = texelFetch(src, ivec2(p * pc.scale), 0);
+    uint kind = (pc.flags >> 4) & 3u, word;
+    if (kind == 2u)
+        word = uint(clamp(c.r, 0.0, 1.0) * 16777215.0 + 0.5) << 8;
+    else
+    {
+        c = clamp(c * pc.bias, 0.0, 1.0);
+        if ((pc.flags & 4u) != 0u) c = c.bgra;
+        if (kind == 1u)
+        {
+            uvec4 u = uvec4(round(c * vec4(1023.0, 1023.0, 1023.0, 3.0)));
+            word = u.r | (u.g << 10) | (u.b << 20) | (u.a << 30);
+        }
+        else
+            word = packUnorm4x8(c);
+    }
+    guest.words[(pc.base + tiledOffset(p.x, p.y, pc.pitch)) >> 2] = swapEndian(word, pc.flags & 3u);
+}
+)";
+        constexpr uint32_t RB_COPY_DEST_INFO = 0x231B;
+        enum WritebackKind : uint32_t { kWrite8888 = 0, kWrite2101010 = 1, kWriteDepth24 = 2 };
+        VkDescriptorSetLayout g_writebackSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout g_writebackLayout = VK_NULL_HANDLE;
+        VkPipeline g_writebackPipeline = VK_NULL_HANDLE;
+        VkSampler g_writebackSampler = VK_NULL_HANDLE;
+        bool g_writebackFailed = false;
+        // Guest physical ranges [start, end) written by writebacks recorded since the last sync
+        std::vector<std::pair<uint32_t, uint32_t>> g_pendingWrites;
+        uint64_t g_writebacks = 0, g_writebackSyncs = 0, g_writebacksSkipped = 0; // for the stats line
+        constexpr uint32_t kGpuOnlyAfterFrames = 60;
+        struct Recurrence { uint64_t lastFrame = 0; uint32_t run = 0; }; // frames in a row with a resolve there
+        std::unordered_map<uint32_t, Recurrence> g_recurrence;            // by destination base
+
+        // Count this frame's resolve to `base`; true once it has been resolved every frame for a while
+        bool gpuOnly(uint32_t base)
+        {
+            Recurrence& r = g_recurrence[base];
+            if (r.lastFrame != g_frameSerial)
+            {
+                r.run = r.lastFrame + 1 == g_frameSerial ? r.run + 1 : 1;
+                r.lastFrame = g_frameSerial;
+            }
+            if (r.run <= kGpuOnlyAfterFrames) return false;
+            static std::set<uint32_t> logged;
+            if (logged.insert(base).second)
+                info("[render] resolve writeback: %08X is resolved every frame - kept on the GPU while that lasts", base);
+            return true;
+        }
+
+        bool pendingOverlap(uint32_t start, uint32_t end)
+        {
+            for (auto [s, e] : g_pendingWrites)
+                if (start < e && s < end) return true;
+            return false;
+        }
+
+        bool writebackPipeline()
+        {
+            if (g_writebackPipeline) return true;
+            if (g_writebackFailed) return false;
+            VkDescriptorSetLayoutBinding b[2] = {
+                { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr } };
+            VkDescriptorSetLayoutCreateInfo dl{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+            dl.bindingCount = 2;
+            dl.pBindings = b;
+            VK_CHECK(vkCreateDescriptorSetLayout(D, &dl, nullptr, &g_writebackSetLayout));
+            VkPushConstantRange pcr{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 36 };
+            VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            pli.setLayoutCount = 1;
+            pli.pSetLayouts = &g_writebackSetLayout;
+            pli.pushConstantRangeCount = 1;
+            pli.pPushConstantRanges = &pcr;
+            VK_CHECK(vkCreatePipelineLayout(D, &pli, nullptr, &g_writebackLayout));
+            std::string error;
+            VkShaderModule cs = compile(kWritebackCs, shaderc_compute_shader, "resolve_writeback.comp", error);
+            if (!cs)
+            {
+                warn("[render] resolve writeback shader: %s", error.c_str());
+                g_writebackFailed = true;
+                return false;
+            }
+            VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+            ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs, "main", nullptr };
+            ci.layout = g_writebackLayout;
+            VK_CHECK(vkCreateComputePipelines(D, VK_NULL_HANDLE, 1, &ci, nullptr, &g_writebackPipeline));
+            vkDestroyShaderModule(D, cs, nullptr);
+            VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+            VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_writebackSampler));
+            info("[render] resolves are written back to guest memory");
+            return true;
+        }
+
+        // Write `r` (guest pixels, in the resolve image's own coordinates) of resolve image `img` to
+        // guest memory at img.guestBase. `kind` is a WritebackKind, or anything else to skip.
+        void writeBack(Image& img, VkRect2D r, uint32_t kind)
+        {
+            if (!g_memExportReady)
+            {
+                warnOnce("resolves stay on the GPU: no guest memory buffer");
+                return;
+            }
+            uint32_t destInfo = readRegister(RB_COPY_DEST_INFO), endian = destInfo & 7;
+            if (kind > kWriteDepth24 || endian > 3)
+            {
+                warnOnce("resolve to format " + std::to_string((destInfo >> 7) & 0x3F) + ", endian " + std::to_string(endian) +
+                         " is not written to guest memory yet");
+                return;
+            }
+            // Only inside the destination the game described (the image can be larger)
+            uint32_t x1 = std::min(uint32_t(r.offset.x) + r.extent.width, img.guestPitch);
+            uint32_t y1 = std::min(uint32_t(r.offset.y) + r.extent.height, img.guestHeight);
+            if (x1 <= uint32_t(r.offset.x) || y1 <= uint32_t(r.offset.y) || !writebackPipeline()) return;
+            if (gpuOnly(img.guestBase))
+            {
+                g_writebacksSkipped++;
+                return;
+            }
+            uint32_t pitch = tiledBlocksAligned(img.guestPitch);
+            uint64_t end = uint64_t(img.guestBase) + tiledUpperBound2D(x1, y1, pitch, 4);
+            if (end > mem::kPhysicalSize)
+            {
+                warnOnce("resolve destination extends past physical memory: not written back");
+                return;
+            }
+            if (g_exportMap)
+            {
+                if (pendingOverlap(img.guestBase, uint32_t(end))) syncGuestMemory();
+                std::memcpy(g_exportMap + img.guestBase, mem::physical(img.guestBase), end - img.guestBase);
+            }
+            endPass();
+            VkCommandBuffer c = cmd();
+            VkImageLayout was = img.layout;
+            transition(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_writebackPipeline);
+            VkDescriptorImageInfo ii{ g_writebackSampler, img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkDescriptorBufferInfo bi{ g_guestMem, 0, mem::kPhysicalSize };
+            VkWriteDescriptorSet w[2]{};
+            for (int i = 0; i < 2; i++)
+            {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+            }
+            w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w[0].pImageInfo = &ii;
+            w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w[1].pBufferInfo = &bi;
+            C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_writebackLayout, 0, 2, w);
+            struct
+            {
+                uint32_t base, pitch;
+                int32_t ox, oy;
+                uint32_t w, h, scale, flags;
+                float bias;
+            } pc{ img.guestBase, pitch, r.offset.x, r.offset.y, x1 - r.offset.x, y1 - r.offset.y, g_scale,
+                  endian | (((destInfo >> 24) & 1) << 2) | (kind << 4),
+                  std::ldexp(1.0f, int32_t((destInfo >> 16) & 0x3F) << 26 >> 26) };
+            vkCmdPushConstants(c, g_writebackLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(c, (pc.w + 7) / 8, (pc.h + 7) / 8, 1);
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
+                                 &mb, 0, nullptr, 0, nullptr);
+            transition(c, img, was == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : was);
+            g_pendingWrites.push_back({ img.guestBase, uint32_t(end) });
+            g_writebacks++;
+        }
+
+        // The writeback kind for a color resolve: by the destination format (RB_COPY_DEST_INFO)
+        uint32_t colorWritebackKind()
+        {
+            switch ((readRegister(RB_COPY_DEST_INFO) >> 7) & 0x3F)
+            {
+            case 6: return kWrite8888;    // k_8_8_8_8
+            case 7: return kWrite2101010; // k_2_10_10_10
+            default: return UINT32_MAX;
+            }
+        }
+
         void resolve(const DrawState& s)
         {
             uint32_t control = readRegister(RB_COPY_CONTROL);
@@ -2013,9 +2268,11 @@ void main() {
                     syncTarget(depth, rect); // EDRAM aliasing: latest contents of these tiles
                     VkOffset2D tile{};
                     Image* into = resolveInto(destBase, destPitch, VK_FORMAT_R32_SFLOAT, rect.extent, tile);
-                    Image& dest = into ? *into : resolveDestination(destBase, dw, dh, VK_FORMAT_R32_SFLOAT);
+                    Image& dest = into ? *into : resolveDestination(destBase, destPitch, destHeight, dw, dh, VK_FORMAT_R32_SFLOAT);
                     resolveDepth(*depth, hostRect, dest,
                                  { hostRect.offset.x + tile.x * int32_t(g_scale), hostRect.offset.y + tile.y * int32_t(g_scale) });
+                    writeBack(dest, { { rect.offset.x + tile.x, rect.offset.y + tile.y }, rect.extent },
+                              depth->edramFormat == 0 ? uint32_t(kWriteDepth24) : UINT32_MAX); // D24FS8: not yet
                 }
             }
             else if (color && command != 3 && destPitch && destHeight)
@@ -2025,7 +2282,7 @@ void main() {
                 // tile of it belongs to (predicated tiling)
                 VkOffset2D tile{};
                 Image* into = resolveInto(destBase, destPitch, color->format, rect.extent, tile);
-                Image& dest = into ? *into : resolveDestination(destBase, dw, dh, color->format);
+                Image& dest = into ? *into : resolveDestination(destBase, destPitch, destHeight, dw, dh, color->format);
                 dest.swapRB = (readRegister(0x231B) >> 24) & 1; // RB_COPY_DEST_INFO copy_dest_swap
                 endPass();
                 VkCommandBuffer c = cmd();
@@ -2046,6 +2303,7 @@ void main() {
                     vkCmdCopyImage(c, color->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dest.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
                 }
                 transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // resting layout (presenter, screenshots)
+                writeBack(dest, { { rect.offset.x + tile.x, rect.offset.y + tile.y }, rect.extent }, colorWritebackKind());
             }
 
             // Clears after the copy, of the copied rectangle
@@ -2215,6 +2473,11 @@ void main() {
                         info("[render] memory export stream c%u: base %08X, %u elements, format %u (number format %u, endian %u%s)", c,
                              (x & 0x3FFFFFFF) << 2, w & 0x7FFFFF, (z >> 8) & 0x3F, (z >> 16) & 7, z & 7, (z >> 19) & 1 ? ", red/blue swap" : "");
                 }
+            // The staging copy-in below would undo a resolve writeback still pending in these ranges
+            // (run, but not copied out yet): sync it first, before this draw records anything
+            if (g_exportMap)
+                for (auto [start, bytes] : exportRanges)
+                    if (pendingOverlap(start, start + bytes)) syncGuestMemory();
 
             // Snapshot guest data into the upload buffer: constants, vertex data, indices
             Frame& f = frame();
@@ -2418,6 +2681,18 @@ void main() {
     void setResolutionScale(uint32_t scale) { g_scale = std::clamp(scale, 1u, 4u); }
     void requestScreenshot(uint64_t frame) { g_screenshots.insert(frame); }
 
+    void syncGuestMemory()
+    {
+        if (g_pendingWrites.empty()) return;
+        flushAndWait(); // the frame being recorded
+        for (Frame& f : g_frames) // and frames submitted at swaps, still running
+            if (f.submitted) VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
+        if (g_exportMap) // staging copy of guest memory: copy the written ranges out
+            for (auto [start, end] : g_pendingWrites) std::memcpy(mem::physical(start), g_exportMap + start, end - start);
+        g_pendingWrites.clear();
+        g_writebackSyncs++;
+    }
+
     void onShaderLoad(uint32_t type, const uint32_t* words, uint32_t dwords)
     {
         if (g_disabled || type > 1) return;
@@ -2487,5 +2762,8 @@ void main() {
         }
         g_frameSerial++;
         g_drawsInFrame = 0;
+        if (frameNumber % 300 == 0 && g_writebacks)
+            info("[render] resolve writeback: %llu resolves written to guest memory, %llu kept on the GPU, %llu syncs so far",
+                 (unsigned long long)g_writebacks, (unsigned long long)g_writebacksSkipped, (unsigned long long)g_writebackSyncs);
     }
 }

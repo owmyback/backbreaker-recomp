@@ -16,4 +16,8 @@ namespace gpu::render
     // indexBase / indexSizeWord: DRAW_INDX DMA index buffer (physical address, VGT_DMA_SIZE)
     void onDraw(uint32_t initiator, uint32_t indexBase, uint32_t indexSizeWord);
     void onSwap(uint32_t frontBuffer, uint32_t width, uint32_t height, uint64_t frameNumber);
+    // Resolves are written to guest memory by the GPU, when the recorded commands run. Before the
+    // command processor lets the CPU see its progress (a fence or other memory write, an
+    // interrupt, the read pointer), this waits until the writebacks recorded so far have landed.
+    void syncGuestMemory();
 }

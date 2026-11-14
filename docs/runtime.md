@@ -33,6 +33,17 @@ enable the Vulkan validation layer (needs it installed; Fedora: `vulkan-validati
 window, `runtime/video/vk_context.cpp`): shaders are translated (see below) and compiled with
 shaderc on first use, EDRAM render targets are Vulkan images, resolves copy into images keyed by
 their guest address, and the presenter shows the image resolved to the front buffer.
+- Resolves are also written to guest memory (#45), tiled and in the destination's format, by a
+  compute shader. The CPU reads some of them: the game's "Stadium texture generator" thread
+  renders the field lightmap and compresses the resolved picture to DXT1 itself, so without this
+  the grass is black. The command processor waits for these writes before anything the CPU can
+  see (fences, interrupts, the read pointer). Formats written: 8_8_8_8, 2_10_10_10 and D24S8
+  depth. Others (the log says which, once each) stay on the GPU. Where guest memory can't be
+  imported as a Vulkan buffer (it fails on RADV), the writes go through memory export's staging
+  buffer and are copied out. Each write costs a GPU sync, so a destination resolved in each of the
+  last 60 frames (scene, shadow maps, bloom, front buffer) stays on the GPU for as long as it keeps
+  being resolved every frame. The log names each one (`resolve writeback: <address> is resolved
+  every frame`).
 - `--screenshot N[,N...]` writes `screenshots/frame_N.png` (the front buffer of swap N; works
   headless). `screenshots/` is gitignored - pictures of the game are not committed. F12 in the
   window writes the same kind of PNG from the swapchain image instead, i.e. what the window showed
@@ -259,15 +270,15 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 ## Known shortcuts
 - Kernel objects (KTHREAD, PCR, TLS slots, events) are never freed; only a thread's stack is
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
-- Physical memory is not aliased across 0xA0/0xC0/0xE0 ranges yet
 - Timer APC routines are not delivered
 - Networking carries no data (socket objects exist, nothing is ever connected); movies (XMV) and
   real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
-  first load); resolves are not written back to guest
-  memory and take their rectangle from the window scissor; a resolve's own format conversion is
-  skipped (textures sample the resolve image in the render target's format); 1D/3D textures and
+  first load); resolves take their rectangle from the window scissor; resolves to formats other
+  than 8_8_8_8, 2_10_10_10 and D24S8 depth are not written back to guest memory (depth stencil is
+  written as 0), nor are destinations resolved every frame; a resolve's own format conversion is skipped on the GPU side (textures sample the resolve
+  image in the render target's format); 1D/3D textures and
   some formats are placeholders; signed texture formats are read unsigned; textures are
   re-uploaded once per frame they are used (no write-watching); only the base mip level; depth is
   32-bit float instead of 24-bit

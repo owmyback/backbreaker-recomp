@@ -199,6 +199,7 @@ namespace gpu
                 uint32_t info = r.next(), pollAddr = r.next(), ref = r.next(), mask = r.next();
                 uint32_t writeAddr = r.next(), data = r.next();
                 r.skip(count - 6);
+                render::syncGuestMemory();
                 uint32_t value = (info & 0x10) ? loadGpu(pollAddr) : readRegister(pollAddr & 0x7FFF);
                 if (compare(info, value & mask, ref))
                 {
@@ -221,12 +222,14 @@ namespace gpu
             {
                 uint32_t regIndex = r.next(), addr = r.next();
                 r.skip(count - 2);
+                render::syncGuestMemory();
                 storeGpu(addr, readRegister(regIndex & 0x7FFF));
                 return;
             }
             case PM4_MEM_WRITE:
             {
                 uint32_t addr = r.next();
+                render::syncGuestMemory();
                 for (uint32_t i = 0; i < count - 1; i++)
                     storeGpu((addr & ~3u) + i * 4 | (addr & 3), r.next());
                 return;
@@ -235,6 +238,7 @@ namespace gpu
             {
                 uint32_t initiator = r.next(), addr = r.next(), value = r.next();
                 r.skip(count - 3);
+                render::syncGuestMemory();
                 writeRegister(reg::VGT_EVENT_INITIATOR, initiator & 0x3F);
                 storeGpu(addr, (initiator >> 31) ? uint32_t(g_counter) : value);
                 return;
@@ -243,6 +247,7 @@ namespace gpu
             {
                 uint32_t initiator = r.next(), addr = r.next();
                 r.skip(count - 2);
+                render::syncGuestMemory();
                 writeRegister(reg::VGT_EVENT_INITIATOR, initiator & 0x3F);
                 // Screen extents (min/max x, y, z) as u16s: report "everything"
                 uint16_t ext[6] = { 0, 0x2000 >> 3, 0, 0x2000 >> 3, 0, 1 };
@@ -261,6 +266,7 @@ namespace gpu
             {
                 uint32_t cpuMask = r.next();
                 r.skip(count - 1);
+                render::syncGuestMemory();
                 for (uint32_t cpu = 0; cpu < 6; cpu++)
                     if (cpuMask & (1u << cpu))
                         dispatchInterrupt(1, cpu);
@@ -387,6 +393,12 @@ namespace gpu
             }
         }
 
+        // Scratch registers are mirrored to memory: D3D's fences
+        bool touchesScratch(uint32_t index, uint32_t count)
+        {
+            return index < reg::SCRATCH_REG0 + 8 && index + count > reg::SCRATCH_REG0;
+        }
+
         void execute(Reader& r, uint32_t endPos)
         {
             while (r.pos != endPos)
@@ -399,6 +411,7 @@ namespace gpu
                     uint32_t count = ((header >> 16) & 0x3FFF) + 1;
                     uint32_t index = header & 0x7FFF;
                     bool oneReg = header & 0x8000;
+                    if (touchesScratch(index, oneReg ? 1 : count)) render::syncGuestMemory(); // D3D fences
                     for (uint32_t i = 0; i < count; i++)
                         writeRegister(oneReg ? index : index + i, r.next());
                     break;
@@ -406,6 +419,7 @@ namespace gpu
                 case 1: // two registers
                 {
                     uint32_t r0 = header & 0x7FF, r1 = (header >> 11) & 0x7FF;
+                    if (touchesScratch(r0, 1) || touchesScratch(r1, 1)) render::syncGuestMemory();
                     writeRegister(r0, r.next());
                     writeRegister(r1, r.next());
                     break;
@@ -437,6 +451,7 @@ namespace gpu
                     continue;
                 Reader ring{ g_ringBase, g_ringDwords, g_rptr, true };
                 execute(ring, wptr);
+                render::syncGuestMemory(); // a CPU waiting for the GPU to go idle polls the read pointer
                 g_rptr = wptr;
                 *regPtr(reg::CP_RB_RPTR) = __builtin_bswap32(g_rptr);
                 if (g_rptrWriteback)

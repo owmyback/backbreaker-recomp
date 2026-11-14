@@ -10,10 +10,10 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9, validation clean #11 and the
+Last updated: 2026-11-14 (#3 closed; phase 4: window polish #9, validation clean #11 and the
 screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff;
 EDRAM transfers between formats #36: the match's tile blocks are gone; clear rectangles bounded by
-their vertices #37)
+their vertices #37; resolves written back to guest memory #45: the grass renders)
 
 ## Current state
 
@@ -31,9 +31,12 @@ screen (stadium, crowd, players, replays, the video board), with the artifacts i
 below. Kicking works with the right stick pulled back and then pushed forward (a plain release
 is not seen at the current frame rate, see phase 9). Audio is still silence.
 
-**Current blocker (2026-11-13):** the field is black - the grass does not show (until #36 it was
-covered by stale EDRAM tiles, the white and striped blocks). Distant textures shimmer (no mip
-levels yet). Live play runs at about 23 fps headless.
+**Current state of the picture (2026-11-14):** the field renders (grass, yard lines, end-zone
+logo, player shadows) since resolves are written back to guest memory (#45). Before that it was
+black: the game generates the field's texture on the GPU and compresses it on the CPU. Distant
+textures shimmer (no mip levels yet, #46) and replays show a fine grid pattern (#44). Live play
+runs at about 27 fps headless (26.9 in the last 60 s of the route, with the local agent's model
+unloaded).
 
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
@@ -54,7 +57,7 @@ caches) until the heap ran out a minute into the match.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-12 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-13 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -383,11 +386,43 @@ Transfer count is slightly up (~175 -> ~205), because ownership moves in smaller
 is back to 23.2 fps (23.3 before #36, 21.7 with it; headless, last 60 s of the route). Screenshots
 are unchanged and validation is unchanged.
 
+**Step 13 - Resolves written back to guest memory (#45).** The match's field was black. The grass
+shader multiplies by a 512x1024 DXT1 texture (`05DC5000`) whose blocks were all DXT1's
+transparent-black encoding. That texture is not in the game's pack. At boot, the game's "Stadium
+texture generator" thread renders it (the pack has a `bb_fieldlightmap` shader), resolves it to
+`08B14000` and compresses the resolved pixels to DXT1 on the CPU. Our resolves stayed on the GPU,
+so the CPU compressed zeros. Now:
+- A compute shader also writes each resolve into guest memory: tiled (`tiling.h`'s
+  `tiledOffset2D`, ported to GLSL) and packed as `RB_COPY_DEST_INFO` says (format, endian,
+  red/blue swap, exponent bias). It's the inverse of the texture upload. Formats: 8_8_8_8,
+  2_10_10_10 and D24S8 depth (stencil written as 0). The route also resolves to 1_5_5_5, 16_16,
+  16_16_16_16_FLOAT, 32_FLOAT and 32_32_FLOAT, and those stay on the GPU (logged once each).
+- It writes through the buffer memory export uses. RADV can't import guest memory, so that's the
+  512 MB staging copy: the destination range is copied in when the resolve is recorded and out at
+  the sync. A writeback overlapping one still pending syncs first.
+- The command processor calls `render::syncGuestMemory()` before each point where the CPU can see
+  GPU progress: scratch-register fences, `EVENT_WRITE_SHD`/`EXT`, `MEM_WRITE`, `REG_TO_MEM`,
+  `COND_WRITE`, `INTERRUPT`, and the read-pointer update after it drains the ring. If writebacks
+  are pending, it submits, waits for the GPU and copies them out.
+- Writing back every resolve took live play from 26.6 to 22.2 fps: about 34 resolves and 16 syncs
+  per match frame. Those are the scene, shadow maps, bloom and front buffer, resolved every frame
+  and sampled by the GPU. A destination resolved in each of the last 60 frames now stays on the GPU
+  while that lasts (logged once per address). With that, live play is 26.9 fps (baseline 26.6,
+  same session): 25,600 resolves written back over the route (mostly while loading), 209,000
+  kept on the GPU, 59 destinations GPU-only. A CPU read of a resolve made every frame would need
+  lazy writeback (write-protect the destination, write it back on the first CPU access); none is
+  known yet.
+
+Result: the grass, yard lines, end-zone logo and player shadows render, as do the coin toss
+background and replays. In the route's four screenshots, near-black pixels in the middle band
+of the picture went from 49-100% (main) to 5-18% (what remains is the play-call menu).
+
 Remaining steps:
 1. Mip levels, 3D (volume) textures, texture signedness (signed formats are read unsigned).
-2. Resolves written back to guest memory (render-to-texture through memory, CPU reads), the
-   resolve rectangle from the vertex data, resolve clears in the target's own format (the clear
-   color is always read as 8_8_8_8, the clear depth as D24S8).
+2. Resolves: written back to guest memory since step 13, except 16-bit, 16_16, 64-bit, float and
+   D24FS8 destinations and destinations resolved every frame (lazy writeback would cover those).
+   Still to do: the resolve rectangle from the vertex data, and resolve clears in the target's own
+   format (#43; the clear color is always read as 8_8_8_8, the clear depth as D24S8).
 3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
    clears (`--resolution-scale N`, step 6). Still to check once 3D scenes render: effects that
    depend on pixel size (blur, bloom, shadow maps, half-pixel offsets in post-processing), and
@@ -514,8 +549,8 @@ stored). Parts 1 and 2 can start earlier and are good separable issues.
   dropped); XAM content, achievements and guide UI are stubs.
 - `WAIT_REG_MEM` in the command processor spins with `yield`.
 - The presenter falls back to the raw (tiled) front buffer when a swap was not rendered.
-- Renderer shortcuts: see phase 4 steps 5-11 and the remaining steps (resolves not written to
-  memory, per-frame texture re-uploads).
+- Renderer shortcuts: see phase 4 steps 5-13 and the remaining steps (some resolves not written
+  to memory, per-frame texture re-uploads).
 - Profile settings are returned empty.
 - Virtual memory grows ~1 MB per 20 s in the front end (not investigated).
 
