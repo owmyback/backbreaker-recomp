@@ -10,6 +10,13 @@
    right after padding, a blr, an unconditional branch or a bctr (a tail call through a
    register, e.g. vtable thunks packed back to back), and are not a known function start or
    switch case label, become explicit functions bounded by the next function start.
+3. Branch-only functions: a leaf function reached only by tail calls (`b`, never `bl`) has no
+   .pdata entry, no call to it and no pointer to it. XenonRecomp then emits `// ERROR <target>`
+   and a bare `return` at each tail call, so the function silently does nothing (issue #47:
+   0x8262B0F8, the controller's stick-axis reader, made every stick axis read 0). A `b` target
+   becomes a function when it lies right after padding or a `blr`, is not a known function
+   start or switch case label, and is in another function's range than the branch itself (a
+   branch within one function to a block after its own `blr` is not a function start).
 
 Usage: function_bounds.py default.pe switch_tables.toml config.toml [ppc_func_mapping.cpp]
 The optional mapping (from a previous XenonRecomp run) adds the analyzer's own function
@@ -41,6 +48,29 @@ def call_targets(pe):
                     off -= 1 << 26
                 t.add(pe.base + o + off)
     return sorted(t)
+
+
+def branch_functions(pe, known, case_labels):
+    boundaries = sorted(known)
+    found = set()
+    for va, vs in pe.code:
+        for o in range(va, va + vs, 4):
+            src = pe.base + o
+            w = pe.w(src)
+            if w >> 26 != 18 or w & 3:  # b only: not bl (LK), not absolute (AA)
+                continue
+            off = w & 0x3FFFFFC
+            if off & 0x2000000:
+                off -= 1 << 26
+            t = src + off
+            if t in known or t in case_labels:
+                continue
+            if pe.w(t - 4) not in (0, 0x4E800020):  # after padding or blr
+                continue
+            if bisect.bisect(boundaries, src) == bisect.bisect(boundaries, t):
+                continue  # same function's range: a block of that function
+            found.add(t)
+    return sorted(found)
 
 
 def data_sections(pe):
@@ -103,14 +133,16 @@ def main(pe_path, switch_path, config_path, mapping_path=None):
     # compiled the block we are about to rewrite, and a pointer-only candidate that is 'known'
     # is skipped. Everything else in the mapping stays known, which is what keeps the
     # thousands of functions XenonAnalyse finds on its own out of the block.
-    pointers = pointer_functions(pe, known - set(current), {l for _, labels in tables for l in labels})
-    calls = sorted(set(call_targets(pe)) | set(pointers))
+    case_labels = {l for _, labels in tables for l in labels}
+    pointers = pointer_functions(pe, known - set(current), case_labels)
+    branches = [b for b in branch_functions(pe, (known - set(current)) | set(pointers), case_labels) if b not in pointers]
+    calls = sorted(set(call_targets(pe)) | set(pointers) | set(branches))
     funcs = {}
     problems = []
 
-    # Pointer-only functions, bounded by the next function start of any kind
-    boundaries = sorted(known | set(pointers))
-    for p in pointers:
+    # Pointer-only and branch-only functions, bounded by the next function start of any kind
+    boundaries = sorted(known | set(pointers) | set(branches))
+    for p in pointers + branches:
         i = bisect.bisect(boundaries, p)
         end = boundaries[i] if i < len(boundaries) else p + 4
         while end > p + 4 and pe.w(end - 4) == 0:
@@ -144,7 +176,8 @@ def main(pe_path, switch_path, config_path, mapping_path=None):
     pat = re.compile(r'# BEGIN leaf functions.*?# END leaf functions', re.S)
     cfg = pat.sub(block, cfg) if pat.search(cfg) else cfg.rstrip() + '\n\n' + block + '\n'
     open(config_path, 'w').write(cfg)
-    print(f'functions written: {len(funcs)} ({len(pointers)} pointer-only); switches that did not fit: {len(problems)}')
+    print(f'functions written: {len(funcs)} ({len(pointers)} pointer-only, {len(branches)} branch-only); '
+          f'switches that did not fit: {len(problems)}')
     dropped = sorted(set(current) - set(funcs))
     if dropped:
         # The usual cause is the mapping: a function the block declares is in any mapping of a

@@ -480,6 +480,20 @@ runs use a small input thread. User 0 keeps a virtual pad in scripted and headle
 DualSense over USB in the window: the game is playable through the menus with the controller.
 Unplug/replug not explicitly tested yet. Not yet: keyboard fallback, key repeat.
 
+Sticks in a match (#47): the stick axes read 0 in gameplay. The controller code reads a full
+stick axis (input ids 24-27: left X/Y, right X/Y, each with a dead zone that depends on the other
+axis) through `sub_8262B1C0`, which tail-calls a small leaf function at `0x8262B0F8`. That
+function has no `.pdata` entry, is never called with `bl` and has no pointer to it, and the
+switch-table bound of `sub_8262AF48` ran over it. So XenonRecomp emitted `// ERROR 8262B0F8`
+and a bare `return` there, and every full-axis read returned 0.0. The kick still worked because
+it reads the stick-direction inputs (ids 14-23), which take another path.
+`tools/function_bounds.py` now also declares
+branch-only functions: tail-call targets right after padding or a `blr`, from another function's
+range. That adds `0x8262B0F8` and shortens `0x8262AF48` to end where it starts. A debug build
+logs the game reading left Y = 1.000 from `8262A05C` while the stick is held. Before, it read 0.
+60 other `// ERROR` branches remain: jumps into the middle of other functions, mostly
+exception-handling funclets (#52).
+
 Done early: scripted presses for testing (`--press "a@20,a@26"`, see `docs/runtime.md`), reported
 both as pad state and as keystroke events (`XamInputGetKeystrokeEx`). The game accepts them:
 A on the title screen stops the attract loop and moves on to the storage-device prompt.
