@@ -1,6 +1,7 @@
 // Vulkan renderer: the first-picture path of roadmap phase 4. Simplifications (see the ROADMAP):
 // - EDRAM: one Vulkan image per (base tile, pitch, samples, format). Tiles written through one
-//   image and then used through another are copied over by a transfer shader (same format only).
+//   image and then used through another are copied over by a transfer shader, through the raw EDRAM
+//   bits when the two formats differ (depth <-> color, 32 <-> 64 bits per sample).
 // - Resolves stay on the GPU: the destination is a Vulkan image keyed by its guest address
 //   (nothing is written back to guest memory yet). The copy rectangle is the window scissor.
 // - Guest data is snapshotted at draw time into a per-frame upload buffer: vertex data (the
@@ -211,6 +212,8 @@ void main() {
             bool swapRB = false;                    // resolve destinations: red/blue swapped in memory (RB_COPY_DEST_INFO)
             uint32_t resolvePitch = 0;              // resolve destinations: guest pitch (RB_COPY_DEST_PITCH)
             uint32_t edramBase = 0, edramPitch = 0;
+            bool edramDepth = false;
+            uint32_t edramFormat = 0; // xenos::ColorRenderTargetFormat, or xenos::DepthRenderTargetFormat for depth
         };
 
         Image createImage(VkImageType type, VkImageViewType viewType, VkFormat format, uint32_t w, uint32_t h, uint32_t depth,
@@ -509,6 +512,8 @@ void main() {
             img.edramWide = wide;
             img.edramBase = k.base;
             img.edramPitch = k.pitch;
+            img.edramFormat = k.format;
+            img.edramDepth = k.depth;
             // EDRAM starts with undefined contents; clear for reproducible output
             endPass();
             VkCommandBuffer c = cmd();
@@ -536,7 +541,8 @@ void main() {
         // 1280x720 screen as a 640-pitch 4x MSAA target, for example). Each tile remembers the
         // image that wrote it last; before an image is used, tiles last written through another
         // image are copied over by a shader that maps every sample to its EDRAM address in both
-        // layouts. Only same-format color->color and depth->depth transfers are done for now.
+        // layouts; between different formats (depth and color share tiles every frame in the match),
+        // each sample goes through the bits EDRAM would hold.
 
         Image* g_owner[2048] = {};
 
@@ -576,29 +582,136 @@ void main() {
         const char* kTransferVs = R"(#version 450
 void main() { vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }
 )";
-        // Prefixed with #defines DEPTH, SRC_MSAA, DEST_MSAA (0/1)
+        // Prefixed with #defines SRC_DEPTH, DEST_DEPTH, SRC_MSAA, DEST_MSAA (0/1); CONVERT (0: same
+        // format, the value is copied; 1: through the raw EDRAM bits); SRC_FMT, DEST_FMT (the guest
+        // format, see transferKind) and SRC_WORDS, DEST_WORDS (32-bit words per sample: 2 for 64bpp).
+        // Packing follows Xenia's ownership transfer shaders (vulkan_render_target_cache.cc,
+        // GetTransferShader): depth is depth24 << 8 | stencil,
+        // 8_8_8_8 has red in the low byte, 16-bit formats are their 16-bit integers, 32-bit floats
+        // their bits; the 7e3 and 20e4 helpers are Xenia's (spirv_shader_translator_rb.cc, xenos.cc).
         const char* kTransferFs = R"(
-#if DEPTH
+#if DEST_DEPTH
 #extension GL_ARB_shader_stencil_export : require
 #endif
-layout(push_constant) uniform P { int dBase, dTpr, dSx, dSy, sBase, sTpr, sSx, sSy, tileSamplesX, scale; } p;
+layout(push_constant) uniform P { int dBase, dTpr, dSx, dSy, dTileX, sBase, sTpr, sSx, sSy, sTileX, scale; } p;
 #if SRC_MSAA
 layout(set = 0, binding = 0) uniform sampler2DMS src;
+#if SRC_DEPTH
 layout(set = 0, binding = 1) uniform usampler2DMS srcStencil;
+#endif
 #define FETCH(t, c, s) texelFetch(t, c, s)
 #else
 layout(set = 0, binding = 0) uniform sampler2D src;
+#if SRC_DEPTH
 layout(set = 0, binding = 1) uniform usampler2D srcStencil;
+#endif
 #define FETCH(t, c, s) texelFetch(t, c, 0)
 #endif
 layout(set = 0, binding = 2, std140) uniform Mask { uvec4 bits[16]; } m; // tiles to copy
-#if !DEPTH
+#if !DEST_DEPTH
 layout(location = 0) out vec4 o;
 #endif
 // Sample index <-> position in the pixel's sample grid (Vulkan standard sample positions:
 // 4x = 2x2 grid in reading order, 2x = sample 1 on top of sample 0)
 ivec2 subOf(int s, int sx, int sy) { return sx == 2 ? ivec2(s & 1, s >> 1) : sy == 2 ? ivec2(0, s == 0 ? 1 : 0) : ivec2(0); }
 int indexOf(ivec2 sub, int sx, int sy) { return sx == 2 ? sub.y * 2 + sub.x : sy == 2 ? (sub.y == 0 ? 1 : 0) : 0; }
+// Host pixel and sample index of source EDRAM sample (x, y): x in samples along the source's rows
+// of tiles, y in sample rows
+void locate(int x, int y, ivec2 f, out ivec2 sp, out int ss) {
+  sp = ivec2(x / p.sSx, y / p.sSy) * p.scale + f;
+  ss = indexOf(ivec2(x % p.sSx, y % p.sSy), p.sSx, p.sSy);
+}
+#if CONVERT
+// 7e3 (2_10_10_10_FLOAT color, [0, 31.875]) and 20e4 (D24FS8 depth, [0, 2)), rounding to nearest even
+uint f32To7e3(float f) {
+  uint u = floatBitsToUint(f > 0.0 ? min(f, 31.875) : 0.0);
+  uint b = u < 0x3E800000u ? ((u & 0x7FFFFFu) | 0x800000u) >> min(125u - (u >> 23), 24u) : u - (124u << 23);
+  return ((b + 0x7FFFu + ((b >> 16) & 1u)) >> 16) & 0x3FFu;
+}
+float f7e3To32(uint v) {
+  v &= 0x3FFu;
+  if (v == 0u) return 0.0;
+  uint mant = v & 0x7Fu;
+  int e = int(v >> 7);
+  if (e == 0) { int lz = 7 - findMSB(mant); e = 1 - lz; mant = (mant << lz) & 0x7Fu; }
+  return uintBitsToFloat((uint(e + 124) << 23) | (mant << 16));
+}
+uint f32To20e4(float f) {
+  if (!(f > 0.0)) return 0u;
+  uint u = floatBitsToUint(f);
+  if (u >= 0x3FFFFFF8u) return 0xFFFFFFu;
+  u = u < 0x38800000u ? (0x800000u | (u & 0x7FFFFFu)) >> min(113u - (u >> 23), 24u) : u + 0xC8000000u;
+  u += 3u + ((u >> 3) & 1u);
+  return (u >> 3) & 0xFFFFFFu;
+}
+float f20e4To32(uint v) {
+  v &= 0xFFFFFFu;
+  if (v == 0u) return 0.0;
+  uint mant = v & 0xFFFFFu;
+  int e = int(v >> 20);
+  if (e == 0) { int lz = 20 - findMSB(mant); e = 1 - lz; mant = (mant << lz) & 0xFFFFFu; }
+  return uintBitsToFloat((uint(e + 112) << 23) | (mant << 3));
+}
+// The source sample as the bits EDRAM holds (the second word only for 64bpp formats)
+uvec2 readPacked(ivec2 sp, int ss) {
+#if SRC_DEPTH
+  float d = FETCH(src, sp, ss).r;
+#if SRC_FMT == 1
+  uint d24 = f32To20e4(d);
+#else
+  // round(d * 2^24), minus one above 2^23: the exact inverse of the UNorm24To32 below, so depth
+  // survives a trip through another format bit for bit (Xenia's round(d * 0xFFFFFF) in float32
+  // loses the low bit of 1 in 8 values), and as close to exact rounding for other depths
+  uint n = uint(roundEven(clamp(d, 0.0, 1.0) * 16777216.0));
+  uint d24 = n - uint(n > 0x800000u);
+#endif
+  return uvec2((d24 << 8) | (FETCH(srcStencil, sp, ss).r & 0xFFu), 0u);
+#else
+  vec4 c = FETCH(src, sp, ss);
+#if SRC_FMT == 0
+  uvec4 u = uvec4(clamp(c, 0.0, 1.0) * 255.0 + 0.5);
+  return uvec2(u.r | (u.g << 8) | (u.b << 16) | (u.a << 24), 0u);
+#elif SRC_FMT == 2
+  uvec4 u = uvec4(clamp(c, 0.0, 1.0) * vec4(1023.0, 1023.0, 1023.0, 3.0) + 0.5);
+  return uvec2(u.r | (u.g << 10) | (u.b << 20) | (u.a << 30), 0u);
+#elif SRC_FMT == 3
+  uint a = uint(clamp(c.a, 0.0, 1.0) * 3.0 + 0.5);
+  return uvec2(f32To7e3(c.r) | (f32To7e3(c.g) << 10) | (f32To7e3(c.b) << 20) | (a << 30), 0u);
+#elif SRC_FMT == 4 || SRC_FMT == 5
+  uvec4 u = uvec4(ivec4(round(clamp(c, -1.0, 1.0) * 32767.0))) & 0xFFFFu;
+  return uvec2(u.r | (u.g << 16), u.b | (u.a << 16));
+#elif SRC_FMT == 6 || SRC_FMT == 7
+  return uvec2(packHalf2x16(c.rg), packHalf2x16(c.ba));
+#else
+  return floatBitsToUint(c.rg);
+#endif
+#endif
+}
+// Bits as EDRAM holds them -> the destination's format
+void writeUnpacked(uvec2 v) {
+#if DEST_DEPTH
+  uint d24 = v.x >> 8;
+#if DEST_FMT == 1
+  gl_FragDepth = f20e4To32(d24);
+#else
+  gl_FragDepth = float(d24 + (d24 >> 23)) * (1.0 / 16777216.0); // Xenia's UNorm24To32
+#endif
+  gl_FragStencilRefARB = int(v.x & 0xFFu);
+#elif DEST_FMT == 0
+  o = vec4((uvec4(v.x) >> uvec4(0, 8, 16, 24)) & 0xFFu) / 255.0;
+#elif DEST_FMT == 2
+  o = vec4((uvec4(v.x) >> uvec4(0, 10, 20, 30)) & uvec4(0x3FFu, 0x3FFu, 0x3FFu, 3u)) / vec4(1023.0, 1023.0, 1023.0, 3.0);
+#elif DEST_FMT == 3
+  o = vec4(f7e3To32(v.x), f7e3To32(v.x >> 10), f7e3To32(v.x >> 20), float(v.x >> 30) / 3.0);
+#elif DEST_FMT == 4 || DEST_FMT == 5
+  o = max(vec4(ivec4(uvec4(v.x, v.x, v.y, v.y) << uvec4(16, 0, 16, 0)) >> 16) / 32767.0, -1.0);
+#elif DEST_FMT == 6 || DEST_FMT == 7
+  o = vec4(unpackHalf2x16(v.x), unpackHalf2x16(v.y));
+#else
+  o = vec4(uintBitsToFloat(v), 0.0, 0.0);
+#endif
+}
+#endif
 void main() {
   ivec2 h = ivec2(gl_FragCoord.xy), g = h / p.scale, f = h % p.scale;
 #if DEST_MSAA
@@ -607,18 +720,32 @@ void main() {
   ivec2 sub = ivec2(0);
 #endif
   int X = g.x * p.dSx + sub.x, Y = g.y * p.dSy + sub.y; // destination sample in EDRAM sample rows
-  int tile = p.dBase + (Y >> 4) * p.dTpr + X / p.tileSamplesX;
+  int tile = p.dBase + (Y >> 4) * p.dTpr + X / p.dTileX;
   if (tile >= 2048 || ((m.bits[tile >> 7][(tile >> 5) & 3] >> uint(tile & 31)) & 1u) == 0u) discard;
   int rel = tile - p.sBase;
   if (rel < 0) discard;
-  int Xs = (rel % p.sTpr) * p.tileSamplesX + X % p.tileSamplesX, Ys = (rel / p.sTpr) * 16 + (Y & 15);
-  ivec2 sp = ivec2(Xs / p.sSx, Ys / p.sSy) * p.scale + f;
-  int ss = indexOf(ivec2(Xs % p.sSx, Ys % p.sSy), p.sSx, p.sSy);
-#if DEPTH
+  int x0 = (rel % p.sTpr) * p.sTileX, ys = (rel / p.sTpr) * 16 + (Y & 15), xt = X % p.dTileX;
+  ivec2 sp;
+  int ss;
+#if !CONVERT
+  locate(x0 + xt, ys, f, sp, ss);
+#if DEST_DEPTH
   gl_FragDepth = FETCH(src, sp, ss).r;
   gl_FragStencilRefARB = int(FETCH(srcStencil, sp, ss).r);
 #else
   o = FETCH(src, sp, ss);
+#endif
+#else
+  // Word by word: a tile row is 80 32-bit words whatever the format; a 64bpp sample is two of
+  // them, its first components (R, G) in the first
+  uvec2 v = uvec2(0u);
+  for (int k = 0; k < DEST_WORDS; k++) {
+    int w = xt * DEST_WORDS + k;
+    locate(x0 + w / SRC_WORDS, ys, f, sp, ss);
+    uvec2 s = readPacked(sp, ss);
+    v[k] = (w % SRC_WORDS) == 0 ? s.x : s.y;
+  }
+  writeUnpacked(v);
 #endif
 }
 )";
@@ -627,14 +754,39 @@ void main() {
         VkPipelineLayout g_transferLayout = VK_NULL_HANDLE;
         VkShaderModule g_transferVs = VK_NULL_HANDLE;
         VkSampler g_nearest = VK_NULL_HANDLE;
-        std::map<std::tuple<VkFormat, uint32_t, bool>, VkPipeline> g_transferPipelines; // dest format, dest samples, src MSAA
+        // Source kind, destination kind, destination samples, source MSAA
+        std::map<std::tuple<uint32_t, uint32_t, uint32_t, bool>, VkPipeline> g_transferPipelines;
 
-        VkPipeline transferPipeline(VkFormat format, uint32_t destSamples, bool srcMsaa)
+        // What decides how a target's samples map to EDRAM bits: depth (0x100 | xenos::DepthRenderTargetFormat)
+        // or the color format, with the formats that share a bit layout merged (8_8_8_8_GAMMA is
+        // 8_8_8_8, the AS_ variants are their base formats)
+        uint32_t transferKind(const Image& i)
         {
-            auto key = std::make_tuple(format, destSamples, srcMsaa);
+            if (i.edramDepth) return 0x100 | i.edramFormat;
+            return i.edramFormat == 1 ? 0 : i.edramFormat == 10 ? 2 : i.edramFormat == 12 ? 3 : i.edramFormat;
+        }
+
+        const char* kindName(uint32_t kind)
+        {
+            switch (kind)
+            {
+            case 0x100: return "D24S8"; case 0x101: return "D24FS8";
+            case 0: return "8_8_8_8"; case 2: return "2_10_10_10"; case 3: return "2_10_10_10_FLOAT"; case 4: return "16_16";
+            case 5: return "16_16_16_16"; case 6: return "16_16_FLOAT"; case 7: return "16_16_16_16_FLOAT";
+            case 14: return "32_FLOAT"; case 15: return "32_32_FLOAT"; default: return "?";
+            }
+        }
+
+        VkPipeline transferPipeline(const Image& srcImage, const Image& dstImage)
+        {
+            uint32_t srcKind = transferKind(srcImage), dstKind = transferKind(dstImage);
+            bool srcMsaa = srcImage.samples > 1;
+            uint32_t destSamples = dstImage.samples;
+            VkFormat format = dstImage.format;
+            auto key = std::make_tuple(srcKind, dstKind, destSamples, srcMsaa);
             auto it = g_transferPipelines.find(key);
             if (it != g_transferPipelines.end()) return it->second;
-            bool depth = format == kDepthFormat;
+            bool depth = dstImage.edramDepth;
             if (!g_transferLayout)
             {
                 VkDescriptorSetLayoutBinding b[3] = {
@@ -646,7 +798,7 @@ void main() {
                 dl.bindingCount = 3;
                 dl.pBindings = b;
                 VK_CHECK(vkCreateDescriptorSetLayout(D, &dl, nullptr, &g_transferSetLayout));
-                VkPushConstantRange pcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, 40 };
+                VkPushConstantRange pcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, 44 };
                 VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
                 pli.setLayoutCount = 1;
                 pli.pSetLayouts = &g_transferSetLayout;
@@ -659,8 +811,12 @@ void main() {
                 VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
                 VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_nearest));
             }
-            std::string src = std::string("#version 450\n#define DEPTH ") + (depth ? "1" : "0") + "\n#define SRC_MSAA " + (srcMsaa ? "1" : "0") +
-                              "\n#define DEST_MSAA " + (destSamples > 1 ? "1" : "0") + "\n" + kTransferFs;
+            bool convert = srcKind != dstKind;
+            auto def = [](const char* name, uint32_t v) { return std::string("#define ") + name + " " + std::to_string(v) + "\n"; };
+            std::string src = "#version 450\n" + def("SRC_DEPTH", srcImage.edramDepth) + def("DEST_DEPTH", depth) + def("SRC_MSAA", srcMsaa) +
+                              def("DEST_MSAA", destSamples > 1) + def("CONVERT", convert) + def("SRC_FMT", srcKind & 0xFF) +
+                              def("DEST_FMT", dstKind & 0xFF) + def("SRC_WORDS", srcImage.edramWide ? 2 : 1) +
+                              def("DEST_WORDS", dstImage.edramWide ? 2 : 1) + kTransferFs;
             std::string error;
             VkShaderModule fs = compile(src, shaderc_fragment_shader, "edram_transfer.frag", error);
             if (!fs) fatal("[render] EDRAM transfer fragment shader: %s", error.c_str());
@@ -719,20 +875,23 @@ void main() {
             VkPipeline pl;
             VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
             vkDestroyShaderModule(D, fs, nullptr);
+            info("[render] EDRAM transfer pipeline: %s %ux -> %s %ux%s", kindName(srcKind), srcImage.samples, kindName(dstKind), destSamples,
+                 convert ? " (through the EDRAM bits)" : "");
             return g_transferPipelines[key] = pl;
         }
 
-        // Copy the given EDRAM tiles from src into dst (same format), with the layout mapping
+        // Copy the given EDRAM tiles from src into dst with the layout mapping, converting through
+        // the raw EDRAM bits when the formats differ
         void transfer(Image& src, Image& dst, const uint32_t mask[64], VkRect2D guestRect)
         {
             VkDeviceSize maskOff = uploadAlloc(256);
             if (maskOff == UINT64_MAX) { warnOnce("upload buffer full: EDRAM transfer skipped"); return; }
             std::memcpy(frame().uploadMap + maskOff, mask, 256);
-            bool depth = dst.format == kDepthFormat;
-            VkPipeline pl = transferPipeline(dst.format, dst.samples, src.samples > 1);
+            bool depth = dst.edramDepth, srcDepth = src.edramDepth;
+            VkPipeline pl = transferPipeline(src, dst);
             endPass();
             VkCommandBuffer c = cmd();
-            VkImageLayout srcLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkImageLayout srcLayout = srcDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             VkImageLayout dstLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             transition(c, src, srcLayout);
             transition(c, dst, dstLayout);
@@ -762,8 +921,8 @@ void main() {
                 vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_FRONT_BIT, 0xFF);
                 vkCmdSetStencilWriteMask(c, VK_STENCIL_FACE_BACK_BIT, 0xFF);
             }
-            VkDescriptorImageInfo images[2] = { { g_nearest, depth ? src.depthView : src.view, srcLayout },
-                                                { g_nearest, depth ? src.stencilView : src.view, srcLayout } };
+            VkDescriptorImageInfo images[2] = { { g_nearest, srcDepth ? src.depthView : src.view, srcLayout },
+                                                { g_nearest, srcDepth ? src.stencilView : src.view, srcLayout } };
             VkDescriptorBufferInfo maskInfo{ frame().upload, maskOff, 256 };
             VkWriteDescriptorSet w[3]{};
             for (uint32_t i = 0; i < 3; i++)
@@ -775,11 +934,12 @@ void main() {
                 if (i < 2) w[i].pImageInfo = &images[i];
                 else w[i].pBufferInfo = &maskInfo;
             }
-            if (depth) C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_transferLayout, 0, 3, w);
+            if (srcDepth) C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_transferLayout, 0, 3, w);
             else { w[1] = w[2]; C->cmdPushDescriptorSet(c, VK_PIPELINE_BIND_POINT_GRAPHICS, g_transferLayout, 0, 2, w); }
             EdramLayout dl = edramLayout(dst), sl = edramLayout(src);
-            int32_t pc[10] = { int32_t(dst.edramBase), int32_t(dl.tilesPerRow), int32_t(dl.sx), int32_t(dl.sy), int32_t(src.edramBase),
-                               int32_t(sl.tilesPerRow), int32_t(sl.sx), int32_t(sl.sy), int32_t(dl.tileSamplesX), int32_t(g_scale) };
+            int32_t pc[11] = { int32_t(dst.edramBase), int32_t(dl.tilesPerRow), int32_t(dl.sx),          int32_t(dl.sy),
+                               int32_t(dl.tileSamplesX), int32_t(src.edramBase), int32_t(sl.tilesPerRow), int32_t(sl.sx),
+                               int32_t(sl.sy),           int32_t(sl.tileSamplesX), int32_t(g_scale) };
             vkCmdPushConstants(c, g_transferLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), pc);
             VkViewport viewport{ 0, 0, float(dst.width), float(dst.height), 0.0f, 1.0f };
             vkCmdSetViewport(c, 0, 1, &viewport);
@@ -789,6 +949,35 @@ void main() {
             vkCmdSetScissor(c, 0, 1, &scissor);
             vkCmdDraw(c, 3, 1, 0, 0);
             vkCmdEndRendering(c);
+        }
+
+        // Rectangle r of target t grown to whole EDRAM tiles: ownership moves a tile at a time, so
+        // the part of a tile outside r has to come along
+        VkRect2D tileAligned(const Image& t, VkRect2D r)
+        {
+            EdramLayout l = edramLayout(t);
+            int32_t tw = int32_t(l.tileSamplesX / l.sx), th = int32_t(16 / l.sy); // tile size in pixels
+            int32_t x0 = r.offset.x / tw * tw, y0 = r.offset.y / th * th;
+            int32_t x1 = (r.offset.x + int32_t(r.extent.width) + tw - 1) / tw * tw, y1 = (r.offset.y + int32_t(r.extent.height) + th - 1) / th * th;
+            return { { x0, y0 }, { uint32_t(x1 - x0), uint32_t(y1 - y0) } };
+        }
+
+        // The pixels of target t covering the tiles in mask (a bounding box): what a transfer of
+        // those tiles has to shade
+        VkRect2D tilesRect(const Image& t, const uint32_t mask[64])
+        {
+            EdramLayout l = edramLayout(t);
+            int32_t tw = int32_t(l.tileSamplesX / l.sx), th = int32_t(16 / l.sy);
+            int32_t x0 = INT32_MAX, y0 = INT32_MAX, x1 = 0, y1 = 0;
+            for (uint32_t tile = t.edramBase; tile < 2048; tile++)
+                if ((mask[tile >> 5] >> (tile & 31)) & 1)
+                {
+                    int32_t rel = int32_t(tile - t.edramBase), col = rel % int32_t(l.tilesPerRow), row = rel / int32_t(l.tilesPerRow);
+                    x0 = std::min(x0, col * tw), y0 = std::min(y0, row * th);
+                    x1 = std::max(x1, (col + 1) * tw), y1 = std::max(y1, (row + 1) * th);
+                }
+            if (x0 >= x1 || y0 >= y1) return { { 0, 0 }, { 0, 0 } };
+            return { { x0, y0 }, { uint32_t(x1 - x0), uint32_t(y1 - y0) } };
         }
 
         // Before target t is used inside guest rectangle r: bring in tiles another image wrote last
@@ -802,16 +991,20 @@ void main() {
             });
             for (auto& [owner, mask] : masks)
             {
-                bool compatible = owner->format == t->format && owner->edramWide == t->edramWide;
-                if (!compatible)
-                {
-                    warnOnce("EDRAM transfer between different formats not supported yet");
-                    continue;
-                }
-                transfer(*owner, *t, mask.data(), r);
+                transfer(*owner, *t, mask.data(), tilesRect(*t, mask.data()));
                 for (uint32_t tile = 0; tile < 2048; tile++)
                     if ((mask[tile >> 5] >> (tile & 31)) & 1) g_owner[tile] = t;
             }
+        }
+
+        // Before a clear of rectangle r, which takes over every tile it touches: tiles it covers
+        // only in part keep their other contents, so bring those in first
+        void syncPartialTiles(Image* t, VkRect2D r)
+        {
+            VkRect2D whole = tileAligned(*t, r);
+            if (whole.offset.x != r.offset.x || whole.offset.y != r.offset.y || whole.extent.width != r.extent.width ||
+                whole.extent.height != r.extent.height)
+                syncTarget(t, r);
         }
 
         // Resolve destinations, by guest physical address (the latest image written there).
@@ -1743,6 +1936,7 @@ void main() {
             Image* color = source < 4 ? findTarget({ s.color[source].edramBase, s.surfacePitch, s.msaaSamples, s.color[source].format, false })
                                       : nullptr;
             Image* depth = findTarget({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true });
+            if (depth) depth->edramFormat = s.depthFormat; // D24S8 or D24FS8: how its samples map to EDRAM bits
             Image* src = source < 4 ? color : depth;
             VkRect2D rect;
             VkExtent2D limit = src ? VkExtent2D{ src->width / g_scale, src->height / g_scale } : VkExtent2D{ 8192, 8192 };
@@ -1795,6 +1989,7 @@ void main() {
             // Clears after the copy, of the copied rectangle
             if (clearColor && color)
             {
+                syncPartialTiles(color, rect);
                 Image* targets[4] = { color, nullptr, nullptr, nullptr };
                 beginPass(targets, nullptr);
                 uint32_t v = readRegister(RB_COLOR_CLEAR);
@@ -1806,6 +2001,8 @@ void main() {
             }
             if (clearDepth && (depth || (depth = target({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true }))))
             {
+                depth->edramFormat = s.depthFormat;
+                syncPartialTiles(depth, rect);
                 Image* none[4] = {};
                 beginPass(none, depth);
                 uint32_t v = readRegister(RB_DEPTH_CLEAR);
@@ -1925,6 +2122,7 @@ void main() {
                         (color[i] = target({ s.color[i].edramBase, s.surfacePitch, s.msaaSamples, s.color[i].format, false })))
                         formats[i] = color[i]->format;
             Image* depth = (s.depthTest || s.stencil) ? target({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true }) : nullptr;
+            if (depth) depth->edramFormat = s.depthFormat; // D24S8 or D24FS8: how its samples map to EDRAM bits
             // Memory export: the shader writes guest memory (GPU skinning, particles...). Without
             // render targets it is a "compute" draw with rasterization discarded.
             bool memExport = vs->t.memExport || ps->t.memExport;

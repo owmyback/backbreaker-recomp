@@ -74,8 +74,8 @@ shader output that one pixel shader does not read). It is not the whole check: a
 fails to translate or compile is not a validation message - the renderer logs a `[render]` warning
 and carries on without those draws, which takes the front buffer and the screenshots with it. The
 log has to be read as well as the count line. On the route above the `[render]` warnings left are all
-"not supported yet" ones - texture formats, the EDRAM transfer between different formats and depth
-resolves - each logged once per thing missing, none of them API misuse.
+"not supported yet" ones - texture formats and depth resolves - each logged once per thing
+missing, none of them API misuse.
 
 What is left in a clean run is loader noise, not our API use: `terminator_CreateInstance: ... libvulkan_dzn.so` (that driver cannot open
 here) and, at level 2, which ICDs were found and how the physical devices sorted.
@@ -265,7 +265,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
   real audio output are stubs; XMA output is silence
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
-  first load); EDRAM aliasing only transfers between targets of the same format; resolves are not written back to guest
+  first load); resolves are not written back to guest
   memory and take their rectangle from the window scissor; a resolve's own format conversion is
   skipped (textures sample the resolve image in the render target's format); 1D/3D textures and
   some formats are placeholders; signed texture formats are read unsigned; textures are

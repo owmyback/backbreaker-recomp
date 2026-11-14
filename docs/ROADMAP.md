@@ -11,7 +11,8 @@ Work that can be picked up is tracked as GitHub issues and linked from each phas
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
 Last updated: 2026-11-13 (#3 closed; phase 4: window polish #9, validation clean #11 and the
-screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff)
+screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff;
+EDRAM transfers between formats #36: the match's tile blocks are gone)
 
 ## Current state
 
@@ -29,11 +30,10 @@ screen (stadium, crowd, players, replays, the video board), with the artifacts i
 below. Kicking works with the right stick pulled back and then pushed forward (a plain release
 is not seen at the current frame rate, see phase 9). Audio is still silence.
 
-**Current blocker (2026-11-13):** the match's picture has artifacts. White and garbled
-rectangles the size of EDRAM tiles (80x16 samples) show stale data where the game reuses EDRAM
-tiles between formats - mostly depth (D24S8) and color (8_8_8_8) on the same tiles - and the
-renderer skips transfers between different formats (phase 4, remaining step 2). The grass is
-dark. Distant textures shimmer (no mip levels yet). The match runs at about 15 fps.
+**Current blocker (2026-11-13):** the field is black - the grass does not show (until #36 it was
+covered by stale EDRAM tiles, the white and striped blocks). Distant textures shimmer (no mip
+levels yet). Live play runs at about 22 fps headless, most of the frame's EDRAM transfers coming
+before the engine's clear rectangles (#37).
 
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
@@ -54,7 +54,7 @@ caches) until the heap ran out a minute into the match.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-9 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-11 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | Planned | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
@@ -305,8 +305,8 @@ or resolved from, tiles last written through another image are copied in by a tr
 that maps each sample to its EDRAM address in both layouts (pitch, MSAA 1x/2x/4x, 32/64-bit
 samples, resolution scale); depth transfers keep stencil (VK_EXT_shader_stencil_export). With
 the game's 640-pitch 4x MSAA screen clear now reaching the 1280x720 target, the logo screen is
-clean black and the title screen shows its football-field background. Not yet: transfers
-between different formats (including color <-> depth), which are skipped with a warning.
+clean black and the title screen shows its football-field background. Transfers between
+different formats (including color <-> depth) came later, in step 11.
 
 **Step 9 - Cube maps and render to texture on the GPU (`a450796`).** Cube textures (6 faces,
 linear or tiled, base level) upload like 2D ones. Render to texture stays on the GPU: a 2D
@@ -335,11 +335,39 @@ ops and setp_inv/pop/rstr, so every shader the match uses translates. Seen worki
 with all their pictures, Team Select's 3D player, Stadium Select, the kickoff, live plays and
 replays.
 
+**Step 11 - EDRAM transfers between formats (#36).** The game puts different formats on the same
+tiles all the time. On the Exhibition route, 268 distinct (owner -> target) pairs used to be
+skipped. Most were a 4x MSAA D24S8 target at pitch N and a 1x 8_8_8_8 target at pitch 2N on the
+same base. From the trace, the engine appears to clear a 4x surface through a 1x alias of it.
+The others involved
+2_10_10_10_FLOAT, 16_16, 16_16_16_16_FLOAT, 32_FLOAT and 32_32_FLOAT. When the formats differ, the
+transfer shader now goes through the bits EDRAM would hold, as Xenia's ownership transfers do
+(`vulkan_render_target_cache.cc`, `GetTransferShader`):
+- depth is `depth24 << 8 | stencil` (D24S8 unorm, D24FS8 20e4)
+- 8_8_8_8 has red in the low byte, and 2_10_10_10 is unorm
+- 2_10_10_10_FLOAT is 7e3 RGB plus a 2-bit alpha
+- 16-bit formats are their 16-bit integers, and 32-bit floats are their bits
+- a 64bpp sample is two words of the tile row, the one holding R and G first
+
+Checked offline: all 484 variants of the shader compile with glslc. With C++ copies of the shader
+functions, unorm8, unorm10, 7e3 (also through float16, its host format) and 20e4 map every value
+back to itself, and so does snorm16 except -32768, which SNORM stores as -32767. Depth does too,
+for all 2^24 values, with `round(d * 2^24) - (n > 2^23)`; Xenia's `round(d * 0xFFFFFF)` in
+float32 loses the low bit of 1 value in 8. NaN payloads in the float formats were not checked. Transfers now move whole tiles, because ownership is per tile, and they shade only the
+bounding box of the tiles they copy. A resolve clear of part of a tile brings the rest of that
+tile in first.
+
+Result: the white and striped tile blocks over the field and the stands are gone. The route
+creates 40 transfer pipelines, 29 of them converting, and validation is unchanged (0 errors).
+Cost: about 180 transfers a frame in the match, and live play at 21.7 fps against 23.3 before
+(headless, last 60 s of the route). Most of those transfers come before the engine's clear
+rectangles, whose scissor spans all of EDRAM; bounding them by their vertex data is #37.
+
 Remaining steps:
 1. Mip levels, 3D (volume) textures, texture signedness (signed formats are read unsigned).
-2. EDRAM transfers between different formats (the match's white tile-sized blocks: depth <->
-   8_8_8_8 on the same tiles), resolves written back to guest memory (render-to-texture through
-   memory, CPU reads), the resolve rectangle from the vertex data.
+2. Resolves written back to guest memory (render-to-texture through memory, CPU reads), the
+   resolve rectangle from the vertex data, resolve clears in the target's own format (the clear
+   color is always read as 8_8_8_8, the clear depth as D24S8).
 3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
    clears (`--resolution-scale N`, step 6). Still to check once 3D scenes render: effects that
    depend on pixel size (blur, bloom, shadow maps, half-pixel offsets in post-processing), and
@@ -466,8 +494,8 @@ stored). Parts 1 and 2 can start earlier and are good separable issues.
   dropped); XAM content, achievements and guide UI are stubs.
 - `WAIT_REG_MEM` in the command processor spins with `yield`.
 - The presenter falls back to the raw (tiled) front buffer when a swap was not rendered.
-- Renderer shortcuts: see phase 4 steps 5-8 and the remaining steps (EDRAM transfers only
-  between same formats, resolves not written to memory, per-frame texture re-uploads).
+- Renderer shortcuts: see phase 4 steps 5-11 and the remaining steps (resolves not written to
+  memory, per-frame texture re-uploads).
 - Profile settings are returned empty.
 - Virtual memory grows ~1 MB per 20 s in the front end (not investigated).
 
