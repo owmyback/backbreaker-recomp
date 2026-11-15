@@ -44,6 +44,8 @@ namespace
 
     void crashHandler(int sig, siginfo_t* si, void* uctx)
     {
+        // A write to a page the renderer watches for texture changes (mem::watch): not a crash
+        if (sig == SIGSEGV && mem::watch::onFault(si->si_addr)) return;
         // Only the first crashing thread reports; others wait to be torn down with the process.
         static std::atomic<bool> crashing{false};
         if (crashing.exchange(true))

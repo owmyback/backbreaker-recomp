@@ -128,7 +128,8 @@ namespace gpu::render
         // BB_PERF=1: one line per second of where the renderer thread's time went (issue #73)
         struct PerfStats { uint64_t draws = 0, hashBytes = 0, uploads = 0, uploadBytes = 0, resolves = 0, writebacks = 0, flushes = 0;
                            uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0, chunks = 0,
-                                    idleSubmits = 0, asyncFences = 0, asyncWaits = 0, copyInsAroundPending = 0;
+                                    idleSubmits = 0, asyncFences = 0, asyncWaits = 0, copyInsAroundPending = 0,
+                                    hashSkips = 0;
                            double hashMs = 0, waitMs = 0, cpWaitMs = 0;
                            std::map<std::string, uint64_t> syncsBy;          // syncs that had pending writes, by trigger
                            struct Up { uint32_t format = 0, width = 0, height = 0; uint64_t count = 0, bytes = 0, fresh = 0; };
@@ -1355,6 +1356,11 @@ void main() {
             uint64_t hash = 0; // of the guest bytes last uploaded (0: never uploaded)
             std::map<uint32_t, VkImageView> views; // by fetch constant swizzle
             bool everUploaded = false;             // BB_PERF: first upload vs re-upload
+            // Write watch (mem::watch, #73): stamp from protecting its pages before the last hash
+            // (0: not watched); a texture whose bytes keep changing is left unwatched for a while,
+            // so it does not fault on every frame's write
+            uint64_t watchStamp = 0, unwatchedUntil = 0;
+            uint32_t changedStreak = 0;
         };
         std::map<TextureKey, Texture> g_textures;
         uint64_t g_texturesUploaded = 0, g_texturesKept = 0; // for the stats line
@@ -1827,21 +1833,64 @@ void main()
             if (t.uploadedFrame != g_frameSerial)
             {
                 regions = mipRegions(width, height, pitch, tiled, { tf.blockW, tf.blockH, tf.bytes }, levels, packed, layers);
-                double hashT0 = nowMs();
-                // Unchanged since the last upload (same bytes at every level and face): keep the image
+                // The guest memory it reads: one span for the base level, one for the mip chain
+                uint64_t lo[2] = { UINT64_MAX, UINT64_MAX }, hi[2] = { 0, 0 };
                 for (const GuestRegion& r : regions)
                     for (uint32_t layer = 0; layer < layers; layer++)
                     {
                         uint64_t at = uint64_t(r.mip ? mipAddress : base) + r.offset + uint64_t(layer) * r.sliceStride;
                         if (!g_pendingWrites.empty()) needsExportedData(at, at + r.srcBytes);
-                        if (at + r.srcBytes <= mem::kPhysicalSize) hash = hashBytes(mem::physical(uint32_t(at)), r.srcBytes, hash);
-                        g_perf.hashBytes += r.srcBytes;
+                        lo[r.mip] = std::min(lo[r.mip], at);
+                        hi[r.mip] = std::max(hi[r.mip], at + r.srcBytes);
                     }
-                g_perf.hashMs += nowMs() - hashT0;
-                if (hash && hash == t.hash)
+                bool inRange = hi[0] <= mem::kPhysicalSize && hi[1] <= mem::kPhysicalSize;
+                auto unchanged = [&] {
+                    for (int k = 0; k < 2; k++)
+                        if (lo[k] < hi[k] && !mem::watch::unchangedSince(uint32_t(lo[k]), uint32_t(hi[k]), t.watchStamp)) return false;
+                    return true;
+                };
+                if (t.watchStamp && t.hash && inRange && unchanged())
                 {
+                    // Not one page written since it was last read: same bytes, keep the image
                     t.uploadedFrame = g_frameSerial;
                     g_texturesKept++;
+                    g_perf.hashSkips++;
+                }
+                else
+                {
+                    // Protect the pages first, then read them: a write after this faults and is seen
+                    bool watchIt = inRange && g_frameSerial >= t.unwatchedUntil;
+                    uint64_t stamp = 0;
+                    if (watchIt)
+                    {
+                        stamp = UINT64_MAX;
+                        for (int k = 0; k < 2; k++)
+                            if (lo[k] < hi[k]) stamp = std::min(stamp, mem::watch::protect(uint32_t(lo[k]), uint32_t(hi[k])));
+                    }
+                    double hashT0 = nowMs();
+                    // Unchanged since the last upload (same bytes at every level and face): keep the image
+                    for (const GuestRegion& r : regions)
+                        for (uint32_t layer = 0; layer < layers; layer++)
+                        {
+                            uint64_t at = uint64_t(r.mip ? mipAddress : base) + r.offset + uint64_t(layer) * r.sliceStride;
+                            if (at + r.srcBytes <= mem::kPhysicalSize) hash = hashBytes(mem::physical(uint32_t(at)), r.srcBytes, hash);
+                            g_perf.hashBytes += r.srcBytes;
+                        }
+                    g_perf.hashMs += nowMs() - hashT0;
+                    t.watchStamp = watchIt ? stamp : 0;
+                    if (hash && hash == t.hash)
+                    {
+                        t.uploadedFrame = g_frameSerial;
+                        g_texturesKept++;
+                        t.changedStreak = 0;
+                    }
+                    else if (t.hash && ++t.changedStreak >= 4)
+                    {
+                        // Its bytes change every time it is read (a movie frame, a CPU-drawn image):
+                        // stop watching it for ten seconds rather than fault on every frame's write
+                        t.unwatchedUntil = g_frameSerial + 300;
+                        t.changedStreak = 0;
+                    }
                 }
             }
             if (t.uploadedFrame != g_frameSerial)
@@ -2731,6 +2780,7 @@ void main()
                 const PendingWrite& w = g_pendingWrites[i];
                 if (all || (w.serial && w.serial <= serial))
                 {
+                    mem::watch::release(w.start, w.end); // a GPU result lands: textures there have changed
                     if (g_exportMap) // staging copy of guest memory: copy the written range out
                         std::memcpy(mem::physical(w.start), g_exportMap + w.start, w.end - w.start);
                 }
@@ -3699,6 +3749,7 @@ void main()
         {
             static const bool perfOn = getenv("BB_PERF") != nullptr;
             static double perfLast = 0, cpuLast = 0;
+            static uint64_t faultsLast = 0;
             static uint64_t swaps = 0;
             swaps++;
             if (perfOn)
@@ -3715,14 +3766,17 @@ void main()
                          "textures hashed %.1f MB in %.0f ms, %llu uploads (%.1f MB), %llu resolves, %llu writeBack calls (%llu queued); "
                          "%llu memexport draws (%llu waited for), %llu syncs with pending writes, %llu GPU vertex copies, %llu sync retries, "
                          "%llu early submits (%llu while the CP waited), %llu fences written when the GPU got there (%llu waited for), "
-                         "%llu writebacks over pending ones",
+                         "%llu writebacks over pending ones; textures known unchanged without reading %llu, write faults %llu, "
+                         "pages watched %u",
                          (t - perfLast) / 1000.0, (unsigned long long)swaps, (unsigned long long)p.draws, cpu - cpuLast, p.cpWaitMs, p.waitMs,
                          (unsigned long long)p.flushes, p.hashBytes / 1048576.0, p.hashMs, (unsigned long long)p.uploads,
                          p.uploadBytes / 1048576.0, (unsigned long long)p.resolves, (unsigned long long)p.writebacks,
                          (unsigned long long)p.pendingAdded, (unsigned long long)p.exportDraws, (unsigned long long)p.flushExport, (unsigned long long)p.flushSync,
                          (unsigned long long)p.gpuVertexCopies, (unsigned long long)p.syncRetries, (unsigned long long)p.chunks,
                          (unsigned long long)p.idleSubmits, (unsigned long long)p.asyncFences, (unsigned long long)p.asyncWaits,
-                         (unsigned long long)p.copyInsAroundPending);
+                         (unsigned long long)p.copyInsAroundPending, (unsigned long long)p.hashSkips,
+                         (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages());
+                    faultsLast = mem::watch::faults();
                     if (!p.syncsBy.empty() || !p.uploadsBy.empty())
                     {
                         std::string why, ups;

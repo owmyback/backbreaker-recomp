@@ -324,7 +324,7 @@ GUEST_IMPORT(NtReadFile)
     File* f = fileFromHandle(ctx.r3.u32);
     if (!f || f->fd < 0) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
     uint64_t off = pOffset ? read64(pOffset) : f->position;
-    ssize_t n = pread(f->fd, host(buf), len, off);
+    ssize_t n = mem::readFile(f->fd, buf, len, off); // host buffer for watched physical pages
     if (n < 0) n = 0;
     f->position = off + n;
     uint32_t status = (n == 0 && len > 0) ? STATUS_END_OF_FILE : STATUS_SUCCESS;
@@ -346,7 +346,7 @@ GUEST_IMPORT(NtReadFileScatter)
     {
         uint32_t page = read32(segs + i * 8 + 4); // 64-bit element, low word is the address
         uint32_t chunk = std::min<uint32_t>(0x1000, len - total);
-        ssize_t n = pread(f->fd, host(page), chunk, off + total);
+        ssize_t n = mem::readFile(f->fd, page, chunk, off + total);
         if (n <= 0) break;
         total += n;
         if (uint32_t(n) < chunk) break;

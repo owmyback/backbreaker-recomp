@@ -105,6 +105,12 @@ covers IDAT however it is encoded - stored blocks today, real deflate if the wri
 It writes its test images to a temporary directory and removes them again; `PNG_TEST_VERBOSE=1`
 prints one line per image (file size, IDAT bytes, which row filters it met).
 
+The texture write watch (`runtime/memory.cpp`, #73) is tested on the real memory layout: writes
+through each physical view, two textures sharing a page, file reads into protected pages, and many
+threads writing while the pages are re-protected:
+
+    mkdir -p build && clang++ -std=c++20 -O2 -pthread -I runtime tests/memory_watch_test.cpp runtime/memory.cpp -o build/memory_watch_test && build/memory_watch_test
+
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 `scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`

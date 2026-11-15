@@ -466,8 +466,25 @@ swaps and draws, the CPU time of the command processor thread (which also runs t
 how much of it was spent polling in `WAIT_REG_MEM`, i.e. waiting for the game rather than working,
 GPU waits and flushes, texture bytes hashed and the time it took, texture uploads, resolves and
 writebacks, memory export draws (and how many waited for the GPU), syncs that had pending writes,
-GPU vertex copies and draws recorded again after a sync. Pair it with `tools/fps_report.py` on the
+GPU vertex copies and draws recorded again after a sync, and the write watch: texture checks
+answered without reading, write faults and pages watched. Pair it with `tools/fps_report.py` on the
 same log for the fps side.
+
+## Texture write watch
+Finding out whether a texture changed used to mean reading all of its bytes every frame it was
+used: 1.3 GB a second in a match, about a third of the renderer's time (issue #73). Now, before the
+renderer reads a texture's guest memory, it write-protects those pages (`mem::watch`,
+`runtime/memory.cpp`), in all three physical views (0xA0000000, 0xC0000000, 0xE0000000), since
+any of them can write the same RAM. A write afterwards - by the game, a file read, the GPU results
+the runtime copies back - faults once: the SIGSEGV hook in `main.cpp` stamps the page with the next
+value of a global counter and makes it writable again, and the store is retried. A texture is
+unchanged if every page it reads is still protected and carries a stamp older than the one taken
+when the renderer last read it; the stamps keep two textures that share a page apart. File reads
+into physical memory go through a host buffer (`mem::readFile`), because `pread` into a
+protected page would fail with EFAULT instead of faulting. A texture that changed four times in a
+row (a movie frame, an image the CPU draws) is left unwatched for 300 frames and hashed every frame
+instead, so it does not fault on every write. `tests/memory_watch_test.cpp` checks all of this on
+the real memory layout, including the race between a fault and the renderer re-protecting a page.
 
 ## Shader disassembler
 `./build/xenos-disasm captures/shaders` (files or directories, searched recursively) prints a
@@ -546,5 +563,5 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
   written as 0), nor are destinations resolved every frame; a resolve's own format conversion is
   skipped on the GPU side (textures sample the resolve image in the render target's format); 1D/3D
   textures and some formats are placeholders; signed texture formats are read unsigned; textures
-  are hashed once per frame they are used and re-uploaded only when their bytes changed (no
-  write-watching); depth is 32-bit float instead of 24-bit
+  are re-uploaded only when their bytes changed, which is known from the write watch below or,
+  for textures whose bytes change all the time, from hashing them once per frame; depth is 32-bit float instead of 24-bit

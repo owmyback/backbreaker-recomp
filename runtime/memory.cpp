@@ -5,6 +5,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <atomic>
 #include <string>
 #include <sys/mman.h>
 #include <tuple>
@@ -134,6 +135,104 @@ namespace mem
         view(0xE0000000, 0x1000, kPhysicalSize - 0x1000);
         close(fd);
         info("guest memory at %p", base);
+    }
+
+    namespace watch
+    {
+        namespace
+        {
+            constexpr uint32_t kPages = kPhysicalSize >> 12;
+            std::atomic<uint64_t> g_counter{1};      // write stamps; 0 = never written
+            std::atomic<uint64_t> g_faults{0};
+            std::atomic<uint32_t> g_protectedCount{0};
+            std::atomic<uint64_t>* g_stamp = new std::atomic<uint64_t>[kPages]();
+            std::atomic<uint8_t>* g_protected = new std::atomic<uint8_t>[kPages]();
+
+            // The page's three host addresses: 0xA0000000 and 0xC0000000 views map physical 0 at
+            // their start, the 0xE0000000 view starts at physical 0x1000
+            void setProtection(uint32_t firstPage, uint32_t count, int prot)
+            {
+                size_t bytes = size_t(count) << 12;
+                uint32_t phys = firstPage << 12;
+                mprotect(base + 0xA0000000u + phys, bytes, prot);
+                mprotect(base + 0xC0000000u + phys, bytes, prot);
+                if (phys >= 0x1000) mprotect(base + 0xE0000000u + phys - 0x1000, bytes, prot);
+                else if (count > 1) mprotect(base + 0xE0000000u, bytes - 0x1000, prot);
+            }
+
+            // Order matters against protect() on the renderer thread: stamp, make writable, and only
+            // then clear the flag. protect() re-protects only pages whose flag is clear, so its
+            // read-only mprotect always lands after this writable one, never before it (which would
+            // leave a writable page marked protected, and later writes unseen).
+            void unprotectPage(uint32_t page)
+            {
+                g_stamp[page].store(g_counter.fetch_add(1) + 1);
+                setProtection(page, 1, PROT_READ | PROT_WRITE);
+                if (g_protected[page].exchange(0)) g_protectedCount.fetch_sub(1);
+            }
+        }
+
+        uint64_t protect(uint32_t start, uint32_t end)
+        {
+            uint64_t stamp = g_counter.load(); // before protecting: a write after it stamps later
+            uint32_t p = start >> 12, last = std::min<uint32_t>((end + 0xFFF) >> 12, kPages);
+            while (p < last)
+            {
+                if (g_protected[p].load()) { p++; continue; }
+                uint32_t run = p;
+                while (run < last && !g_protected[run].load())
+                {
+                    g_protected[run].store(1);
+                    run++;
+                }
+                g_protectedCount.fetch_add(run - p);
+                setProtection(p, run - p, PROT_READ);
+                p = run;
+            }
+            return stamp;
+        }
+
+        bool unchangedSince(uint32_t start, uint32_t end, uint64_t stamp)
+        {
+            uint32_t last = std::min<uint32_t>((end + 0xFFF) >> 12, kPages);
+            for (uint32_t p = start >> 12; p < last; p++)
+                if (!g_protected[p].load(std::memory_order_relaxed) || g_stamp[p].load(std::memory_order_relaxed) > stamp) return false;
+            return true;
+        }
+
+        void release(uint32_t start, uint32_t end)
+        {
+            uint32_t last = std::min<uint32_t>((end + 0xFFF) >> 12, kPages);
+            for (uint32_t p = start >> 12; p < last; p++)
+                if (g_protected[p].load()) unprotectPage(p);
+        }
+
+        bool onFault(const void* addr)
+        {
+            const uint8_t* a = (const uint8_t*)addr;
+            if (a < base + 0xA0000000u || a >= base + 0x100000000ull) return false;
+            uint32_t page = physicalAddress(uint32_t(a - base)) >> 12;
+            if (page >= kPages) return false;
+            // Nothing else ever makes the physical views non-writable, so a fault here is a watched
+            // page (or one another thread unprotected a moment ago): stamp it, make it writable, retry.
+            unprotectPage(page);
+            g_faults.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        uint64_t faults() { return g_faults.load(); }
+        uint32_t protectedPages() { return g_protectedCount.load(); }
+    }
+
+    long readFile(int fd, uint32_t guest, uint32_t len, int64_t offset)
+    {
+        if (guest < kPhysicalBase || watch::protectedPages() == 0)
+            return pread(fd, host(guest), len, offset);
+        static thread_local std::vector<uint8_t> buffer;
+        buffer.resize(len);
+        long n = pread(fd, buffer.data(), len, offset);
+        if (n > 0) std::memcpy(host(guest), buffer.data(), size_t(n)); // faults on watched pages, as a game write would
+        return n;
     }
 
     namespace

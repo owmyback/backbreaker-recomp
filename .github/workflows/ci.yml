@@ -96,6 +96,16 @@ jobs:
       - name: Run PNG writer test
         run: ./build/png_test
 
+      # Texture write watch (runtime/memory.cpp, #73): page protection in all three physical views,
+      # stamps, release, readFile into protected pages, and the protect-vs-fault race
+      - name: Build memory write watch test
+        run: |
+          mkdir -p build
+          clang++ -std=c++20 -O2 -Wall -Wextra -pthread -I runtime tests/memory_watch_test.cpp runtime/memory.cpp -o build/memory_watch_test
+
+      - name: Run memory write watch test
+        run: ./build/memory_watch_test
+
       - name: Check tools scripts compile
         run: python3 -m py_compile tools/*.py
 

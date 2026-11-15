@@ -53,6 +53,32 @@ namespace mem
     inline uint8_t* physical(uint32_t p) { return base + kPhysicalBase + (p & 0x1FFFFFFF); }
     inline bool isGuest(const void* p) { return (const uint8_t*)p >= base && (const uint8_t*)p < base + 0x100000000ull; }
 
+    // Write watch on physical memory (#73). The renderer used to read every texture every frame to
+    // see whether it had changed. Now it protects a texture's pages (read-only, in all three
+    // physical views) before reading them, and any write afterwards - by the game, a file read, the
+    // runtime - faults once: the page gets a new stamp and becomes writable again. A texture whose
+    // pages all still carry a stamp older than its own is unchanged without reading a byte.
+    // Physical addresses, 4 KB pages. Every function but onFault is for the renderer thread.
+    namespace watch
+    {
+        // Protect [start, end) and return the stamp to keep: a page written afterwards carries a
+        // later one. Call it before reading the memory, so no write can slip in between.
+        uint64_t protect(uint32_t start, uint32_t end);
+        // No page of [start, end) written since `stamp` (all still protected)
+        bool unchangedSince(uint32_t start, uint32_t end, uint64_t stamp);
+        // The runtime is about to write [start, end) itself: unprotect and stamp it up front
+        // (cheaper than a fault per page)
+        void release(uint32_t start, uint32_t end);
+        // SIGSEGV hook (crash handler): true if `addr` is a protected physical page, which is
+        // writable again when it returns
+        bool onFault(const void* addr);
+        uint64_t faults();        // pages unprotected by a write, so far
+        uint32_t protectedPages();
+    }
+    // pread() into guest memory. A syscall writing a protected page fails (EFAULT) instead of
+    // faulting, so reads into physical memory go through a host buffer and memcpy.
+    long readFile(int fd, uint32_t guest, uint32_t len, int64_t offset);
+
     // Big-endian accessors
     inline uint8_t read8(uint32_t a) { return base[a]; }
     inline uint32_t read32(uint32_t a) { return __builtin_bswap32(*(uint32_t*)(base + a)); }
