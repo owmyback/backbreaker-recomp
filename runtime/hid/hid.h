@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 
 namespace hid
@@ -19,4 +20,11 @@ namespace hid
     void startInputThread();
     // User 0 stays connected without a real controller (scripted / headless runs).
     void setVirtualPad(bool enabled);
+
+    // For the in-window overlay (#101). While captured, the game reads real controllers as neutral
+    // (scripted presses still go through). takeMenuPresses() returns the buttons newly pressed
+    // on any real controller since the last call: XINPUT_GAMEPAD_* masks (the left stick counts
+    // as d-pad up/down), plus 0x0400 for the Guide (PS) button.
+    void setInputCaptured(bool captured);
+    uint32_t takeMenuPresses();
 }

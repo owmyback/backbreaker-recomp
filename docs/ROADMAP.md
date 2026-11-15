@@ -67,7 +67,7 @@ caches) until the heap ran out a minute into the match.
 | 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `100ec86` |
-| 11 | Achievements (unlocks, pop-ups, achievements screen) | **Started** (database, unlocks, store, `--achievements`: #97; pop-up and overlay not started) | - |
+| 11 | Achievements (unlocks, pop-ups, achievements screen) | **In progress** (database, unlocks, store: #97 done; overlay list and pop-up: #101) | `1a59660` |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
 "Phase 2 (Vulkan renderer)". The numbering above replaces that.
@@ -645,9 +645,11 @@ What the game provides (checked 2026-11-13):
   (Corrected 2026-11-15: an earlier note here said 0x000B0025 and that the game imports
   `XamShowAchievementsUI`; it imports neither, and it has no achievements screen of its own.)
 
-Status (#97): parts 1 and 2 are done. The SPA reader (`runtime/kernel/spa.h`, tested), the
-unlock path with a per-machine store (`game/achievements/`), the enumerator, and
-`--achievements` to see the list. See docs/runtime.md, "Achievements".
+Status: parts 1 and 2 are done (#97, `1a59660`): the SPA reader (`runtime/kernel/spa.h`,
+tested), the unlock path with a per-machine store (`game/achievements/`), the enumerator, and
+`--achievements`. Confirmed in play: "First of Many" and "Quarter Pounder" unlocked, stored and
+listed. Parts 3-5 (#101): the overlay (`runtime/video/overlay.cpp`), the achievements list on F1 /
+Guide, and the unlock pop-up. See docs/runtime.md, "Achievements".
 
 Planned parts:
 1. Database reader: parse the XDBF resource (achievements, strings, images) from the loaded

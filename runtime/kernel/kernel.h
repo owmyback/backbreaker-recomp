@@ -21,6 +21,20 @@ namespace kernel
     // unlocks earned so far from dir (game/achievements). After the image and XEX header load.
     void initAchievements(const std::string& dir);
     void printAchievements(); // --achievements
+
+    // For the in-window achievements overlay (runtime/video/overlay.cpp, #101)
+    struct AchievementView
+    {
+        uint16_t id = 0, gamerscore = 0;
+        std::string label, description, unachieved; // UTF-8
+        bool unlocked = false, secret = false;      // secret: description hidden while locked
+        uint64_t unlockTime = 0;                    // unix seconds
+        const uint8_t* image = nullptr;             // PNG in the SPA (the loaded image), or null
+        uint32_t imageSize = 0;
+    };
+    std::vector<AchievementView> achievementList();
+    uint64_t achievementUnlockCount();  // new unlocks so far this run (cheap: an atomic)
+    uint16_t lastUnlockedAchievement(); // id of the most recent one
     const std::string& savesRoot();
     // Runtime mounts, used by XAM content packages: device path prefix such as
     // "\Device\Content\1" -> host directory, and symbolic links such as "save:" -> device path.

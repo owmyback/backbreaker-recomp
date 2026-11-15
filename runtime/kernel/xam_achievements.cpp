@@ -15,6 +15,7 @@
 #include "xam_enum.h"
 #include "../log.h"
 
+#include <atomic>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +51,9 @@ namespace
     kernel::spa::Info g_spa;
     std::string g_dir;                       // game/achievements
     std::map<uint16_t, uint64_t> g_unlocked; // achievement id -> unlock time (unix seconds)
+    const uint8_t* g_spaBlob = nullptr;      // the SPA in the loaded image (for its PNG icons)
+    std::atomic<uint64_t> g_unlockCount{0};  // new unlocks this run (the overlay's pop-up polls it)
+    uint16_t g_lastUnlocked = 0;
 
     fs::path storePath()
     {
@@ -118,6 +122,7 @@ namespace
             if (std::strncmp((const char*)host(e), want, 8) != 0) continue;
             uint32_t address = read32(e + 8), size = read32(e + 12);
             std::string error;
+            g_spaBlob = host(address);
             if (!kernel::spa::parse(host(address), size, g_spa, error))
             {
                 warn("[xam] achievement data (%s at %08X) unusable: %s", want, address, error.c_str());
@@ -150,6 +155,8 @@ namespace
         if (g_unlocked.count(uint16_t(id)))
             return; // already earned; the game reports some again
         g_unlocked[uint16_t(id)] = uint64_t(std::time(nullptr));
+        g_lastUnlocked = uint16_t(id);
+        g_unlockCount.fetch_add(1, std::memory_order_release);
         saveStore();
         info("[xam] achievement unlocked: %s (%u G)", a->label.c_str(), a->gamerscore);
     }
@@ -213,6 +220,41 @@ namespace kernel
         std::lock_guard guard(g_lock);
         g_dir = dir;
         loadLocked();
+    }
+
+    std::vector<AchievementView> achievementList()
+    {
+        std::lock_guard guard(g_lock);
+        loadLocked();
+        std::vector<AchievementView> out;
+        for (auto& a : g_spa.achievements)
+        {
+            AchievementView v;
+            v.id = a.id;
+            v.label = a.label;
+            v.description = a.description;
+            v.unachieved = a.unachieved;
+            v.gamerscore = a.gamerscore;
+            auto it = g_unlocked.find(a.id);
+            v.unlocked = it != g_unlocked.end();
+            v.unlockTime = v.unlocked ? it->second : 0;
+            v.secret = !(a.flags & spa::kShowUnachieved);
+            if (auto img = g_spa.images.find(a.imageId); img != g_spa.images.end() && g_spaBlob)
+            {
+                v.image = g_spaBlob + img->second.first;
+                v.imageSize = img->second.second;
+            }
+            out.push_back(std::move(v));
+        }
+        return out;
+    }
+
+    uint64_t achievementUnlockCount() { return g_unlockCount.load(std::memory_order_acquire); }
+
+    uint16_t lastUnlockedAchievement()
+    {
+        std::lock_guard guard(g_lock);
+        return g_lastUnlocked;
     }
 
     // --achievements: the list with what is earned, on stdout (the game has no screen for it;

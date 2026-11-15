@@ -303,10 +303,31 @@ of `game/`). When a match starts the game reads the list back through
 flag and their unlock time, as in Xenia, so the game knows they are done.
 
 The game has no achievements screen of its own: on the console that was the system Guide's, and
-the game does not even import `XamShowAchievementsUI`. `--achievements` prints the list with what
-is unlocked (when, and the description; secret ones stay hidden until earned) and exits without
-starting the game. Run it from the repo root. An in-game pop-up and an overlay list are roadmap
-phase 11 parts 3-5 (presenter work).
+the game does not even import `XamShowAchievementsUI`. The runtime draws one instead (#101,
+`runtime/video/overlay.cpp`):
+- **F1**, or the controller's **Guide (PS) button**, opens the achievements list over the game:
+  every achievement with its icon (from the SPA), gamerscore, description, and the unlock date of
+  the earned ones; secret ones show as "Secret achievement" until earned; totals at the top.
+  Up/Down (d-pad, left stick or arrow keys) moves, LB/RB or PgUp/PgDn a page, Home/End; B, Back,
+  Esc, F1 or Guide closes it. While it is open the game sees a neutral controller (scripted
+  `--press` input still goes through).
+- An unlock shows an "Achievement unlocked" pop-up (icon, name, gamerscore) for 6 s, at the top of
+  the screen, or at the bottom of the list when the list is open.
+- F12 screenshots include what the overlay shows.
+- `--overlay-preview <file.png>[@WxH]` draws the list and a pop-up over a grey backdrop into a PNG
+  (default 1920x1080) and exits: the drawing can be checked without a window or a GPU.
+
+How it is drawn: on the CPU with SDL3's software renderer (its built-in 8x8 font, scaled by
+2/3/4/6 at 720p/1080p/1440p/2160p; icons decoded with `SDL_LoadPNG_IO`), only when what is shown
+changes. The presenter then calls `overlay::record` once, after the game's blit and before the
+F12 read-back: it copies the new picture into an RGBA8 image when it changed and blits the
+visible panels (opaque) onto the swapchain image, in the presenter's own command buffer. Nothing is
+created until something is first shown (then one image and one staging buffer the size of the
+window), and nothing is recorded while nothing is shown: a hidden overlay costs one atomic load per
+present (the unlock counter).
+
+`--achievements` prints the same list in the terminal and exits without starting the game (run it
+from the repo root).
 
 The other XGI messages the game sends: `XUserSetContext` (0x000B0006) and `XUserSetPropertyEx`
 (0x000B0007) for presence and stats (nothing to do offline), and `XUserReadStats` (0x000B0021),

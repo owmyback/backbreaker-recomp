@@ -12,6 +12,7 @@
 #include "video/vk_context.h"
 #include "hid/hid.h"
 #include "video/presenter.h"
+#include "video/overlay.h"
 #include "build_id.h"
 #include "log.h"
 #include "memory.h"
@@ -244,6 +245,7 @@ int main(int argc, char** argv)
     std::string xex = "game/extracted/default.xex";
     int timeout = 0;
     bool headless = false, fullscreen = false, mute = false, audio = false, listAchievements = false;
+    std::string overlayPreview;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
     {
@@ -265,6 +267,8 @@ int main(int argc, char** argv)
             audio = true; // play audio in a headless run too
         else if (a == "--audio-dump" && i + 1 < argc)
             audioDump = argv[++i]; // the stereo output as a 32-bit float WAV
+        else if (a == "--overlay-preview" && i + 1 < argc)
+            overlayPreview = argv[++i]; // file.png or file.png@WxH: draw the achievements overlay into a PNG, then exit
         else if (a == "--achievements")
             listAchievements = true; // print the list with what is unlocked, then exit
         else if (a == "--fullscreen")
@@ -323,6 +327,16 @@ int main(int argc, char** argv)
     {
         kernel::printAchievements();
         return 0;
+    }
+    if (!overlayPreview.empty())
+    {
+        uint32_t w = 1920, h = 1080;
+        if (size_t at = overlayPreview.rfind('@'); at != std::string::npos)
+        {
+            std::sscanf(overlayPreview.c_str() + at + 1, "%ux%u", &w, &h);
+            overlayPreview.resize(at);
+        }
+        return overlay::writePreview(overlayPreview.c_str(), w, h) ? 0 : 1;
     }
 
     g_mainThread = kernel::createGuestThread(g_mainCtx, 0x100000);

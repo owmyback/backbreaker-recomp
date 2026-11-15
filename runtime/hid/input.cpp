@@ -308,6 +308,14 @@ namespace
     SDL_Gamepad* g_open[kMaxUsers] = {};
     SDL_JoystickID g_openId[kMaxUsers] = {};
     bool g_sdlReady = false;
+
+    // The overlay (achievements list, #101) takes the controllers while it is open: the game then
+    // reads a neutral pad, and the overlay reads the button presses. kGuideMask is outside the
+    // XINPUT_GAMEPAD_* buttons the game sees.
+    constexpr uint16_t kGuideMask = 0x0400;
+    std::atomic<bool> g_captured{false};
+    uint16_t g_menuHeld[kMaxUsers] = {};
+    std::atomic<uint32_t> g_menuPresses{0};
 }
 
 namespace hid
@@ -362,7 +370,16 @@ namespace hid
                 continue;
             }
             h.connected = true;
-            h.pad = readSdl(g_open[u]);
+            Pad raw = readSdl(g_open[u]);
+            // Menu presses for the overlay: button edges, the Guide (PS) button, and the left stick
+            // pushed past half way counted as the d-pad
+            uint16_t menu = raw.buttons;
+            if (SDL_GetGamepadButton(g_open[u], SDL_GAMEPAD_BUTTON_GUIDE)) menu |= kGuideMask;
+            if (raw.ly > 16384) menu |= 0x0001;
+            if (raw.ly < -16384) menu |= 0x0002;
+            g_menuPresses.fetch_or(uint32_t(menu & ~g_menuHeld[u]), std::memory_order_relaxed);
+            g_menuHeld[u] = menu;
+            h.pad = g_captured.load(std::memory_order_relaxed) ? Pad{} : raw; // keys below release too
             // Keystroke edges
             for (size_t k = 0; k < std::size(kKeys); k++)
             {
@@ -382,6 +399,10 @@ namespace hid
             }
         }
     }
+
+    void setInputCaptured(bool captured) { g_captured = captured; }
+
+    uint32_t takeMenuPresses() { return g_menuPresses.exchange(0, std::memory_order_relaxed); }
 
     void startInputThread()
     {

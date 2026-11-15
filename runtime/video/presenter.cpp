@@ -7,6 +7,7 @@
 // Both threads use one queue: the renderer submits a frame before publishing it, so queue
 // submission order plus the barrier below order its writes before our read.
 #include "presenter.h"
+#include "overlay.h"
 #include "vk_context.h"
 #include "../build_id.h"
 #include "../debug/png.h"
@@ -538,6 +539,10 @@ namespace video
                     letterbox(vk.source, vk.sourceWidth, vk.sourceHeight);
             }
 
+            // The overlay (achievements list, unlock pop-up; #101) on top of the game. Records
+            // nothing while nothing is shown. Before the F12 read-back, so screenshots include it.
+            overlay::record(*g_ctx, vk.cmd, dst, vk.swapExtent);
+
             // F12: read back exactly what is on screen - the letterboxed, format-converted picture,
             // whether it came from the renderer's front buffer or the raw front-buffer upload. We are
             // inside the same command buffer, so this is ordered after the blit and before the present.
@@ -639,6 +644,8 @@ namespace video
             {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                     running = false;
+                else if (overlay::handleEvent(e))
+                    continue; // F1 and the open list's keys
                 else if (e.type == SDL_EVENT_KEY_DOWN && (e.key.scancode == SDL_SCANCODE_F12 || e.key.key == SDLK_F12) && vk.shotSupported)
                 {
                     if (!e.key.repeat) vk.shotWant = true; // one per press, captured on the next present so the picture is complete
@@ -659,6 +666,7 @@ namespace video
             }
             if (!running) break;
             hid::pollGamepads();
+            overlay::handlePad(hid::takeMenuPresses());
 
             if (!haveSwapchain)
             {
@@ -698,6 +706,7 @@ namespace video
         for (auto& t : vk.shotWriters) t.join(); // let any in-flight PNG finish writing
         destroyShotBuffer();
         { std::lock_guard g(g_ctx->queueLock); vkDeviceWaitIdle(vk.device); }
+        overlay::destroy(vk.device);
         info("[video] window closed");
         saveSettings(); // what the window was when it closed, for the next run
     }
