@@ -1142,15 +1142,15 @@ void main() {
         }
 
         // Sampler for a texture fetch constant: clamp modes, filters (mag/min/mip: 0 point, 1 linear,
-        // 2 base map = no mips), anisotropy (0 off, n = 2^(n-1):1), the mip range and the LOD bias
-        // (signed, 1/32 steps). Shader fetch instructions could override the filters; none of the
-        // match's do (all leave them to the fetch constant).
+        // 2 base map = no mips), anisotropy (0 off, n = 2^(n-1):1), the mip range, the LOD bias
+        // (signed, 1/32 steps) and the border colour. Shader fetch instructions could override the
+        // filters; none of the match's do (all leave them to the fetch constant).
         VkSampler sampler(const uint32_t d[6])
         {
             uint32_t clamp = (d[0] >> 10) & 0x1FF, filters = (d[3] >> 19) & 0x3F, aniso = (d[3] >> 25) & 7;
-            uint32_t mipMin = (d[4] >> 2) & 0xF, mipMax = (d[4] >> 6) & 0xF, lodBias = (d[4] >> 12) & 0x3FF;
+            uint32_t mipMin = (d[4] >> 2) & 0xF, mipMax = (d[4] >> 6) & 0xF, lodBias = (d[4] >> 12) & 0x3FF, border = d[5] & 3;
             uint64_t key = clamp | (uint64_t(filters) << 9) | (uint64_t(aniso) << 15) | (uint64_t(mipMin) << 18) | (uint64_t(mipMax) << 22) |
-                           (uint64_t(lodBias) << 26);
+                           (uint64_t(lodBias) << 26) | (uint64_t(border) << 36);
             auto it = g_samplers.find(key);
             if (it != g_samplers.end()) return it->second;
             static const VkSamplerAddressMode modes[8] = {
@@ -1181,7 +1181,11 @@ void main() {
                 si.anisotropyEnable = VK_TRUE;
                 si.maxAnisotropy = std::min(wanted, C->props.limits.maxSamplerAnisotropy);
             }
-            si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+            // Border colour (used by clamp-to-border): 0 black (all zero), 1 opaque white, 2/3 YCbCr
+            // black (core Vulkan has no such colour; not seen in the match, so all-zero). The shadow
+            // maps are white-bordered (issue #64): outside a map the depth reads 1.0 (lit), and with a
+            // black border each map's whole projected square came out shadowed.
+            si.borderColor = border == 1 ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
             VkSampler sm;
             VK_CHECK(vkCreateSampler(D, &si, nullptr, &sm));
             return g_samplers[key] = sm;
