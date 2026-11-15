@@ -3,6 +3,7 @@
 #include "capture.h"
 #include "gpu.h"
 #include "state.h"
+#include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
 
@@ -63,6 +64,7 @@ namespace gpu::capture
         std::map<uint64_t, Shader> g_shaders; // hash -> microcode (all shaders seen, big-endian words)
         uint64_t g_currentShader[2] = { 0, 0 }; // vertex, pixel
         std::set<uint64_t> g_targets_pending; // frames still to capture
+        std::multiset<double> g_timesPending;  // --capture-at seconds still to come
         std::string g_dumpDir;                // --dump-shaders target, empty = off
         std::string g_dir = "captures";
         bool g_active = false;
@@ -232,6 +234,13 @@ namespace gpu::capture
         g_dir = dir;
     }
 
+    void requestAt(double seconds, const std::string& dir)
+    {
+        std::lock_guard guard(g_lock);
+        g_timesPending.insert(seconds);
+        g_dir = dir;
+    }
+
     void onPacket(uint32_t opcode)
     {
         if (!g_active) return;
@@ -308,7 +317,15 @@ namespace gpu::capture
         if (g_active)
             finish(front, width, height);
         // frameNumber swaps have happened; the next frame ends with swap frameNumber + 1
-        if (g_targets_pending.erase(frameNumber + 1))
+        bool timed = false;
+        double t = 0;
+        if (!g_timesPending.empty() && !g_targets_pending.count(frameNumber + 1) && (t = hid::secondsSinceLaunch()) >= *g_timesPending.begin())
+        {
+            info("[capture] --capture-at %g: frame %llu (%.2f s)", *g_timesPending.begin(), (unsigned long long)frameNumber + 1, t);
+            g_timesPending.erase(g_timesPending.begin());
+            timed = true;
+        }
+        if (g_targets_pending.erase(frameNumber + 1) || timed)
             begin(frameNumber + 1);
     }
 }

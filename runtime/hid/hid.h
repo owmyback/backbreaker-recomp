@@ -8,6 +8,8 @@ namespace hid
     // (held 150 ms), reported both as pad state and as keystroke events.
     // Returns false (and logs) on a malformed script.
     bool setScript(const std::string& script);
+    // Seconds since launch: the clock --press uses (also --screenshot-at and --capture-at).
+    double secondsSinceLaunch();
 
     // Host controllers through SDL3 (issue #6). SDL wants its events handled on one thread:
     // with a window that is the presenter's loop, which calls initGamepads() once after SDL_Init

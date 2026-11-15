@@ -10,6 +10,9 @@ namespace gpu::capture
     // Capture the frame that ends with swap number `frame` (1-based), into `dir`.
     // Can be called several times to capture several frames in one run.
     void request(uint64_t frame, const std::string& dir = "captures");
+    // --capture-at: capture the frame that starts at the first swap at or after that many seconds
+    // since launch (hid::secondsSinceLaunch, the --press clock). It still lands in captures/frame_N/.
+    void requestAt(double seconds, const std::string& dir = "captures");
 
     // Write every unique shader the game loads during the run to `dir` (vs_/ps_<hash>.bin).
     void dumpAllShaders(const std::string& dir);

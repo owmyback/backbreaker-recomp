@@ -23,6 +23,7 @@
 #include "mip_layout.h"
 #include "tiling.h"
 #include "../debug/png.h"
+#include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
 #include "../video/presenter.h"
@@ -67,6 +68,7 @@ namespace gpu::render
         vkctx::Context* C = nullptr;
         VkDevice D = VK_NULL_HANDLE;
         std::set<uint64_t> g_screenshots;
+        std::multimap<double, std::string> g_timedScreenshots; // seconds since launch -> label
         // Guest physical memory imported as a writable storage buffer (memory export)
         VkBuffer g_guestMem = VK_NULL_HANDLE;
         VkDeviceMemory g_guestMemMemory = VK_NULL_HANDLE;
@@ -3007,7 +3009,8 @@ void main()
             if (!drawOnce(s, indexBase, indexSizeWord)) warnOnce("a draw needs more than the whole upload buffer: skipped");
         }
 
-        void writeScreenshot(VkBuffer buffer, VkDeviceMemory memory, VkFormat format, uint32_t w, uint32_t h, uint64_t frameNumber)
+        void writeScreenshot(VkBuffer buffer, VkDeviceMemory memory, VkFormat format, uint32_t w, uint32_t h, const std::string& path,
+                             const std::string& note)
         {
             void* p = nullptr;
             VK_CHECK(vkMapMemory(D, memory, 0, VkDeviceSize(w) * h * 4, 0, &p));
@@ -3016,8 +3019,7 @@ void main()
             if (format == VK_FORMAT_B8G8R8A8_UNORM)
                 for (size_t i = 0; i < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);
             std::filesystem::create_directories("screenshots");
-            std::string path = "screenshots/frame_" + std::to_string(frameNumber) + ".png";
-            if (debug::writePng(path, rgba.data(), w, h)) info("[render] screenshot %s (%ux%u)", path.c_str(), w, h);
+            if (debug::writePng(path, rgba.data(), w, h)) info("[render] screenshot %s (%ux%u%s)", path.c_str(), w, h, note.c_str());
             else warn("[render] could not write %s", path.c_str());
             vkDestroyBuffer(D, buffer, nullptr);
             vkFreeMemory(D, memory, nullptr);
@@ -3028,6 +3030,7 @@ void main()
     void setResolutionScale(uint32_t scale) { g_scale = std::clamp(scale, 1u, 4u); }
     void setAnisotropy(uint32_t n) { g_forcedAniso = std::clamp(n, 1u, 16u); }
     void requestScreenshot(uint64_t frame) { g_screenshots.insert(frame); }
+    void requestScreenshotAt(double seconds, const std::string& label) { g_timedScreenshots.emplace(seconds, label); }
 
     void syncGuestMemory()
     {
@@ -3086,7 +3089,23 @@ void main()
         // Screenshot: copy the front buffer image into a host-visible buffer in this submission
         VkBuffer shot = VK_NULL_HANDLE;
         VkDeviceMemory shotMemory = VK_NULL_HANDLE;
-        if (g_screenshots.erase(frameNumber) && front && w && h)
+        std::string shotPath, shotNote;
+        if (g_screenshots.erase(frameNumber))
+            shotPath = "screenshots/frame_" + std::to_string(frameNumber) + ".png";
+        else if (!g_timedScreenshots.empty())
+        {
+            // One timed screenshot per swap: if two times fall within one frame, the next swap takes the second
+            double t = hid::secondsSinceLaunch();
+            if (t >= g_timedScreenshots.begin()->first)
+            {
+                shotPath = "screenshots/t_" + g_timedScreenshots.begin()->second + ".png";
+                char note[64];
+                snprintf(note, sizeof note, ", frame %llu at %.2f s", (unsigned long long)frameNumber, t);
+                shotNote = note;
+                g_timedScreenshots.erase(g_timedScreenshots.begin());
+            }
+        }
+        if (!shotPath.empty() && front && w && h)
         {
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.size = VkDeviceSize(w) * h * 4;
@@ -3117,7 +3136,7 @@ void main()
         if (shot)
         {
             if (submitted.submitted) VK_CHECK(vkWaitForFences(D, 1, &submitted.fence, VK_TRUE, UINT64_MAX));
-            writeScreenshot(shot, shotMemory, front->format, w, h, frameNumber);
+            writeScreenshot(shot, shotMemory, front->format, w, h, shotPath, shotNote);
         }
         g_frameSerial++;
         g_drawsInFrame = 0;

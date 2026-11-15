@@ -15,6 +15,7 @@
 #include "log.h"
 #include "memory.h"
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cstring>
@@ -167,6 +168,27 @@ namespace
         _exit(3);
     }
 
+    // Calls fn for each item of a comma-separated option value ("300,1200,2400")
+    template <typename F> void forEachItem(const std::string& list, F fn)
+    {
+        for (size_t p = 0; p < list.size();)
+        {
+            size_t q = std::min(list.find(',', p), list.size());
+            if (q > p) fn(list.substr(p, q - p));
+            p = q + 1;
+        }
+    }
+
+    // Seconds for --screenshot-at / --capture-at; false (and a warning) if the item isn't a number
+    bool parseSeconds(const std::string& item, const char* option, double& seconds)
+    {
+        char* end = nullptr;
+        seconds = std::strtod(item.c_str(), &end);
+        if (end != item.c_str() && *end == 0 && seconds >= 0) return true;
+        warn("%s: \"%s\" is not a number of seconds - ignored", option, item.c_str());
+        return false;
+    }
+
     void buildFunctionTable()
     {
         uint8_t* base = mem::base;
@@ -236,17 +258,14 @@ int main(int argc, char** argv)
         else if (a == "--anisotropy" && i + 1 < argc)
             gpu::render::setAnisotropy(uint32_t(std::atoi(argv[++i])));
         else if (a == "--screenshot" && i + 1 < argc)
-        {
             // frame numbers, comma-separated: --screenshot 600,1200 -> screenshots/frame_600.png, ...
-            std::string list = argv[++i];
-            for (size_t p = 0; p <= list.size();)
-            {
-                size_t q = list.find(',', p);
-                if (q == std::string::npos) q = list.size();
-                gpu::render::requestScreenshot(std::strtoull(list.substr(p, q - p).c_str(), nullptr, 10));
-                p = q + 1;
-            }
-        }
+            forEachItem(argv[++i], [](const std::string& n) { gpu::render::requestScreenshot(std::strtoull(n.c_str(), nullptr, 10)); });
+        else if (a == "--screenshot-at" && i + 1 < argc)
+            // seconds since launch (the --press clock): --screenshot-at 200,230 -> screenshots/t_200.png, ...
+            forEachItem(argv[++i], [](const std::string& s) {
+                double t;
+                if (parseSeconds(s, "--screenshot-at", t)) gpu::render::requestScreenshotAt(t, s);
+            });
         else if (a == "--dump-shaders")
             gpu::capture::dumpAllShaders("captures/shaders");
         else if (a == "--press" && i + 1 < argc)
@@ -256,16 +275,14 @@ int main(int argc, char** argv)
             hid::setVirtualPad(true); // user 0 stays connected for the scripted presses
         }
         else if (a == "--capture-frame" && i + 1 < argc)
-        {
             // one frame number or a comma-separated list: --capture-frame 300,1500,3000
-            std::string list = argv[++i];
-            for (size_t p = 0; p < list.size();)
-            {
-                size_t q = list.find(',', p);
-                gpu::capture::request(std::strtoull(list.substr(p, q - p).c_str(), nullptr, 10));
-                p = q == std::string::npos ? list.size() : q + 1;
-            }
-        }
+            forEachItem(argv[++i], [](const std::string& n) { gpu::capture::request(std::strtoull(n.c_str(), nullptr, 10)); });
+        else if (a == "--capture-at" && i + 1 < argc)
+            // seconds since launch, like --screenshot-at; still lands in captures/frame_N/
+            forEachItem(argv[++i], [](const std::string& s) {
+                double t;
+                if (parseSeconds(s, "--capture-at", t)) gpu::capture::requestAt(t);
+            });
         else
             image = a;
     }

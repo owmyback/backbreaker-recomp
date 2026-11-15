@@ -313,6 +313,7 @@ namespace
 namespace hid
 {
     void setVirtualPad(bool enabled) { g_virtualPad = enabled; }
+    double secondsSinceLaunch() { return now(); }
 
     void initGamepads()
     {

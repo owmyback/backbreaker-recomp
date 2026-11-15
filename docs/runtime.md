@@ -48,6 +48,14 @@ their guest address, and the presenter shows the image resolved to the front buf
   headless). `screenshots/` is gitignored - pictures of the game are not committed. F12 in the
   window writes the same kind of PNG from the swapchain image instead, i.e. what the window showed
   (letterboxed and at the window's size).
+- `--screenshot-at S[,S...]` takes seconds since launch instead, on the clock `--press` uses, and
+  writes `screenshots/t_S.png` (as typed: `t_200.png`, `t_212.5.png`) at the first swap at or
+  after that time; the log line names the frame and the exact time. Neither form makes two runs
+  of the Exhibition route show the same scenes everywhere: the **coin toss is random** (from about
+  125 s, one run kicks off and the other receives), loading screens pick random art, and a slower
+  build (e.g. `BB_VK_VALIDATION=1`) boots and loads slower, so it reaches each menu later in both
+  seconds and frames. Before the coin toss, runs of the same build match with either form; avoid
+  times right at a scripted press (the frame before and after it differ).
 - `--resolution-scale N` (1-4) renders at N times the game's resolution: 2 = 2560x1440,
   3 = 3840x2160. The game still sees 1280x720; render targets, viewports, scissors, resolves and
   clears are scaled. (The attract movie itself is a 1280x720 video, so it only gets smoother
@@ -211,7 +219,9 @@ Exhibition route: `rs_down@196:1.0,rs_up@197:0.3` pulls the right stick back and
 
 ## GPU frame capture
 `./build/backbreaker --capture-frame 1200` (or a list: `--capture-frame 300,1200,2400`) records the
-frame ending with that swap into `captures/frame_N/` (gitignored). In the window, **F10** captures
+frame ending with that swap into `captures/frame_N/` (gitignored). `--capture-at S[,S...]` takes
+seconds since launch instead, like `--screenshot-at`; the folder is still `frame_N`, and the log
+says which (`[capture] --capture-at 230: frame 6512`). In the window, **F10** captures
 a frame right after the press (the log names its folder), for a moment that is hard to reach by
 frame number:
 - `summary.txt` - draw count, primitive types, shaders used, render-target setups, textures

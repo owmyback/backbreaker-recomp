@@ -4,11 +4,15 @@
 // resolves, and hands the resolved front buffer to the presenter at each swap.
 // All hooks are called on the command processor thread.
 #include <cstdint>
+#include <string>
 
 namespace gpu::render
 {
     void disable();                         // --no-render: command stream side effects only
     void requestScreenshot(uint64_t frame); // write screenshots/frame_<N>.png when swap N is rendered
+    // --screenshot-at: write screenshots/t_<label>.png at the first swap at or after that many
+    // seconds since launch (hid::secondsSinceLaunch, the --press clock)
+    void requestScreenshotAt(double seconds, const std::string& label);
     // Internal resolution multiplier, 1-4 (2 = 2560x1440, 3 = 3840x2160 for the game's 1280x720)
     void setResolutionScale(uint32_t scale);
     // --anisotropy N (2-16): at least N:1 anisotropic filtering on textures the game minifies with
