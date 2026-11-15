@@ -78,9 +78,11 @@ their guest address, and the presenter shows the image resolved to the front buf
   `~/.cache/...`), one SPIR-V file per shader, keyed by a hash of its GLSL and compile options, so a
   changed translation simply gets a new file. Compiling with shaderc was nearly all of a new shader's
   cost (1.8 s for the 61 shaders the side select needs, a freeze, every run); with the cache only the
-  very first run pays it. The renderer logs once per second how many shaders it translated,
-  compiled and took from the cache, and how many pipelines it created, with the time each took.
-  Deleting the folder is always safe. `--no-shader-cache` compiles everything.
+  very first run pays it. At the end of a frame that needed new shaders or pipelines (at most once a
+  second, adding up everything since the last one) the renderer logs a `first use` line: how many
+  it translated, how many shaderc compiled, how many came from the cache and how many pipelines it
+  created, each with the time it took. Deleting the folder is always safe.
+  `--no-shader-cache` compiles everything.
 - `--no-render` turns the renderer off (command stream side effects only, as in phase 3).
 - Unsupported textures (1D/3D/cube and some formats, for now) show as magenta, and unsupported
   features log one `[render] WARNING` each.
@@ -88,6 +90,19 @@ their guest address, and the presenter shows the image resolved to the front buf
 On a crash, timeout, `kill` or Ctrl+C it prints the host backtrace (sub_XXXXXXXX names are guest functions),
 the last 32 kernel calls, a per-import usage summary, and the allocations still held grouped by
 the import that made them.
+
+While a run is up, the GPU thread prints one status line per second on stderr, and that line is the
+frame trace every frame-rate question here starts from:
+
+    [rt] [gpu] 30 fps, 900 draws/s, 30 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+
+`fps` and `draws/s` are that second's counts, `frames total` is what the guest has finished since
+the run started (so comparing it across two runs of the same timed route is the frame-rate ratio),
+the front buffer is the guest's own surface address and size, and the two numbers after `mem` are
+guest virtual and physical bytes in use, in MB. `[rt] ` is the prefix on every log line (`info()`
+in `runtime/log.h`); the tag after it says who wrote it - `[gpu]`, `[render]`, `[iso host]`,
+`[video]`, `[capture]`. `tools/fps_report.py` reads a saved log of these lines into a dip report;
+it is under "Debugging aids" below.
 
 ## Vulkan validation
 `BB_VK_VALIDATION=1` runs the process under the Khronos validation layer; `2` adds the layer's
@@ -323,6 +338,13 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
   with the host function it was in (e.g. `[pthread_cond_wait]` = parked in a wait). A thread
   stuck in a polling loop shows one stack at ~100% with no host function. Use it on hangs.
 - `tools/fninfo.py default.pe ppc ADDR...` - string references, imports and callees of guest functions
+- `tools/fps_report.py LOG` - a run log is already a frame trace, one `[gpu] N fps` line per second:
+  this prints its mean and worst seconds, the share below 25 and below 20, and for every dip second
+  below `--threshold` (25) what else was logged in it - first-use shader work, new pipelines, new
+  resolve destinations, screenshots and captures (those two cost frames themselves, and are marked
+  as overhead). `--from S --to S` narrows the seconds, `--compare OTHER.log` lines two runs up and
+  ends with the ratio of frames rendered, which is the frame-rate number a headless A/B run is after.
+  Fixtures it is checked against: `tests/data/fps_report_sample*.log`.
 - Sampling a busy thread: `eu-stack -1 -p <tid>` (recompiled frames are named sub_XXXXXXXX)
 - Crash report: host backtrace, guest registers, recent profiler scopes and import calls of the
   crashing thread. Indirect calls to addresses without a recompiled function are reported with

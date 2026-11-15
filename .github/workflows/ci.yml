@@ -81,7 +81,7 @@ jobs:
       - name: Check tools scripts compile
         run: python3 -m py_compile tools/*.py
 
-      - name: Check the build identity (issue #75)
+      - name: "Check the build identity (issue #75)"
         # The runtime itself cannot be linked here: it needs ppc/, the recompiled game code, which
         # only exists after a game checkout. What can be checked without game files is the identity
         # itself - the header the build stamps out of git, and the one translation unit that turns
@@ -100,3 +100,27 @@ jobs:
           # Not a git checkout (source tarball) must still build, and say so rather than guess.
           cmake -DGIT_EXECUTABLE=git -DSRC="$RUNNER_TEMP" -DOUT=build/build_version_nogit.h -P cmake/git_version.cmake
           grep -qE '^#define BB_GIT_REV    "unknown"$' build/build_version_nogit.h
+
+      - name: Check the fps report tool against its log fixtures
+        # No game files and no game code: the fixtures are hand-written from the status-line
+        # format documented in docs/runtime.md, and every number checked here is what that
+        # fixture means, so a change in the tool that shifts a count fails the step.
+        run: |
+          python3 tools/fps_report.py tests/data/fps_report_sample.log > fps_report.txt
+          grep -qF 'seconds 12  mean 23.8  min 6  below 25 4 (33.3%)  below 20 3 (25.0%)' fps_report.txt
+          grep -qF 'dips below 25: 4 of 12 seconds' fps_report.txt
+          grep -qF 'compiled by shaderc 48 (1687 ms)' fps_report.txt
+          grep -qF 'seconds holding a screenshot or capture: 2 (25.0 fps mean, 6 min, without them)' fps_report.txt
+          # Events belong to the status line AFTER them (it closes the second they happened in).
+          grep -qE '^  t=5 +6 fps .*compiled by shaderc 48 \(1687 ms\)' fps_report.txt
+          grep -qE '^  t=7 +12 fps .*\[overhead\].*screenshot screenshots/2026-11-15_12-00-07.png' fps_report.txt
+          # After the last status line: a second that never closed, dropped. (Not "! grep": bash -e
+          # ignores a failing "!" pipeline, so it could never fail the step.)
+          if grep -qF 'from the shader cache 3' fps_report.txt; then exit 1; fi
+          python3 tools/fps_report.py tests/data/fps_report_sample.log --threshold 12 --from 3 --to 9 > narrow.txt
+          grep -qF 'seconds 7  mean 23.1' narrow.txt
+          grep -qF 'dips below 12: 1 of 7 seconds' narrow.txt
+          python3 tools/fps_report.py tests/data/fps_report_sample.log --compare tests/data/fps_report_sample_b.log > compare.txt
+          grep -qF 'frames total 286 vs 194: 67.8%' compare.txt
+          python3 tools/fps_report.py tests/data/fps_report_sample.log --compare tests/data/fps_report_sample_b.log --from 3 --to 9 > compare_narrow.txt
+          grep -qF 'frames total 162 vs 109: 67.3%' compare_narrow.txt

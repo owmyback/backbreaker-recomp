@@ -1,0 +1,15 @@
+[rt] backbreaker-recomp: second fixture for tools/fps_report.py --compare (issue #78)
+[rt] [gpu] 20 fps, 600 draws/s, 20 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [gpu] 19 fps, 570 draws/s, 39 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [gpu] 10 fps, 300 draws/s, 49 frames total, front buffer 00840000 1280x720, 130 xma frames, mem 43+62 MB
+[rt] [gpu] 20 fps, 610 draws/s, 69 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [gpu] 18 fps, 540 draws/s, 87 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [render] first use: 40 shaders translated (2 ms), 48 compiled by shaderc (1980 ms), 0 from the shader cache, 26 pipelines (2 ms)
+[rt] [gpu] 5 fps, 150 draws/s, 92 frames total, front buffer 00840000 1280x720, 65 xma frames, mem 43+62 MB
+[rt] [gpu] 20 fps, 605 draws/s, 112 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [render] resolve destination 00840000: 1280x720
+[rt] [gpu] 9 fps, 270 draws/s, 121 frames total, front buffer 00840000 1280x720, 117 xma frames, mem 43+62 MB
+[rt] [gpu] 17 fps, 510 draws/s, 138 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [gpu] 20 fps, 602 draws/s, 158 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [gpu] 16 fps, 480 draws/s, 174 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB
+[rt] [gpu] 20 fps, 601 draws/s, 194 frames total, front buffer 00840000 1280x720, 260 xma frames, mem 43+62 MB

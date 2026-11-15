@@ -1,0 +1,23 @@
+[rt] backbreaker-recomp: run log fixture for tools/fps_report.py (issue #78); events precede the status line of their second
+[rt] [render] shader cache: /home/example/.cache/backbreaker-recomp/spirv
+[rt] [iso host] read ahead 33 MB, 497 reads, avg 67894 ms/MB
+[rt] [gpu] 30 fps, 900 draws/s, 30 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [gpu] 29 fps, 870 draws/s, 59 frames total, front buffer 00840000 1280x720, 396 xma frames, mem 43+62 MB
+[rt] [render] first use: 5 shaders translated (0 ms), 0 compiled by shaderc (0 ms), 10 from the shader cache, 2 pipelines (1 ms)
+[rt] [render] pipeline 4 0x730000000073: TriangleStrip|ColorDepth|msaa1|rt0:8_8_8_8:rg
+[rt] [gpu] 11 fps, 330 draws/s, 70 frames total, front buffer 00840000 1280x720, 143 xma frames, mem 43+62 MB
+[rt] [gpu] 30 fps, 910 draws/s, 100 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [gpu] 28 fps, 845 draws/s, 128 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [render] first use: 40 shaders translated (2 ms), 48 compiled by shaderc (1687 ms), 0 from the shader cache, 26 pipelines (2 ms)
+[rt] [render] resolve destination 00840000: 1280x720
+[rt] [gpu] 6 fps, 180 draws/s, 134 frames total, front buffer 00840000 1280x720, 78 xma frames, mem 43+62 MB
+[rt] [gpu] 30 fps, 905 draws/s, 164 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [render] screenshot screenshots/frame_200.png (1280x720)
+[rt] [video] screenshot screenshots/2026-11-15_12-00-07.png (1280x720, 2.6 MB, 41 ms)
+[rt] [gpu] 12 fps, 360 draws/s, 176 frames total, front buffer 00840000 1280x720, 156 xma frames, mem 43+62 MB
+[rt] [gpu] 26 fps, 780 draws/s, 202 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [gpu] 30 fps, 902 draws/s, 232 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [capture] recording frame 256 into captures/frame_256
+[rt] [gpu] 24 fps, 720 draws/s, 256 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [gpu] 30 fps, 901 draws/s, 286 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+[rt] [render] first use: 3 shaders translated (0 ms), 0 compiled by shaderc (0 ms), 3 from the shader cache, 1 pipelines (0 ms)
