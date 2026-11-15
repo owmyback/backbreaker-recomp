@@ -142,9 +142,12 @@ Run it from the repo root too - the game files are found by paths relative to it
 
 Both flags only change 3D scenes (`--resolution-scale` goes to 4, `--anisotropy` to 16); what each
 does to the picture - and what it leaves alone, like the 1280x720 attract movie and UI textures -
-is in `docs/runtime.md`. How much frame rate `--resolution-scale 2` costs is not measured yet
-([issue #82](https://github.com/owmyback/backbreaker-recomp/issues/82)), and it depends on the
-GPU: the runtime prints an `[gpu] N fps` line once a second, so try the flag and watch that number.
+is in `docs/runtime.md`. On a Radeon RX 9070 XT neither costs measurable frame rate: headless over
+the Exhibition route, scale 1, scale 2 with `--anisotropy 16` and 4K (scale 3) with
+`--anisotropy 16` all hold the game's 30 fps cap, within 0.4% of each other in frames rendered
+([issue #82](https://github.com/owmyback/backbreaker-recomp/issues/82)). A weaker GPU will show a
+difference sooner: the runtime prints an `[gpu] N fps` line once a second, so try the flag and
+watch that number.
 
 In the window:
 - **F12** - save the picture you see as `screenshots/<date-time>.png`

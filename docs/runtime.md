@@ -69,7 +69,11 @@ their guest address, and the presenter shows the image resolved to the front buf
 - `--resolution-scale N` (1-4) renders at N times the game's resolution: 2 = 2560x1440,
   3 = 3840x2160. The game still sees 1280x720; render targets, viewports, scissors, resolves and
   clears are scaled. (The attract movie itself is a 1280x720 video, so it only gets smoother
-  scaling; 3D scenes are where the extra resolution shows.)
+  scaling; 3D scenes are where the extra resolution shows.) Measured on a Radeon RX 9070 XT
+  (issue #82, main at 2a16722, headless Exhibition route, 245 s, ABBA): scale 1 rendered 7,265 and
+  7,268 frames, scale 2 with `--anisotropy 16` 7,251 and 7,261, scale 3 with `--anisotropy 16`
+  7,248 and 7,241 - all at the 30 fps cap. The renderer's cost is per draw on the CPU, not per
+  pixel, so resolution only starts to matter once a GPU is the limit.
 - `--anisotropy N` (2-16) gives every texture the game minifies with linear filtering and mips at
   least N:1 anisotropic filtering (16 is the usual choice). The game asks for it on only a few
   textures, so the field blurs toward the horizon without it. UI textures (base level only) are
