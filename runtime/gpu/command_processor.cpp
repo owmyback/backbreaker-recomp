@@ -183,7 +183,10 @@ namespace gpu
                 {
                     uint32_t value = (info & 0x10) ? loadGpu(addr) : readRegister(addr & 0x7FFF);
                     if (compare(info, value & mask, ref))
+                    {
+                        render::addCommandWaitMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
                         break;
+                    }
                     std::this_thread::yield();
                     if (!warned && std::chrono::steady_clock::now() - start > std::chrono::seconds(1))
                     {

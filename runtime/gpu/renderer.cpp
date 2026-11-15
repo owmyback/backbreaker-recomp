@@ -39,6 +39,7 @@
 #include <cstring>
 #include <filesystem>
 #include <chrono>
+#include <ctime>
 #include <map>
 #include <unistd.h>
 #include <unordered_set>
@@ -124,6 +125,11 @@ namespace gpu::render
         // creating pipelines, logged once per second when there was any
         struct CompileStats { uint32_t translated = 0, compiled = 0, cached = 0, pipelines = 0; double translateMs = 0, compileMs = 0, pipelineMs = 0; };
         CompileStats g_compileStats;
+        // BB_PERF=1: one line per second of where the renderer thread's time went (issue #73)
+        struct PerfStats { uint64_t draws = 0, hashBytes = 0, uploads = 0, uploadBytes = 0, resolves = 0, writebacks = 0, flushes = 0;
+                           uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0;
+                           double hashMs = 0, waitMs = 0, cpWaitMs = 0; };
+        PerfStats g_perf;
         double nowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
         shaderc_compiler_t g_compiler = nullptr;
@@ -449,6 +455,16 @@ void main() {
 
         // Offset in this frame's upload buffer, or UINT64_MAX (and g_outOfSpace) when it is full
         bool g_outOfSpace = false;
+        // The memory export part of g_pendingWrites. A draw whose textures or indices come from one of
+        // these ranges cannot read them out of guest memory yet; it sets g_syncRetry, and draw() syncs
+        // and records it again (a sync in the middle of a draw would reset the upload buffer under it).
+        std::vector<std::pair<uint32_t, uint32_t>> g_pendingExports;
+        bool g_syncRetry = false;
+        void needsExportedData(uint64_t start, uint64_t end)
+        {
+            for (auto [s, e] : g_pendingExports)
+                if (start < e && s < end) { g_syncRetry = true; return; }
+        }
         uint64_t g_drawsInFrame = 0;
         VkDeviceSize uploadAlloc(VkDeviceSize size, VkDeviceSize align = 256)
         {
@@ -586,7 +602,9 @@ void main() {
             Frame& next = frame();
             if (next.submitted)
             {
+                double w0 = nowMs();
                 VK_CHECK(vkWaitForFences(D, 1, &next.fence, VK_TRUE, UINT64_MAX));
+                g_perf.waitMs += nowMs() - w0;
                 next.submitted = false;
             }
             VK_CHECK(vkResetFences(D, 1, &next.fence));
@@ -1713,13 +1731,17 @@ void main()
             if (t.uploadedFrame != g_frameSerial)
             {
                 regions = mipRegions(width, height, pitch, tiled, { tf.blockW, tf.blockH, tf.bytes }, levels, packed, layers);
+                double hashT0 = nowMs();
                 // Unchanged since the last upload (same bytes at every level and face): keep the image
                 for (const GuestRegion& r : regions)
                     for (uint32_t layer = 0; layer < layers; layer++)
                     {
                         uint64_t at = uint64_t(r.mip ? mipAddress : base) + r.offset + uint64_t(layer) * r.sliceStride;
+                        if (!g_pendingExports.empty()) needsExportedData(at, at + r.srcBytes);
                         if (at + r.srcBytes <= mem::kPhysicalSize) hash = hashBytes(mem::physical(uint32_t(at)), r.srcBytes, hash);
+                        g_perf.hashBytes += r.srcBytes;
                     }
+                g_perf.hashMs += nowMs() - hashT0;
                 if (hash && hash == t.hash)
                 {
                     t.uploadedFrame = g_frameSerial;
@@ -1792,6 +1814,8 @@ void main()
                 t.uploadedFrame = g_frameSerial;
                 t.hash = hash;
                 g_texturesUploaded++;
+                g_perf.uploads++;
+                g_perf.uploadBytes += at;
             }
             VkImageView& view = t.views[swizzle];
             if (!view) view = createView(t.img.image, cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, tf.vk, layers, swizzle, false);
@@ -1998,7 +2022,7 @@ void main()
             VkDeviceSize size = mem::kPhysicalSize;
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.size = size;
-            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT; // vertex fetches of pending writes
             VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &g_guestMem));
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(D, g_guestMem, &req);
@@ -2042,7 +2066,7 @@ void main()
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             bci.pNext = &ext;
             bci.size = size;
-            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT; // vertex fetches of pending writes
             VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &g_guestMem));
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(D, g_guestMem, &req);
@@ -2086,7 +2110,10 @@ void main()
                 std::lock_guard guard(C->queueLock);
                 VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.fence));
             }
+            double w0 = nowMs();
             VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
+            g_perf.waitMs += nowMs() - w0;
+            g_perf.flushes++;
             VK_CHECK(vkResetFences(D, 1, &f.fence));
             f.submitted = false;
             VK_CHECK(vkResetCommandPool(D, f.pool, 0));
@@ -2156,7 +2183,7 @@ void main()
                 VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
                 bci.size = kUploadSize;
                 bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &f.upload));
                 VkMemoryRequirements req;
                 vkGetBufferMemoryRequirements(D, f.upload, &req);
@@ -2605,6 +2632,7 @@ void main()
         // guest memory at img.guestBase. `kind` is a WritebackKind, or anything else to skip.
         void writeBack(Image& img, VkRect2D r, uint32_t kind)
         {
+            g_perf.writebacks++;
             if (!g_memExportReady)
             {
                 warnOnce("resolves stay on the GPU: no guest memory buffer");
@@ -2675,6 +2703,7 @@ void main()
                                  &mb, 0, nullptr, 0, nullptr);
             transition(c, img, was == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : was);
             g_pendingWrites.push_back({ img.guestBase, uint32_t(end) });
+            g_perf.pendingAdded++;
             g_writebacks++;
         }
 
@@ -2705,6 +2734,7 @@ void main()
 
         void resolve(const DrawState& s)
         {
+            g_perf.resolves++;
             uint32_t control = readRegister(RB_COPY_CONTROL);
             uint32_t source = control & 7, command = (control >> 20) & 3;
             bool clearColor = (control >> 8) & 1, clearDepth = (control >> 9) & 1;
@@ -2820,6 +2850,8 @@ void main()
             IndexBuffer ib;
             uint32_t count = s.indexCount;
             bool dma = s.indexSource == 0;
+            if (dma && !g_pendingExports.empty())
+                needsExportedData(indexBase & 0x1FFFFFFF, uint64_t(indexBase & 0x1FFFFFFF) + uint64_t(count) * (s.indexSize ? 4 : 2) + 4);
             std::vector<uint32_t> values; // only needed when expanding quads
             uint32_t endian = indexSizeWord >> 30;
             auto guestIndex = [&](uint32_t i) -> uint32_t {
@@ -2901,6 +2933,7 @@ void main()
 
         bool drawOnce(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord)
         {
+            g_perf.draws++;
             // Redraws of geometry this frame already wrote depth for: see kRedrawBiasSlopePixels
             constexpr uint32_t kZEqual = 2, kZLessEqual = 3;
             if (s.depthTest && !s.polyOffsetFront && !s.polyOffsetBack)
@@ -2924,6 +2957,7 @@ void main()
                     }
                 }
             g_outOfSpace = false;
+            g_syncRetry = false;
 
             // Topology
             VkPrimitiveTopology topology;
@@ -3023,6 +3057,7 @@ void main()
             }
             minIndex += s.indexOffset;
             maxIndex += s.indexOffset;
+            std::vector<VkBufferCopy> gpuVertexCopies;
             for (uint32_t slot = 0; slot < 96; slot++)
             {
                 if (!((vs->t.vertexFetchSlots[slot / 32] >> (slot % 32)) & 1)) continue;
@@ -3041,8 +3076,27 @@ void main()
                 uint64_t dwords = end > first ? end - first : 0;
                 VkDeviceSize off = uploadAlloc(dwords * 4 + 16, 16);
                 if (off == UINT64_MAX) return false;
-                std::memcpy(f.uploadMap + off, mem::physical(uint32_t((baseDw + first) * 4)), dwords * 4);
+                uint32_t src = uint32_t((baseDw + first) * 4);
+                std::memcpy(f.uploadMap + off, mem::physical(src), dwords * 4);
+                // Parts written by a memory export or resolve writeback that is recorded but not yet
+                // synced are only right in the GPU's copy of guest memory: copy those over the CPU's
+                for (auto [ps, pe] : g_pendingWrites)
+                {
+                    uint64_t a = std::max<uint64_t>(ps, src), b = std::min<uint64_t>(pe, uint64_t(src) + dwords * 4);
+                    if (a < b && g_guestMem) gpuVertexCopies.push_back({ a, off + (a - src), b - a });
+                }
                 d0 = uint32_t(off / 4) - uint32_t(first); // shader: mem[d0 + index * stride] (mod 2^32)
+            }
+            if (!gpuVertexCopies.empty())
+            {
+                endPass();
+                VkCommandBuffer cb = cmd();
+                vkCmdCopyBuffer(cb, g_guestMem, f.upload, uint32_t(gpuVertexCopies.size()), gpuVertexCopies.data());
+                VkMemoryBarrier vb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+                vb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1, &vb, 0, nullptr, 0, nullptr);
+                g_perf.gpuVertexCopies += gpuVertexCopies.size();
             }
 
             // Textures (uploads end the current pass)
@@ -3051,7 +3105,7 @@ void main()
             for (uint32_t slot = 0; slot < 32; slot++)
                 if ((textureSlots >> slot) & 1)
                     images[slot] = texture(slot, ((ps->t.textureSlots >> slot) & 1) ? ps->t.textureDims[slot] : vs->t.textureDims[slot]);
-            if (g_outOfSpace) return false;
+            if (g_outOfSpace || g_syncRetry) return false;
 
             // Scissor over all attachments, in guest pixels
             VkExtent2D guestExtent{ UINT32_MAX, UINT32_MAX };
@@ -3156,17 +3210,32 @@ void main()
                 for (auto [start, bytes] : exportRanges) std::memcpy(g_exportMap + start, mem::physical(start), bytes);
             if (memExport)
             {
-                // Make the shader's writes to guest memory visible to the host and later draws,
-                // and wait for them: later draws snapshot guest memory when they are recorded
+                // Make the shader's writes to guest memory visible to the host and to later commands.
+                // No submit and wait here (#73: that was one GPU round trip per export draw, dozens per
+                // frame): the ranges are pending like resolve writebacks, so syncGuestMemory() copies
+                // them out when the guest can look (fences, interrupts, memory writes), later draws
+                // fetch vertices from them GPU to GPU, and textures or indices from them sync first.
                 endPass();
                 VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
                 mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
                 mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
                 vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                      VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
-                flushAndWait();
-                if (g_exportMap)
-                    for (auto [start, bytes] : exportRanges) std::memcpy(mem::physical(start), g_exportMap + start, bytes);
+                g_perf.exportDraws++;
+                static const bool waitPerExport = getenv("BB_EXPORT_WAIT") != nullptr; // the old way, for A/B runs
+                if (waitPerExport)
+                {
+                    g_perf.flushExport++;
+                    flushAndWait();
+                    if (g_exportMap)
+                        for (auto [start, bytes] : exportRanges) std::memcpy(mem::physical(start), g_exportMap + start, bytes);
+                }
+                else
+                    for (auto [start, bytes] : exportRanges)
+                    {
+                        g_pendingWrites.push_back({ start, start + bytes });
+                        g_pendingExports.push_back({ start, start + bytes });
+                    }
             }
             for (int i = 0; i < 4; i++) markWritten(color[i], edramRect);
             if (depth && (s.depthWrite || s.stencil)) markWritten(depth, edramRect);
@@ -3181,6 +3250,14 @@ void main()
             if (s.edramMode != 4 && s.edramMode != 5) return;
             if (!s.indexCount) return;
             if (drawOnce(s, indexBase, indexSizeWord)) return;
+            if (g_syncRetry)
+            {
+                // Textures or indices from a memory export still pending on the GPU: sync, record again
+                g_perf.syncRetries++;
+                syncGuestMemory();
+                if (drawOnce(s, indexBase, indexSizeWord)) return;
+                if (g_syncRetry) { warnOnce("a draw still reads pending memory export output after a sync: skipped"); return; }
+            }
             // Upload buffer full: submit what we have and retry once in a fresh one
             static bool logged = false;
             if (!logged) { info("[render] upload buffer full after %llu draws without a swap: submitting early", (unsigned long long)g_drawsInFrame); logged = true; }
@@ -3259,15 +3336,21 @@ void main()
     void requestScreenshot(uint64_t frame) { g_screenshots.insert(frame); }
     void requestScreenshotAt(double seconds, const std::string& label) { g_timedScreenshots.emplace(seconds, label); }
 
+    void addCommandWaitMs(double ms) { g_perf.cpWaitMs += ms; }
+
     void syncGuestMemory()
     {
         if (g_pendingWrites.empty()) return;
+        g_perf.flushSync++;
         flushAndWait(); // the frame being recorded
+        double w0 = nowMs();
         for (Frame& f : g_frames) // and frames submitted at swaps, still running
             if (f.submitted) VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
+        g_perf.waitMs += nowMs() - w0;
         if (g_exportMap) // staging copy of guest memory: copy the written ranges out
             for (auto [start, end] : g_pendingWrites) std::memcpy(mem::physical(start), g_exportMap + start, end - start);
         g_pendingWrites.clear();
+        g_pendingExports.clear();
         g_writebackSyncs++;
         for (auto& [base, img] : g_resolved) // their writebacks have landed: fingerprint them now
             if (img.memSigPending)
@@ -3315,6 +3398,36 @@ void main()
                      "%u pipelines (%.0f ms)", cs.translated, cs.translateMs, cs.compiled, cs.compileMs, cs.cached, cs.pipelines, cs.pipelineMs);
                 cs = {};
                 lastLog = t;
+            }
+        }
+        {
+            static const bool perfOn = getenv("BB_PERF") != nullptr;
+            static double perfLast = 0, cpuLast = 0;
+            static uint64_t swaps = 0;
+            swaps++;
+            if (perfOn)
+            {
+                double t = nowMs();
+                timespec ts;
+                clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+                double cpu = ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+                if (perfLast == 0) { perfLast = t; cpuLast = cpu; }
+                else if (t - perfLast >= 1000.0)
+                {
+                    PerfStats& p = g_perf;
+                    info("[perf] %.1fs: %llu swaps, %llu draws, renderer thread CPU %.0f ms (of it polling WAIT_REG_MEM %.0f ms), GPU waits %.0f ms (%llu flushes), "
+                         "textures hashed %.1f MB in %.0f ms, %llu uploads (%.1f MB), %llu resolves, %llu writeBack calls (%llu queued); "
+                         "%llu memexport draws (%llu waited for), %llu syncs with pending writes, %llu GPU vertex copies, %llu sync retries",
+                         (t - perfLast) / 1000.0, (unsigned long long)swaps, (unsigned long long)p.draws, cpu - cpuLast, p.cpWaitMs, p.waitMs,
+                         (unsigned long long)p.flushes, p.hashBytes / 1048576.0, p.hashMs, (unsigned long long)p.uploads,
+                         p.uploadBytes / 1048576.0, (unsigned long long)p.resolves, (unsigned long long)p.writebacks,
+                         (unsigned long long)p.pendingAdded, (unsigned long long)p.exportDraws, (unsigned long long)p.flushExport, (unsigned long long)p.flushSync,
+                         (unsigned long long)p.gpuVertexCopies, (unsigned long long)p.syncRetries);
+                    p = {};
+                    swaps = 0;
+                    perfLast = t;
+                    cpuLast = cpu;
+                }
             }
         }
         g_depthWrittenGeometry.clear(); // geometry keys are per frame

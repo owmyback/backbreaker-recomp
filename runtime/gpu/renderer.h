@@ -31,4 +31,5 @@ namespace gpu::render
     // command processor lets the CPU see its progress (a fence or other memory write, an
     // interrupt, the read pointer), this waits until the writebacks recorded so far have landed.
     void syncGuestMemory();
+    void addCommandWaitMs(double ms);       // BB_PERF: time the CP spent polling in WAIT_REG_MEM
 }
