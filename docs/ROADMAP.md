@@ -64,7 +64,7 @@ caches) until the heap ran out a minute into the match.
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | **Done** (output to SDL3, #90; XMA decoding, #93; confirmed by ear 2026-11-15) | #92, #95 |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
-| 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
+| 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | **In progress** (database, unlocks, store: #97 done; overlay list and pop-up: #101) | `1a59660` |
@@ -605,8 +605,15 @@ device queries, following Xenia's layouts. Packages live in
 `game/saves/<content type>/<file name>/`, with the display name in `<file name>.name` and the
 thumbnail in `<file name>.png`. The game creates "Profile Options" (`BBOPT15.SAV`, 1 KB) and
 "Custom Teams" (`BBCUST14`, 4 MB) on the first run and reopens them on the next, then reaches
-the main menu. Not yet: stored profile settings (`XamUserReadProfileSettings` still returns
-empty values), content on the disc device, `XamContentDelete`.
+the main menu. Not yet: content on the disc device, `XamContentDelete`.
+
+Profile settings (#98): the game reads 3 dashboard settings (the voice options) and 29 of its own
+when the profile signs in (gamercard fields, controller and gamer preferences, three title-specific
+blobs) and never writes any: there is no `XamUserWriteProfileSettings` import and no write
+message, and its options live in its own save (`BBOPT15.SAV`). `XamUserReadProfileSettings`
+returns the console's defaults for a fresh offline profile, as Xenia does (source "default",
+values 0 or empty, controller vibration on, the default gamer picture key), and logs which
+settings were asked for by name. The Options > Controls and Game screens look the same as before.
 
 ## Phase 9 - Gameplay correctness and performance (planned)
 
@@ -683,7 +690,6 @@ stored). Parts 1 and 2 can start earlier and are good separable issues.
 - The presenter falls back to the raw (tiled) front buffer when a swap was not rendered.
 - Renderer shortcuts: see phase 4 steps 5-13 and the remaining steps (some resolves not written
   to memory, per-frame texture re-uploads).
-- Profile settings are returned empty.
 - Virtual memory grows ~1 MB per 20 s in the front end (not investigated).
 
 ## Open questions

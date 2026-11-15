@@ -217,7 +217,8 @@ Subsystems:
   registers (0x650/0x690/0x6A0); a kick runs one decoder pass on the kicking thread
   (`xma_context.h`, frames decoded by `xma_frame_decoder.cpp`; see "XMA" below)
 - `runtime/hid/` - one neutral pad on user 0, no keystrokes
-- `runtime/kernel/xam.cpp` - notifications, local profile "Player", profile settings (empty values)
+- `runtime/kernel/xam.cpp` - notifications, local profile "Player", profile settings (the console's
+  defaults for a fresh offline profile, logged by name; the game never writes any, #98)
 - `runtime/kernel/xnet.cpp` - networking, offline: XNet/WSA startup succeeds, no Ethernet link,
   DNS lookups fail (the game looks up "localhost" when a match loads), `WSACreateEvent` returns a
   real event (as Xenia's xam_net.cc). Sockets are kernel objects with handles from the same table,
@@ -577,7 +578,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - Networking carries no data (socket objects exist, nothing is ever connected); movies (XMV) are
   stubs; XMA plays as silence in a build without the decoder (`scripts/build_xma_decoder.sh`); the
   XMA "interrupt when done" and "stop when done" bits are ignored
-- Profile settings are returned empty; WAIT_REG_MEM spins with yield
+- WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); resolves take their rectangle from the window scissor; resolves to formats other
   than 8_8_8_8, 2_10_10_10 and D24S8 depth are not written back to guest memory (depth stencil is

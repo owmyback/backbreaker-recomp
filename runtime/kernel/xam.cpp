@@ -5,8 +5,12 @@
 #include "import_support.h"
 #include "../log.h"
 
+#include <cstdio>
 #include <cstring>
 #include <deque>
+#include <mutex>
+#include <set>
+#include <string>
 
 using namespace mem;
 
@@ -103,9 +107,74 @@ namespace kernel
     }
 }
 
+// ---- Profile settings (issue #98) ----
+// The game reads 3 dashboard settings (title FFFE07D1: the voice options) and 29 of its own (title
+// 0) when a profile signs in: gamercard fields, the controller and gamer preferences, and its three
+// 1000-byte title-specific blobs. It never writes any: it imports no XamUserWriteProfileSettings
+// and sends no write message (it keeps its options in its own "Profile Options" save, BBOPT15.SAV).
+// So the answer is the console's defaults for a fresh offline profile, as Xenia gives them
+// (xenia-canary src/xenia/kernel/xam/user_settings.h default_setting_values / GetDefaultSetting,
+// xam_user.cc XamUserReadProfileSettingsEx): source DEFAULT, value 0 or empty, except controller
+// vibration = 3 (on) and the gamer picture key. Settings Xenia does not know keep source 0 (no value).
+namespace
+{
+    constexpr uint32_t kSourceNoValue = 0, kSourceDefault = 1;
+
+    struct KnownSetting { uint32_t id; const char* name; int32_t value; };
+    // Setting ids are type << 28 | max size << 16 | number (Xenia user_settings.h SettingKey).
+    constexpr KnownSetting kKnownSettings[] = {
+        { 0x10040002, "GAMER_YAXIS_INVERSION", 0 },
+        { 0x10040003, "OPTION_CONTROLLER_VIBRATION", 3 }, // 3 = on
+        { 0x10040004, "GAMERCARD_ZONE", 0 },
+        { 0x10040005, "GAMERCARD_REGION", 0 },
+        { 0x10040006, "GAMERCARD_CRED", 0 },
+        { 0x5004000B, "GAMERCARD_REP", 0 },
+        { 0x1004000C, "OPTION_VOICE_MUTED", 0 },
+        { 0x1004000D, "OPTION_VOICE_THRU_SPEAKERS", 0 },
+        { 0x1004000E, "OPTION_VOICE_VOLUME", 0 },
+        { 0x4064000F, "GAMERCARD_PICTURE_KEY", 0 },
+        { 0x402C0011, "GAMERCARD_MOTTO", 0 },
+        { 0x10040012, "GAMERCARD_TITLES_PLAYED", 0 },
+        { 0x10040013, "GAMERCARD_ACHIEVEMENTS_EARNED", 0 },
+        { 0x10040015, "GAMER_DIFFICULTY", 0 },
+        { 0x10040018, "GAMER_CONTROL_SENSITIVITY", 0 },
+        { 0x1004001D, "GAMER_PREFERRED_COLOR_FIRST", 0 },
+        { 0x1004001E, "GAMER_PREFERRED_COLOR_SECOND", 0 },
+        { 0x10040022, "GAMER_ACTION_AUTO_AIM", 0 },
+        { 0x10040023, "GAMER_ACTION_AUTO_CENTER", 0 },
+        { 0x10040024, "GAMER_ACTION_MOVEMENT_CONTROL", 0 },
+        { 0x10040026, "GAMER_RACE_TRANSMISSION", 0 },
+        { 0x10040027, "GAMER_RACE_CAMERA_LOCATION", 0 },
+        { 0x10040028, "GAMER_RACE_BRAKE_CONTROL", 0 },
+        { 0x10040029, "GAMER_RACE_ACCELERATOR_CONTROL", 0 },
+        { 0x10040038, "GAMERCARD_TITLE_CRED_EARNED", 0 },
+        { 0x10040039, "GAMERCARD_TITLE_ACHIEVEMENTS_EARNED", 0 },
+        { 0x63E83FFF, "TITLE_SPECIFIC1", 0 },
+        { 0x63E83FFE, "TITLE_SPECIFIC2", 0 },
+        { 0x63E83FFD, "TITLE_SPECIFIC3", 0 },
+    };
+    constexpr const char16_t* kDefaultPictureKey = u"FFFE07D10002000200010002"; // Xenia default_setting_values
+
+    const KnownSetting* knownSetting(uint32_t id)
+    {
+        for (auto& k : kKnownSettings)
+            if (k.id == id) return &k;
+        return nullptr;
+    }
+
+    // Xenia UserSetting::is_setting_valid: a standard id (number below 0x58) or a title-specific one
+    bool settingValid(uint32_t id) { return (id & 0xFFFF) < 0x58 || (id & 0x3F00) == 0x3F00 || knownSetting(id); }
+
+    std::mutex g_settingsLogLock;
+    std::set<std::string> g_settingsLogged;
+}
+
 // u32 XamUserReadProfileSettings(u32 TitleId, u32 UserIndex, u32 XuidCount, u64* Xuids, u32 SettingCount,
 //                                u32* SettingIds, u32* BufferSize, X_USER_READ_PROFILE_SETTINGS* Buffer, XOVERLAPPED*)
-// Settings are returned typed but empty (we have no stored profile), like Xenia does for unknown IDs.
+// X_USER_READ_PROFILE_SETTINGS { u32 count; X_USER_PROFILE_SETTING* settings }, then the settings:
+// X_USER_PROFILE_SETTING (0x28) { u32 source; u64 xuid (or u32 user index); u32 id; X_USER_DATA
+// { u8 type; ...; union at +8: i32 value / { u32 size; u32 pointer } for strings and blobs } },
+// then the string/blob space (Xenia user_profile.h, user_data.h).
 GUEST_IMPORT(XamUserReadProfileSettings)
 {
     uint32_t titleId = ctx.r3.u32, userIndex = ctx.r4.u32, xuidCount = ctx.r5.u32, xuids = ctx.r6.u32;
@@ -113,7 +182,6 @@ GUEST_IMPORT(XamUserReadProfileSettings)
     uint32_t overlapped = stackArg(ctx, 8);
     uint32_t users = xuidCount ? xuidCount : 1;
 
-    // X_USER_READ_PROFILE_SETTINGS (8) + X_USER_PROFILE_SETTING (0x28) per setting per user + string/binary data
     uint32_t extra = 0;
     for (uint32_t i = 0; i < count; i++)
     {
@@ -140,21 +208,49 @@ GUEST_IMPORT(XamUserReadProfileSettings)
         {
             uint32_t s = settings + (u * count + i) * 0x28;
             uint32_t id = read32(ids + i * 4), type = id >> 28;
-            write32(s + 0x00, 0); // from: not set
+            const KnownSetting* known = knownSetting(id);
+            write32(s + 0x00, settingValid(id) ? kSourceDefault : kSourceNoValue);
             if (xuidCount) write64(s + 0x08, read64(xuids + u * 8));
             else write32(s + 0x08, userIndex);
             write32(s + 0x10, id);
             write8(s + 0x18, uint8_t(type));
             if (type == 4 || type == 6)
             {
-                uint32_t size = (id >> 16) & 0xFFF;
-                write32(s + 0x20, 0);    // length in use
-                write32(s + 0x24, data); // pointer
+                uint32_t size = (id >> 16) & 0xFFF, used = 0;
+                if (id == 0x4064000F) // the picture key: UTF-16BE with its terminator
+                {
+                    std::u16string key = kDefaultPictureKey;
+                    for (size_t c = 0; c <= key.size(); c++)
+                        write16(data + uint32_t(c) * 2, c < key.size() ? uint16_t(key[c]) : 0);
+                    used = uint32_t(key.size() + 1) * 2;
+                }
+                write32(s + 0x20, used); // length in use
+                write32(s + 0x24, data); // pointer (to zeroed space when empty)
                 data += (size + 3) & ~3u;
             }
+            else if (type == 1 && known)
+                write32(s + 0x20, uint32_t(known->value));
         }
     }
-    info("[xam] read %u profile settings for title %08X", count, titleId);
+
+    // Log each distinct request once, with names.
+    std::string list;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        uint32_t id = read32(ids + i * 4);
+        const KnownSetting* known = knownSetting(id);
+        char one[64];
+        if (known) std::snprintf(one, sizeof(one), " %s", known->name);
+        else std::snprintf(one, sizeof(one), " %08X%s", id, settingValid(id) ? "" : "(unknown)");
+        list += one;
+    }
+    char head[64];
+    std::snprintf(head, sizeof(head), "title %08X, %u setting(s):", titleId, count);
+    {
+        std::lock_guard guard(g_settingsLogLock);
+        if (g_settingsLogged.insert(head + list).second)
+            info("[xam] profile settings read, defaults returned, %s%s", head, list.c_str());
+    }
     ctx.r3.u64 = kernel::completeOverlapped(overlapped, ERROR_SUCCESS, needed);
 }
 
