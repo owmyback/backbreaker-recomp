@@ -19,7 +19,7 @@ namespace gpu::capture
 
     // Hooks called by the command processor (cheap when no capture is active)
     void onPacket(uint32_t opcode);
-    void onShaderLoad(uint32_t type, uint32_t start, uint32_t dwords, const uint32_t* bigEndianWords);
+    void onShaderLoad(uint32_t type, uint32_t start, uint32_t dwords, const uint32_t* bigEndianWords, uint64_t hash);
     void onDraw(uint32_t opcode, uint32_t initiator, uint32_t indexBase, uint32_t indexSizeWord);
     void onSwap(uint64_t frameNumber, uint32_t frontBuffer, uint32_t width, uint32_t height);
 }

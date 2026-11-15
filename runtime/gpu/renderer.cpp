@@ -141,13 +141,6 @@ namespace gpu::render
         VkShaderModule g_rectGs = VK_NULL_HANDLE;
 
         // Same hash as the frame capture, so names match the shader dump (vs_/ps_<hash>.bin)
-        uint64_t fnv1a(const uint32_t* w, uint32_t n)
-        {
-            uint64_t h = 1469598103934665603ull;
-            for (uint32_t i = 0; i < n; i++)
-                for (int b = 0; b < 4; b++) h = (h ^ ((w[i] >> (b * 8)) & 0xFF)) * 1099511628211ull;
-            return h;
-        }
 
         // ---------------------------------------------------------------- shader cache (issue #73)
         //
@@ -1937,7 +1930,23 @@ void main()
 
         VkDescriptorSetLayout g_setLayouts[2];
         VkPipelineLayout g_layout = VK_NULL_HANDLE;
-        std::unordered_map<std::string, VkPipeline> g_pipelines;
+        // Pipelines by everything that goes into one, as a fixed array of fields: formatting a text key
+        // with snprintf on every draw was 7.5% of the command processor thread (#73)
+        struct PipelineKey
+        {
+            std::array<uint64_t, 64> v{};
+            bool operator==(const PipelineKey&) const = default;
+        };
+        struct PipelineKeyHash
+        {
+            size_t operator()(const PipelineKey& k) const
+            {
+                uint64_t h = 0x9E3779B97F4A7C15ull;
+                for (uint64_t x : k.v) { h = (h ^ x) * 0x100000001B3ull; h ^= h >> 29; }
+                return size_t(h);
+            }
+        };
+        std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> g_pipelines;
 
         VkBlendFactor blendFactor(uint32_t f)
         {
@@ -2012,20 +2021,28 @@ void main()
                          p.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
             bool restart = strip && s.primitiveRestart;
             bool cullable = !p.rectangles && p.topology >= VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-            char key[512];
-            int n = snprintf(key, sizeof(key), "%d %p %p %d %d %d|%d %d %d %d %d|%u|", p.discard, (void*)p.vs->module, (void*)p.ps->module, int(p.topology),
-                             p.rectangles, restart, p.colors[0], p.colors[1], p.colors[2], p.colors[3], p.depth, p.samples);
-            for (int i = 0; i < 4; i++)
+            PipelineKey key;
             {
-                const ColorTarget& t = s.color[i];
-                n += snprintf(key + n, sizeof(key) - n, "%x %u %u %u %u %u %u|", p.colors[i] ? t.writeMask : 0, t.blend.colorSrc, t.blend.colorDst,
-                              t.blend.colorOp, t.blend.alphaSrc, t.blend.alphaDst, t.blend.alphaOp);
+                uint64_t* o = key.v.data();
+                for (uint64_t x : { uint64_t(p.discard), uint64_t(uintptr_t(p.vs->module)), uint64_t(uintptr_t(p.ps->module)), uint64_t(p.topology),
+                                    uint64_t(p.rectangles), uint64_t(restart), uint64_t(p.colors[0]), uint64_t(p.colors[1]), uint64_t(p.colors[2]),
+                                    uint64_t(p.colors[3]), uint64_t(p.depth), uint64_t(p.samples) })
+                    *o++ = x;
+                for (int i = 0; i < 4; i++)
+                {
+                    const ColorTarget& t = s.color[i];
+                    for (uint64_t x : { uint64_t(p.colors[i] ? t.writeMask : 0), uint64_t(t.blend.colorSrc), uint64_t(t.blend.colorDst),
+                                        uint64_t(t.blend.colorOp), uint64_t(t.blend.alphaSrc), uint64_t(t.blend.alphaDst), uint64_t(t.blend.alphaOp) })
+                        *o++ = x;
+                }
+                for (uint64_t x : { uint64_t(p.depth && s.depthTest), uint64_t(p.depth && s.depthWrite), uint64_t(s.depthFunc),
+                                    uint64_t(p.depth && s.stencil), uint64_t(s.stencilBackface), uint64_t(s.front.func), uint64_t(s.front.fail),
+                                    uint64_t(s.front.zpass), uint64_t(s.front.zfail), uint64_t(s.back.func), uint64_t(s.back.fail),
+                                    uint64_t(s.back.zpass), uint64_t(s.back.zfail), uint64_t(cullable && s.cullFront), uint64_t(cullable && s.cullBack),
+                                    uint64_t(s.frontFaceCW), uint64_t(s.polyMode == 1 && s.polyFront == 1),
+                                    uint64_t(s.polyOffsetFront || s.polyOffsetBack), uint64_t(s.clipDisable), uint64_t(s.alphaToMask) })
+                    *o++ = x;
             }
-            snprintf(key + n, sizeof(key) - n, "%d %d %u %d %d %u %u %u %u %u %u %u %u|%d %d %d %d %d %d %d %d", p.depth && s.depthTest,
-                     p.depth && s.depthWrite, s.depthFunc, p.depth && s.stencil, s.stencilBackface, s.front.func, s.front.fail, s.front.zpass,
-                     s.front.zfail, s.back.func, s.back.fail, s.back.zpass, s.back.zfail, cullable && s.cullFront, cullable && s.cullBack,
-                     s.frontFaceCW, s.polyMode == 1 && s.polyFront == 1, s.polyOffsetFront || s.polyOffsetBack, s.clipDisable, s.alphaToMask,
-                     p.samples);
             auto it = g_pipelines.find(key);
             if (it != g_pipelines.end()) return it->second;
 
@@ -3039,14 +3056,36 @@ void main()
             bool dma = s.indexSource == 0;
             if (dma && !g_pendingWrites.empty())
                 needsExportedData(indexBase & 0x1FFFFFFF, uint64_t(indexBase & 0x1FFFFFFF) + uint64_t(count) * (s.indexSize ? 4 : 2) + 4);
-            std::vector<uint32_t> values; // only needed when expanding quads
             uint32_t endian = indexSizeWord >> 30;
-            auto guestIndex = [&](uint32_t i) -> uint32_t {
-                if (s.indexSize)
-                    return gpuSwap(((const uint32_t*)mem::physical(indexBase))[i], endian);
-                uint32_t word = gpuSwap(((const uint32_t*)mem::physical(indexBase & ~3u))[(i + ((indexBase >> 1) & 1)) / 2], endian);
-                return ((i + ((indexBase >> 1) & 1)) & 1) ? word >> 16 : word & 0xFFFF;
-            };
+            // The guest's indices, decoded in one tight loop per byte order instead of a call, an
+            // endian switch and a size check per index (10.8% of the CP thread, #73)
+            static std::vector<uint32_t> guest;
+            if (dma)
+            {
+                guest.resize(count);
+                const uint32_t* words = (const uint32_t*)mem::physical(s.indexSize ? indexBase : (indexBase & ~3u));
+                uint32_t odd = (indexBase >> 1) & 1;
+                uint32_t* g = guest.data();
+                bool wide = s.indexSize;
+                auto decode = [&](auto swap) {
+                    if (wide)
+                        for (uint32_t i = 0; i < count; i++) g[i] = swap(words[i]);
+                    else
+                        for (uint32_t i = 0; i < count; i++)
+                        {
+                            uint32_t k = i + odd, w = swap(words[k >> 1]);
+                            g[i] = (k & 1) ? w >> 16 : w & 0xFFFF;
+                        }
+                };
+                switch (endian & 3)
+                {
+                case 1: decode([](uint32_t v) { return ((v >> 8) & 0x00FF00FFu) | ((v << 8) & 0xFF00FF00u); }); break;
+                case 2: decode([](uint32_t v) { return __builtin_bswap32(v); }); break;
+                case 3: decode([](uint32_t v) { return (v >> 16) | (v << 16); }); break;
+                default: decode([](uint32_t v) { return v; }); break;
+                }
+            }
+            auto guestIndex = [&](uint32_t i) -> uint32_t { return guest[i]; };
             if (quads)
             {
                 // Quad (a, b, c, d) -> triangles (a, b, c), (a, c, d)
@@ -3075,14 +3114,22 @@ void main()
             uint8_t* out = frame().uploadMap + off;
             uint32_t restart = s.indexSize ? 0xFFFFFFFFu : 0xFFFFu;
             uint32_t lo = UINT32_MAX, hi = 0;
-            for (uint32_t i = 0; i < count; i++)
+            const uint32_t* g = guest.data();
+            if (!s.primitiveRestart)
             {
-                uint32_t v = guestIndex(i);
-                if (s.primitiveRestart && v == (s.restartIndex & restart)) v = restart;
-                else { lo = std::min(lo, v); hi = std::max(hi, v); }
-                if (s.indexSize) ((uint32_t*)out)[i] = v;
-                else ((uint16_t*)out)[i] = uint16_t(v);
+                for (uint32_t i = 0; i < count; i++) { lo = std::min(lo, g[i]); hi = std::max(hi, g[i]); }
+                if (s.indexSize) std::memcpy(out, g, size_t(count) * 4);
+                else for (uint32_t i = 0; i < count; i++) ((uint16_t*)out)[i] = uint16_t(g[i]);
             }
+            else
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    uint32_t v = g[i];
+                    if (v == (s.restartIndex & restart)) v = restart;
+                    else { lo = std::min(lo, v); hi = std::max(hi, v); }
+                    if (s.indexSize) ((uint32_t*)out)[i] = v;
+                    else ((uint16_t*)out)[i] = uint16_t(v);
+                }
             return { off, s.indexSize ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16, count, true, lo == UINT32_MAX ? 0 : lo, hi };
         }
 
@@ -3224,16 +3271,25 @@ void main()
             VkDeviceSize constants = uploadAlloc(kConstantsSize);
             if (constants == UINT64_MAX) return false;
             uint32_t* cv = (uint32_t*)(f.uploadMap + constants);
-            for (uint32_t i = 0; i < 1024; i++)
+            // Straight from the register file, swapped in tight loops (a call per register was 12% of
+            // the renderer thread's time, #73). Past the end of the 2048 ALU constants, the last one.
+            const uint32_t* regs = registerFile();
+            auto copySwapped = [&](uint32_t* dst, uint32_t first, uint32_t count) {
+                for (uint32_t i = 0; i < count; i++) dst[i] = __builtin_bswap32(regs[first + i]);
+            };
+            for (uint32_t half = 0; half < 2; half++)
             {
-                cv[i] = readRegister(kAluConstants + std::min(s.vsConstBase * 4 + i, 2047u));
-                cv[1024 + i] = readRegister(kAluConstants + std::min(s.psConstBase * 4 + i, 2047u));
+                uint32_t base = std::min((half ? s.psConstBase : s.vsConstBase) * 4, 2047u);
+                uint32_t inRange = std::min(1024u, 2048u - base);
+                copySwapped(cv + half * 1024, kAluConstants + base, inRange);
+                uint32_t last = __builtin_bswap32(regs[kAluConstants + 2047]);
+                for (uint32_t i = inRange; i < 1024; i++) cv[half * 1024 + i] = last;
             }
             uint32_t* other = cv + 2048;
-            for (uint32_t i = 0; i < 8; i++) other[i] = readRegister(kBoolConstants + i);
-            for (uint32_t i = 0; i < 32; i++) other[8 + i] = readRegister(kLoopConstants + i);
+            copySwapped(other, kBoolConstants, 8);
+            copySwapped(other + 8, kLoopConstants, 32);
             uint32_t* fetch = other + 40;
-            for (uint32_t i = 0; i < 192; i++) fetch[i] = readRegister(kFetchConstants + i);
+            copySwapped(fetch, kFetchConstants, 192);
             IndexBuffer ib;
             int64_t minIndex = 0, maxIndex = int64_t(s.indexCount) - 1;
             if (s.indexSource == 0 || quads)
@@ -3606,10 +3662,9 @@ void main()
         g_perf.asyncWaits++;
     }
 
-    void onShaderLoad(uint32_t type, const uint32_t* words, uint32_t dwords)
+    void onShaderLoad(uint32_t type, const uint32_t* words, uint32_t dwords, uint64_t h)
     {
         if (g_disabled || type > 1) return;
-        uint64_t h = fnv1a(words, dwords);
         auto [it, inserted] = g_shaders.try_emplace(h);
         if (inserted)
         {

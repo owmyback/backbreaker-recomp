@@ -92,14 +92,6 @@ namespace gpu::capture
             return (it != end && it->index == i) ? it->name : nullptr;
         }
 
-        uint64_t fnv1a(const uint32_t* w, uint32_t n)
-        {
-            uint64_t h = 1469598103934665603ull;
-            for (uint32_t i = 0; i < n; i++)
-                for (int b = 0; b < 4; b++)
-                    h = (h ^ ((w[i] >> (b * 8)) & 0xFF)) * 1099511628211ull;
-            return h;
-        }
 
         std::string describeTarget()
         {
@@ -261,10 +253,9 @@ namespace gpu::capture
         g_opcodes[opcode]++;
     }
 
-    void onShaderLoad(uint32_t type, uint32_t start, uint32_t dwords, const uint32_t* words)
+    void onShaderLoad(uint32_t type, uint32_t start, uint32_t dwords, const uint32_t* words, uint64_t h)
     {
         std::lock_guard guard(g_lock);
-        uint64_t h = fnv1a(words, dwords);
         if (!g_shaders.count(h))
         {
             g_shaders[h] = { type, std::vector<uint32_t>(words, words + dwords) };

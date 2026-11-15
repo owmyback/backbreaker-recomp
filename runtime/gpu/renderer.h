@@ -23,7 +23,7 @@ namespace gpu::render
     // the disk cache ($XDG_CACHE_HOME/backbreaker-recomp/spirv)
     void setShaderCache(bool on);
 
-    void onShaderLoad(uint32_t type, const uint32_t* bigEndianWords, uint32_t dwords);
+    void onShaderLoad(uint32_t type, const uint32_t* bigEndianWords, uint32_t dwords, uint64_t hash); // hash: shader_hash.h
     // indexBase / indexSizeWord: DRAW_INDX DMA index buffer (physical address, VGT_DMA_SIZE)
     void onDraw(uint32_t initiator, uint32_t indexBase, uint32_t indexSizeWord);
     void onSwap(uint32_t frontBuffer, uint32_t width, uint32_t height, uint64_t frameNumber);

@@ -4,6 +4,7 @@
 #include "gpu.h"
 #include "capture.h"
 #include "renderer.h"
+#include "shader_hash.h"
 #include "../video/presenter.h"
 #include "../kernel/objects.h"
 #include "../apu/apu.h"
@@ -348,8 +349,10 @@ namespace gpu
                 uint32_t addrType = r.next(), startSize = r.next();
                 r.skip(count - 2);
                 uint32_t size = startSize & 0xFFFF;
-                capture::onShaderLoad(addrType & 3, startSize >> 16, size, (const uint32_t*)physical(addrType & ~3u));
-                render::onShaderLoad(addrType & 3, (const uint32_t*)physical(addrType & ~3u), size);
+                const uint32_t* words = (const uint32_t*)physical(addrType & ~3u);
+                uint64_t hash = shaderHash(words, size); // once, for both
+                capture::onShaderLoad(addrType & 3, startSize >> 16, size, words, hash);
+                render::onShaderLoad(addrType & 3, words, size, hash);
                 return;
             }
             case PM4_IM_LOAD_IMMEDIATE:
@@ -360,8 +363,9 @@ namespace gpu
                 std::vector<uint32_t> words(size);
                 for (uint32_t i = 0; i < size; i++) words[i] = __builtin_bswap32(r.next()); // keep big-endian
                 r.skip(count - 2 - size);
-                capture::onShaderLoad(type & 3, startSize >> 16, size, words.data());
-                render::onShaderLoad(type & 3, words.data(), size);
+                uint64_t hash = shaderHash(words.data(), size); // once, for both
+                capture::onShaderLoad(type & 3, startSize >> 16, size, words.data(), hash);
+                render::onShaderLoad(type & 3, words.data(), size, hash);
                 return;
             }
             case PM4_XE_SWAP:
@@ -605,6 +609,7 @@ namespace gpu
     }
 
     uint32_t readRegister(uint32_t index) { return __builtin_bswap32(*regPtr(index % reg::kCount)); }
+    const uint32_t* registerFile() { return regPtr(0); }
 
     void writeRegister(uint32_t index, uint32_t value)
     {

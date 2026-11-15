@@ -26,6 +26,9 @@ namespace gpu
     void init();
 
     uint32_t readRegister(uint32_t index);
+    // The register file itself: big-endian dwords, indexed like readRegister (which swaps one).
+    // For copying blocks of registers per draw without a call per register (#73).
+    const uint32_t* registerFile();
     void writeRegister(uint32_t index, uint32_t value); // with side effects (scratch writeback etc.)
 
     // From the Vd* imports
