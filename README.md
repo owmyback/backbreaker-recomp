@@ -103,16 +103,11 @@ Once `build/` exists, updating is two commands from the repo root:
     git pull
     cmake --build build -j 8
 
-If the pull changed `config/backbreaker.toml` (or `config/backbreaker_switch_tables.toml`), the
-recompiled code under `ppc/` no longer matches the config. `git diff --stat ORIG_HEAD HEAD -- config`
-right after the pull says whether it did. Then regenerate `ppc/` before building, with only the
-last line of "Recompile" above (the two tools before it rewrite the config you just pulled):
-
-    third_party/XenonRecomp/build/XenonRecomp/XenonRecomp config/backbreaker.toml third_party/XenonRecomp/XenonUtils/ppc_context.h
-    cmake --build build -j 8
-
-Re-running `scripts/setup.sh` does not do this for you: it skips the recompile whenever `ppc/`
-already exists (`--force` redoes every step, extraction included).
+If the pull changed `config/` or `patches/`, the recompiled code under `ppc/` no longer matches.
+`git diff --stat ORIG_HEAD HEAD -- config patches` right after the pull says whether it did. Then
+run `scripts/setup.sh` (no image path needed once `game/` exists) instead of the `cmake` line: it
+re-applies a changed patch to XenonRecomp and rebuilds it, recompiles `ppc/` whenever it is older
+than XenonRecomp or the config, and builds. The other steps see their output and skip.
 
 Run it from the repo root too - the game files are found by paths relative to it (`game/disc`,
 `game/extracted`):

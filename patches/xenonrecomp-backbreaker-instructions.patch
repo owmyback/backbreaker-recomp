@@ -1,8 +1,85 @@
+diff --git a/XenonAnalyse/function.cpp b/XenonAnalyse/function.cpp
+index 34add40..6483a40 100644
+--- a/XenonAnalyse/function.cpp
++++ b/XenonAnalyse/function.cpp
+@@ -117,7 +117,10 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
+ 
+             if (lBlock == -1)
+             {
+-                blocks.emplace_back(lBase, 0).projectedSize = rBase - lBase;
++                // A branch to the very next instruction (switch lowering emits `bne` to the
++                // fall-through) must not project the fall-through block to size 0: that block
++                // would never be analyzed and the function would be cut off right there.
++                blocks.emplace_back(lBase, 0).projectedSize = rBase == lBase ? (size_t)-1 : rBase - lBase;
+                 lBlock = blocks.size() - 1;
+ 
+                 // push this first, this gets overriden by the true case as it'd be further away
+@@ -180,13 +183,14 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
+                 }
+                 else if (op == PPC_OP_CTR)
+                 {
+-                    // 5th bit of BO tells cpu to ignore the counter, which is a blr/bctr otherwise it's conditional
+-                    const bool conditional = !(PPC_BO(instruction) & 0x10);
++                    // BO 0x10 = ignore the condition, 0x04 = ignore the counter. Only with both set is
++                    // it a plain blr/bctr; bdzlr/bdnzlr (0x10 without 0x04) return only when CTR hits 0.
++                    const bool conditional = (PPC_BO(instruction) & 0x14) != 0x14;
+                     if (conditional)
+                     {
+                         // right block's just going to return
+                         const size_t lBase = (addr - base) + 4;
+-                        size_t lBlock = fn.SearchBlock(lBase);
++                        size_t lBlock = fn.SearchBlock(base + lBase);
+                         if (lBlock == -1)
+                         {
+                             blocks.emplace_back(lBase, 0);
 diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
-index fa91527..390170d 100644
+index fa91527..7151c5f 100644
 --- a/XenonRecomp/recompiler.cpp
 +++ b/XenonRecomp/recompiler.cpp
-@@ -420,6 +420,22 @@ bool Recompiler::Recompile(
+@@ -177,12 +177,20 @@ void Recompiler::Analyse()
+     auto& pdata = *image.Find(".pdata");
+     size_t count = pdata.size / sizeof(IMAGE_CE_RUNTIME_FUNCTION);
+     auto* pf = (IMAGE_CE_RUNTIME_FUNCTION*)pdata.data;
++    // A function with an exception handler is preceded by two data words: the handler's
++    // address and its data (the scope table). The scan below must skip them; decoded as code
++    // they start a bogus copy of the function, cut into pieces whose jumps into each other
++    // all become "// ERROR" (#52).
++    std::unordered_set<size_t> handlerData;
+     for (size_t i = 0; i < count; i++)
+     {
+         auto fn = pf[i];
+         fn.BeginAddress = ByteSwap(fn.BeginAddress);
+         fn.Data = ByteSwap(fn.Data);
+ 
++        if (fn.BeginAddress != 0 && fn.ExceptionFlag)
++            handlerData.emplace(fn.BeginAddress - 8);
++
+         if (image.symbols.find(fn.BeginAddress) == image.symbols.end())
+         {
+             auto& f = functions.emplace_back();
+@@ -232,6 +240,13 @@ void Recompiler::Analyse()
+                 continue;
+             }
+ 
++            if (handlerData.count(base) != 0 && image.symbols.find(base) == image.symbols.end())
++            {
++                base += 8;
++                data += 8;
++                continue;
++            }
++
+             auto fnSymbol = image.symbols.find(base);
+             if (fnSymbol != image.symbols.end() && fnSymbol->address == base && fnSymbol->type == Symbol_Function)
+             {
+@@ -400,6 +415,7 @@ bool Recompiler::Recompile(
+                 else
+                 {
+                     println("\t// ERROR {:X}", address);
++                    fmt::println("ERROR: branch at {:X} in sub_{:X} goes to {:X}, which is not a function start", base, fn.base, address);
+                 }
+             }
+         };
+@@ -420,6 +436,22 @@ bool Recompiler::Recompile(
              }
          };
  
@@ -25,7 +102,7 @@ index fa91527..390170d 100644
      auto printSetFlushMode = [&](bool enable)
          {
              auto newState = enable ? CSRState::VMX : CSRState::FPU;
-@@ -517,6 +533,13 @@ bool Recompiler::Recompile(
+@@ -517,6 +549,13 @@ bool Recompiler::Recompile(
      if (midAsmHook != config.midAsmHooks.end() && !midAsmHook->second.afterInstruction)
          printMidAsmHook();
  
@@ -39,7 +116,7 @@ index fa91527..390170d 100644
      int id = insn.opcode->id;
  
      // Handling instructions that don't disassemble correctly for some reason here
-@@ -649,7 +672,7 @@ bool Recompiler::Recompile(
+@@ -649,7 +688,7 @@ bool Recompiler::Recompile(
  
      case PPC_INST_BDZ:
          println("\t--{}.u64;", ctr());
@@ -48,7 +125,7 @@ index fa91527..390170d 100644
          break;
  
      case PPC_INST_BDZLR:
-@@ -659,13 +682,12 @@ bool Recompiler::Recompile(
+@@ -659,13 +698,12 @@ bool Recompiler::Recompile(
  
      case PPC_INST_BDNZ:
          println("\t--{}.u64;", ctr());
@@ -64,7 +141,7 @@ index fa91527..390170d 100644
          break;
  
      case PPC_INST_BEQ:
-@@ -827,23 +849,26 @@ bool Recompiler::Recompile(
+@@ -827,23 +865,26 @@ bool Recompiler::Recompile(
          break;
  
      case PPC_INST_DIVD:
@@ -95,7 +172,7 @@ index fa91527..390170d 100644
          if (strchr(insn.opcode->name, '.'))
              println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
          break;
-@@ -1133,6 +1158,7 @@ bool Recompiler::Recompile(
+@@ -1133,6 +1174,7 @@ bool Recompiler::Recompile(
          println("\t{}.s64 = {};", r(insn.operands[0]), int32_t(insn.operands[1] << 16));
          break;
  
@@ -103,7 +180,7 @@ index fa91527..390170d 100644
      case PPC_INST_LVEWX:
      case PPC_INST_LVEWX128:
      case PPC_INST_LVX:
-@@ -1877,6 +1903,8 @@ bool Recompiler::Recompile(
+@@ -1877,6 +1919,8 @@ bool Recompiler::Recompile(
  
      case PPC_INST_VCMPGTUH:
          println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
@@ -112,7 +189,7 @@ index fa91527..390170d 100644
          break;
  
      case PPC_INST_VEXPTEFP:
-@@ -2263,6 +2291,301 @@ bool Recompiler::Recompile(
+@@ -2263,6 +2307,301 @@ bool Recompiler::Recompile(
          println("\t{}.u64 = {}.u64 ^ {};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2] << 16);
          break;
  
@@ -414,3 +491,44 @@ index fa91527..390170d 100644
      default:
          return false;
      }
+@@ -2438,10 +2777,36 @@ bool Recompiler::Recompile(const Function& fn)
+         ++data;
+     }
+ 
+-#if 0
+-    if (insn.opcode == nullptr || (insn.opcode->id != PPC_INST_B && insn.opcode->id != PPC_INST_BCTR && insn.opcode->id != PPC_INST_BLR))
+-        fmt::println("Function at {:X} ends prematurely with instruction {} at {:X}", fn.base, insn.opcode != nullptr ? insn.opcode->name : "INVALID", base - 4);
+-#endif
++    // The last instruction may fall through into the code after the function (a conditional
++    // branch or return, or an ordinary instruction when the function was cut short): continue
++    // there like the CPU does, instead of returning (#52). An unconditional call at the end is
++    // left alone: the compiler ends a function with one only when it never returns (KeBugCheck,
++    // ExTerminateThread, a C++ throw), and a stubbed import that does return should not run
++    // into whatever function comes next.
++    if (fn.size != 0)
++    {
++        const uint32_t last = ByteSwap(*(data - 1));
++        const uint32_t op = PPC_OP(last);
++        const bool always = op == PPC_OP_B;  // b or bl
++        const bool ctr = op == PPC_OP_CTR && (PPC_XOP(last) == 16 || PPC_XOP(last) == 528) &&
++            (PPC_BO(last) & 0x14) == 0x14;   // blr, bctr, blrl or bctrl
++        const bool trap = (op == 31 && PPC_XOP(last) == 4 && PPC_BO(last) == 31) || (op == 3 && PPC_BO(last) == 31);
++        if (!always && !ctr && !trap && last != 0)
++        {
++            const uint32_t* next = (const uint32_t*)image.Find(end);
++            auto target = image.symbols.find(end);
++            if (target != image.symbols.end() && target->address == end && target->type == Symbol_Function)
++            {
++                println("\t// fall through");
++                println("\t{}(ctx, base);", target->name);
++            }
++            else if (next != nullptr && *next != 0)
++            {
++                println("\t// ERROR fall through to {:X}", end);
++                fmt::println("ERROR: sub_{:X} falls through to {:X}, which is not a function start", fn.base, end);
++            }
++        }
++    }
+ 
+     println("}}\n");
+ 

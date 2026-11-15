@@ -9,7 +9,9 @@
    funclets) are invisible to the analyzer. Code pointers stored in .rdata/.data that land
    right after padding, a blr, an unconditional branch or a bctr (a tail call through a
    register, e.g. vtable thunks packed back to back), and are not a known function start or
-   switch case label, become explicit functions bounded by the next function start.
+   switch case label, become explicit functions bounded by the next function start. Pointers
+   into the body of a .pdata function are labels, not functions: the exception scope tables
+   hold the addresses of `__except` blocks (#52), and declaring those split the function.
 3. Branch-only functions: a leaf function reached only by tail calls (`b`, never `bl`) has no
    .pdata entry, no call to it and no pointer to it. XenonRecomp then emits `// ERROR <target>`
    and a bare `return` at each tail call, so the function silently does nothing (issue #47:
@@ -50,6 +52,16 @@ def call_targets(pe):
     return sorted(t)
 
 
+def in_pdata_body(pe, addr):
+    """True when addr lies inside a .pdata function, past its first instruction.
+
+    .pdata functions are contiguous, so such an address is a label of that function and never
+    a function start, even when a pointer to it is stored in data: the scope table of a
+    function with an exception handler holds the addresses of its __except blocks (#52)."""
+    i = bisect.bisect_right(pe.starts, addr) - 1
+    return i >= 0 and pe.funcs[i][0] < addr < pe.funcs[i][1]
+
+
 def branch_functions(pe, known, case_labels):
     boundaries = sorted(known)
     found = set()
@@ -63,7 +75,7 @@ def branch_functions(pe, known, case_labels):
             if off & 0x2000000:
                 off -= 1 << 26
             t = src + off
-            if t in known or t in case_labels:
+            if t in known or t in case_labels or in_pdata_body(pe, t):
                 continue
             if pe.w(t - 4) not in (0, 0x4E800020):  # after padding or blr
                 continue
@@ -93,7 +105,7 @@ def pointer_functions(pe, known, case_labels):
     for va, vs in data_sections(pe):
         for o in range(va, va + vs - 3, 4):
             v = struct.unpack('>I', pe.d[o:o + 4])[0]
-            if v & 3 or v in known or not any(s <= v < e for s, e in code):
+            if v & 3 or v in known or not any(s <= v < e for s, e in code) or in_pdata_body(pe, v):
                 continue
             prev = pe.w(v - 4)
             if prev == 0x4E800420 and v in case_labels:
@@ -114,6 +126,7 @@ def block_functions(cfg):
 
 def main(pe_path, switch_path, config_path, mapping_path=None):
     pe = fst.PE(pe_path)
+    pe.starts = [s for s, _ in pe.funcs]
     sw = open(switch_path).read()
     tables = []
     for block in sw.split('[[switch]]')[1:]:

@@ -242,7 +242,12 @@ step_xenonrecomp() {
     if git -C "$XENON" apply --reverse --check "$REPO/$PATCH" >/dev/null 2>&1; then
         done_step "the instruction patch"
     else
-        say "applying $(basename "$PATCH") (the instructions Backbreaker needs)"
+        if ! git -C "$XENON" diff --quiet; then
+            # An older version of the patch: the clone is setup's own, so start it over clean.
+            say "XenonRecomp has an older version of the patch - resetting it to $XENON_REV first"
+            run_quiet git -C "$XENON" checkout --quiet -- .
+        fi
+        say "applying $(basename "$PATCH") (the instructions and analyzer fixes Backbreaker needs)"
         run_quiet git -C "$XENON" apply "$REPO/$PATCH"
     fi
 
@@ -262,10 +267,27 @@ recompile() { # one XenonRecomp pass over the image with the config in config/
     run_quiet "$XENON_BIN" config/backbreaker.toml "$XENON/XenonUtils/ppc_context.h" \
         | tee build/recompile.log
     say "recompiled: $(find ppc -maxdepth 1 -name 'ppc_recomp.*.cpp' | wc -l) C++ files, $(grep -cE '\{ 0x[0-9A-Fa-f]+, sub_' ppc/ppc_func_mapping.cpp || true) functions, $(grep -ciE 'warning|error' build/recompile.log || true) warnings (full output: build/recompile.log)"
+    # A branch XenonRecomp cannot resolve becomes "// ERROR <target>" and a bare return: the
+    # code there is silently skipped at run time (#47, #52). There are none with the committed
+    # config, so any at all is news.
+    local unresolved
+    unresolved=$(awk '/\/\/ ERROR/ { n++ } END { print n + 0 }' ppc/ppc_recomp.*.cpp)
+    if [ "$unresolved" -ne 0 ]; then
+        warn "$unresolved unresolved branches ('// ERROR' in ppc/): that code will not run. 'grep ^ERROR build/recompile.log' lists them."
+    fi
+}
+
+# ppc/ is out of date when the recompiler or its config changed after the last run.
+ppc_current() {
+    local f
+    [ -s ppc/ppc_func_mapping.cpp ] || return 1
+    for f in "$XENON_BIN" config/backbreaker.toml config/backbreaker_switch_tables.toml; do
+        [ ppc/ppc_func_mapping.cpp -nt "$f" ] || return 1
+    done
 }
 
 step_recompile() {
-    if [ $force -eq 0 ] && [ $regenerate -eq 0 ] && [ -s ppc/ppc_func_mapping.cpp ]; then
+    if [ $force -eq 0 ] && [ $regenerate -eq 0 ] && ppc_current; then
         done_step "ppc/ (recompiled output)"
         return
     fi

@@ -88,8 +88,5 @@ functions = [
     { address = 0x8280D718, size = 0x124 },
     { address = 0x8280D970, size = 0xD0 },
     { address = 0x82840C38, size = 0xD4 },
-    { address = 0x828E72CC, size = 0x28 },
-    { address = 0x828F0C80, size = 0x18 },
-    { address = 0x8294B5A4, size = 0x18 },
 ]
 # END leaf functions

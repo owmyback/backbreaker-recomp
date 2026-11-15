@@ -101,6 +101,20 @@ Goal: every guest function translates to C++ that compiles.
     logic, CTR branches, VMX integer saturation/packs/shifts, `vsro`, `vsel128`, `vctuxs` ...)
   - fixes: `bdnzf` assumed the `eq` bit; `vcmpgtuh.` record form; CTR branches into other
     functions; integer division guarded (x86 traps on /0 and INT_MIN/-1, PowerPC does not)
+  - analyzer fixes (#52), for leaf functions (no `.pdata` entry) and the scan between
+    functions: `bdzlr`/`bdnzlr` were taken for an unconditional `blr`, which cut the game's
+    `memset` (`0x828E0440`) before its last two byte stores, so a fill whose length ends in 2
+    or 3 bytes after the word loop left the last 1 or 2 bytes unwritten (1,150 call sites). A
+    conditional branch to the next instruction cut `0x826EB500` (a tracker-music tremolo step)
+    after its first case. The two words in front of every function with an exception handler
+    (handler address and scope table) were decoded as code; that gave 66 bogus copies of those
+    functions, cut into pieces whose jumps into each other were 57 of the 60 `// ERROR`s.
+    Nothing ever called the copies.
+  - a function whose last instruction can fall through (a conditional branch or return)
+    now continues into the next function like the CPU does, instead of returning; one that
+    cannot be resolved is logged as `ERROR: ... falls through`. Unresolved branches are logged
+    too (`ERROR: branch at ...`), and `scripts/setup.sh` warns when `ppc/` has any `// ERROR`.
+    Count: 0 (was 60).
 - `tools/find_switch_tables.py`: XenonAnalyse found 0 jump tables (Backbreaker's compiler orders
   instructions differently and pads with nops); ours finds 439, including inline tables without
   a bounds check and bounds checks on the register the index was copied from (`mr r28,r3` then
@@ -108,8 +122,10 @@ Goal: every guest function translates to C++ that compiles.
 - `tools/function_bounds.py`: explicit bounds for leaf functions with switches (no `.pdata`
   entry) and functions reachable only through pointers (vtables, exception funclets, and vtable
   thunks packed back to back after a `bctr`, like `0x8243A4D8`, called when a play starts):
-  58 entries in `config/backbreaker.toml`. Running it on the committed config with a mapping of a
-  build of that same config writes those 58 entries back unchanged (#29), so
+  56 entries in `config/backbreaker.toml`. Pointers into the body of a `.pdata` function are
+  labels, not functions (the `__except` targets in exception scope tables, #52). Running it on
+  the committed config with a mapping of a build of that same config writes those entries back
+  unchanged (#29), so
   `scripts/setup.sh --regenerate` leaves `config/` clean; an entry that stops being re-derivable
   is reported rather than silently dropped.
 - Register save/restore helpers located by byte pattern (`config/backbreaker.toml`).
@@ -526,8 +542,7 @@ it reads the stick-direction inputs (ids 14-23), which take another path.
 branch-only functions: tail-call targets right after padding or a `blr`, from another function's
 range. That adds `0x8262B0F8` and shortens `0x8262AF48` to end where it starts. A debug build
 logs the game reading left Y = 1.000 from `8262A05C` while the stick is held. Before, it read 0.
-60 other `// ERROR` branches remain: jumps into the middle of other functions, mostly
-exception-handling funclets (#52).
+The 60 other `// ERROR` branches were fixed in the analyzer (#52, see Phase 1).
 
 Done early: scripted presses for testing (`--press "a@20,a@26"`, see `docs/runtime.md`), reported
 both as pad state and as keystroke events (`XamInputGetKeystrokeEx`). The game accepts them:
