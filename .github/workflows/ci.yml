@@ -125,8 +125,8 @@ jobs:
           python3 tools/fps_report.py tests/data/fps_report_sample.log --compare tests/data/fps_report_sample_b.log --from 3 --to 9 > compare_narrow.txt
           grep -qF 'frames total 162 vs 109: 67.3%' compare_narrow.txt
 
-      # The capture comparison rules (tools/capture_diff.py, issue #79) against the small capture
-      # pairs in tests/data: which differences count, which are noise, and what the exit status
-      # means. No game files or built runtime needed.
+      # The tools' unit tests, tests/test_*.py: capture_diff.py's comparison rules against the small
+      # capture pairs in tests/data (#79), and shader_effects.py against a hand-built pack (#80).
+      # No game files or built runtime needed; shader_effects.py's shipped-pack checks skip here.
       - name: Test the tools scripts
         run: python3 -m unittest discover -s tests -p 'test_*.py'

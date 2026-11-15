@@ -307,6 +307,41 @@ that does not match `shaders/`) is reported as a problem instead of being truste
 runtime cannot hide a difference. Those rules are checked by `tests/test_capture_diff.py` against
 the small capture pairs in `tests/data/`, which CI runs.
 
+## Which effect a captured shader came from
+`python3 tools/shader_effects.py captures/frame_1006` (or single `.bin` files) answers that
+question, which a capture cannot answer by itself: it names a shader only by a hash of its
+microcode. The answers come from the game's shader pack, `PackedOutputX360.pkh` (index) +
+`PackedOutputX360.pkd` (data) under `game/disc/packedfilesx360/` - so it needs the extracted
+game files, which are gitignored and therefore not in CI. 2035 entries, 57 of them `.fx360`
+effect files, the units the renderer names (`player_highlight.fx360`, `bb_ball.fx360`);
+`--effects` lists them and `--extract DIR` writes them out (game data, never commit it).
+
+Over the 173 distinct shaders in the captures here (84 pixel, 89 vertex), 82 pixel shaders sit
+verbatim inside one effect, at a byte offset partway into the entry, and 2 are in the pack
+nowhere. No captured vertex shader matches its pack copy byte for byte: the tool instead reports
+the longest unbroken run of dwords it shares with an effect as `[partial]` (`96/126 dwords
+agree: shader 30-125 is pack 559-654`), which is a shortlist rather than an answer. That shader
+shares 96 dwords with `bb_satin` and 94 with `bb_cloth`, `bb_foam`, `bb_leather` and
+`bb_armour_leather`, because those effects ship the same vertex shader; the difference in
+agreement is only how far each effect's copy was relinked, which says nothing about which of
+them drew the triangle, so the line names the effects it cannot separate with their counts
+(`4 more within 10 dwords: bb_armour_leather.fx360 94, bb_cloth.fx360 94, ...`) instead of
+picking one. 12 of the 62 partial vertex shaders read like that. Agreement runs 50-88% of the
+shader's dwords (median 71%), and where there is a run it ends where the captured microcode does
+and starts partway into it (anywhere from dword 12 to 93): the capture holds extra dwords in
+front of the pack's copy, and the tool says so on the line.
+
+The other 27 vertex shaders name no effect, and the report says how much they agree with
+anything in the pack rather than leaving that out: 21 share 9 dwords with some effect (the
+prologue they have in common) and nothing more, 3 share 5, one shares nothing, and 2 agree over
+12 of their 30 dwords - that clears `--near 12` but is less than half the shader, and the line
+says which of the two cuts it failed (`shorter than half of the 30 dwords it is`) because
+"below --near" would be false. So the `--near` threshold is not what leaves 25 of the 27
+unnamed; there is a clean gap, and nothing sits just under it.
+
+Exit status is 0 when every shader was found, 1 when some were not, 2 for a missing pack or a
+bad input, so it can gate a check.
+
 ## Renderer debug aids
 Environment variables for chasing a wrong picture (`runtime/gpu/debug_aids.cpp`, issue #40). Each
 is off unless set, they're read once, and their log lines start with `[debug]`. Shader hashes are
