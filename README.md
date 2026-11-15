@@ -77,6 +77,11 @@ So are the resolve clear values per render target format (`runtime/gpu/clear_val
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/clear_value_test.cpp -o build/clear_value_test && build/clear_value_test
 
+And the audio frame conversion (`runtime/apu/frame_convert.h`, issue #90: the game's planar
+big-endian 5.1 frames to interleaved 5.1 and to the stereo downmix):
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/audio_convert_test.cpp -o build/audio_convert_test && build/audio_convert_test
+
 The PNG writer (`runtime/debug/png.cpp`, issue #76) is checked by writing images and reading them
 back: chunk framing and CRC-32, the IHDR fields, the IDAT zlib stream and its Adler-32, and every
 pixel. It links zlib to do the inflating (`zlib1g-dev` on Ubuntu, `zlib-devel` on Fedora), so it

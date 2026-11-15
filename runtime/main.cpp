@@ -38,6 +38,7 @@ namespace
     void printExitSummary()
     {
         kernel::printSummary();
+        apu::printAudioSummary();
         vkctx::logValidationSummary();
     }
 
@@ -240,7 +241,8 @@ int main(int argc, char** argv)
     std::string image = "game/extracted/default.pe";
     std::string xex = "game/extracted/default.xex";
     int timeout = 0;
-    bool headless = false, fullscreen = false;
+    bool headless = false, fullscreen = false, mute = false, audio = false;
+    std::string audioDump;
     for (int i = 1; i < argc; i++)
     {
         std::string a = argv[i];
@@ -255,6 +257,12 @@ int main(int argc, char** argv)
             timeout = std::atoi(argv[++i]);
         else if (a == "--headless")
             headless = true;
+        else if (a == "--mute")
+            mute = true; // no audio device; the game's audio still runs (and --audio-dump still works)
+        else if (a == "--audio")
+            audio = true; // play audio in a headless run too
+        else if (a == "--audio-dump" && i + 1 < argc)
+            audioDump = argv[++i]; // the stereo output as a 32-bit float WAV
         else if (a == "--fullscreen")
             fullscreen = true; // windowed runs only; see game/settings.ini (issue #9)
         else if (a == "--sample-threads" && i + 1 < argc)
@@ -310,6 +318,8 @@ int main(int argc, char** argv)
     g_mainThread = kernel::createGuestThread(g_mainCtx, 0x100000);
     gpu::init();
     apu::initXma();
+    apu::configureAudio((!headless || audio) && !mute, audioDump); // headless runs are silent unless --audio
+    apu::initAudio();
 
     if (timeout > 0)
         alarm(timeout);

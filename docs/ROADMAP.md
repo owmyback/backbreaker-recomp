@@ -29,7 +29,8 @@ itself, and the next play call (Pass / Run / Special / Ask Coach) with the clock
 (1st 4:55, 1st & 15). Memory stays flat during the match. The 3D view renders across the whole
 screen (stadium, crowd, players, replays, the video board), with the artifacts in the blocker
 below. Kicking works with the right stick pulled back and then pushed forward (a plain release
-is not seen at the current frame rate, see phase 9). Audio is still silence.
+is not seen at the current frame rate, see phase 9). The game's mixed audio goes to the host's
+playback device (#90), but XMA decoding is still silent, so almost nothing is heard yet.
 
 **Current state of the picture (2026-11-14):** the field renders (grass, yard lines, end-zone
 logo, player shadows) since resolves are written back to guest memory (#45). Before that it was
@@ -60,7 +61,7 @@ caches) until the heap ran out a minute into the match.
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
 | 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-14 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
-| 6 | Audio output (real XMA decoding, mixing) | Planned | - |
+| 6 | Audio output (real XMA decoding, mixing) | **In progress** (output to SDL3 done, #90; XMA decoding next) | - |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
 | 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
 | 9 | Gameplay correctness and performance | Planned | - |
@@ -550,12 +551,23 @@ A on the title screen stops the attract loop and moves on to the storage-device 
 
 Open issues: #6 (SDL3 controller backend).
 
-## Phase 6 - Audio output (planned)
+## Phase 6 - Audio output (in progress)
 
-- Real XMA2 decoding. Fedora's `ffmpeg-free` has no XMA decoder (WMA Pro family is excluded);
-  options: FFmpeg from RPM Fusion, or vendoring just the decoder.
-- Feed decoded frames into the XMA output rings (replacing silence), mix XAudio render frames
-  (`XAudioSubmitRenderDriverFrame`) to the host (SDL / PipeWire).
+The game's audio engine is FMOD Ex (`media/sounds/XBox360/*.fev` + FSB4 banks). Nearly every sound
+in the banks is XMA (FSB sample mode `FSOUND_XMA`); one ambience stream is IMA ADPCM. FMOD drives
+the XMA hardware contexts itself, mixes in software and submits one 5.1 frame (256 samples) per
+render-driver callback.
+
+- Output (#90, done): `XAudioSubmitRenderDriverFrame` frames go to an SDL3 stream on the default
+  playback device (5.1 for surround devices, a stereo downmix otherwise), with the callback steered
+  by the stream's fill level so it follows the device clock; `--mute`, `--audio` (headless) and
+  `--audio-dump <wav>`; `[apu]` status lines and per-channel levels in the exit report. The game
+  mixes in 5.1 (all six channels carry sound once XMA decodes, #93). Headless check: 187.5 frames/s (= 48000 /
+  256), callbacks = frames, the logo screens' sound in the dump. See docs/runtime.md, "Audio".
+- Real XMA2 decoding (next). Fedora's `ffmpeg-free` has no XMA decoder (WMA Pro family is excluded).
+  Xenia decodes one XMA frame at a time with an `xmaframes` decoder from its FFmpeg fork; the plan
+  is to build that decoder (only) from a pinned commit, then replace the silent frames in
+  `runtime/apu/xma.cpp`.
 
 ## Phase 7 - Movies (planned)
 

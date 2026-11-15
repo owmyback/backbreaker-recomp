@@ -211,7 +211,8 @@ Subsystems:
   `select & mask` is non-zero, as in Xenia. D3D's replayed command buffers depend on it: without
   it, the GPU->CPU callback that queues D3D's worker job fired on every replay (3000+ times),
   the job's pending count went negative and match loading hung
-- `runtime/apu/` - XAudio render driver clock (256 samples @ 48 kHz), frames discarded
+- `runtime/apu/audio.cpp` - XAudio render driver: the game's (FMOD's) render callback every 256
+  samples at 48 kHz, submitted frames to SDL3 and `--audio-dump` (see "Audio" below)
 - `runtime/apu/xma.cpp` - XMA decoder: 320-context array (register 0x600), kick/lock/clear
   registers (0x650/0x690/0x6A0), decoder thread that walks packets frame by frame and writes
   SILENCE of the right length (real XMA2 decoding needs a WMA Pro capable decoder)
@@ -233,6 +234,35 @@ Subsystems:
 - `runtime/kernel/scopes.cpp` - the game's compiled-out profiler markers carry function names;
   crash and timeout reports list each thread's recent scopes
 - `runtime/debug/guest_trace.cpp` - GUEST_TRACE(addr) wraps a guest function to log args/result
+
+## Audio
+The game mixes its own audio (FMOD Ex, `media/sounds/XBox360/*.fev/.fsb`) and hands the result
+to the render driver one frame at a time: `XAudioSubmitRenderDriverFrame` gets 6 channels x 256
+samples of big-endian float, one channel after another, in the 5.1 order FL FR FC LFE BL BR
+(`runtime/apu/frame_convert.h`). The runtime queues each frame on an SDL3 audio stream on the
+default playback device: as 5.1 when the device has more than two channels (SDL maps it to the
+device layout), otherwise as a stereo downmix (centre and surrounds at -3 dB, LFE dropped, front
+channels at full level). FMOD mixes in 5.1 even though `XAudioGetSpeakerConfig` says stereo: with
+XMA decoded (#93) all six channels carry sound on the test route; only the logo movie is front-only.
+
+The render callback runs every 5.33 ms on its own guest thread. With a device open, the stream's
+fill level steers it: below 4 frames (21 ms) an extra callback runs, at 12 frames (64 ms) one is
+skipped, so the game's audio clock follows the device's clock and the queue can neither run dry
+nor grow. Without a device the timer alone paces it.
+
+- Windowed runs play audio; `--mute` opens no device (the game's audio still runs).
+- Headless runs open no device unless `--audio` is given.
+- `--audio-dump <file.wav>` writes the stereo downmix of every frame as a 32-bit float WAV, with or
+  without a device (the header is rewritten about once a second, so a killed run leaves a valid file).
+  `SDL_AUDIO_DRIVER=disk SDL_AUDIO_DISK_OUTPUT_FILE=<file>` with `--audio` exercises the device path
+  (pacing, underrun counting) without sound.
+- Every 5 s the log has `[apu] N frames (+n, a audible), queue q, underruns u, skipped s, extra e`
+  (queue in frames, -1 without a device; "audible" = a sample above 1/32768); the exit report adds
+  per-channel peaks and RMS levels.
+
+XMA decoding is still silent (see `runtime/apu/xma.cpp`), and nearly every sound in the banks is
+XMA, so for now only about 4 s of sound at the logo screens and a short one at the first button
+press of the test route (t = 20 s) come out.
 
 ## Controllers
 Controllers are read through SDL3 (users 0-3 = the first four controllers SDL lists; a
@@ -442,8 +472,8 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - Kernel objects (KTHREAD, PCR, TLS slots, events) are never freed; only a thread's stack is
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Timer APC routines are not delivered
-- Networking carries no data (socket objects exist, nothing is ever connected); movies (XMV) and
-  real audio output are stubs; XMA output is silence
+- Networking carries no data (socket objects exist, nothing is ever connected); movies (XMV) are
+  stubs; XMA output is silence (so audio output carries little more than the logo movie's sound)
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); resolves take their rectangle from the window scissor; resolves to formats other

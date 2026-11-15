@@ -69,6 +69,12 @@ jobs:
       - name: Run resolve clear value test
         run: ./build/clear_value_test
 
+      - name: Build audio frame conversion test (header-only)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/audio_convert_test.cpp -o build/audio_convert_test
+
+      - name: Run audio frame conversion test
+        run: ./build/audio_convert_test
+
       # PNG writer round trip: zlib inflates IDAT back, which is the only place the tests use it.
       - name: Build PNG writer test
         run: |
