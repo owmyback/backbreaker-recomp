@@ -39,6 +39,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <unordered_set>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -2746,8 +2747,61 @@ void main()
         }
 
         // false: the upload buffer ran out before anything of this draw was recorded
+        // ---------------------------------------------------------------- redraws of depth-written geometry
+        //
+        // Multipass effects draw the same geometry twice: once writing depth, then again with
+        // LessEqual (or Equal) and no depth write, relying on the second pass producing the very same
+        // depths, e.g. the decal pass that lays the zones, routes and kick meter onto the field (issue
+        // #54) re-draws the field's own quad. The console's two shaders compute bit-identical
+        // positions; ours can differ by an ulp, and where the geometry is clipped at the near plane
+        // (the field quad reaches behind the camera) an ulp becomes a tenth of a pixel, i.e. hundreds
+        // of depth units on a surface seen at a grazing angle, and the whole second pass fails the
+        // depth test on some frames: the flicker. Such redraws get a depth bias toward the camera of
+        // half a pixel's depth slope (plus a few units), which only matters where the two depths tie.
+        constexpr float kRedrawBiasSlopePixels = 0.5f, kRedrawBiasUnits = 16.0f;
+        std::unordered_set<uint64_t> g_depthWrittenGeometry; // this frame's depth-writing draws, by geometryKey
+
+        // The geometry a draw rasterizes: primitive, indices, and the vertex fetch constants its
+        // vertex shader reads (same data, same layout)
+        uint64_t geometryKey(const DrawState& s, const Shader& vs, uint32_t indexBase, uint32_t indexSizeWord)
+        {
+            uint64_t h = 1469598103934665603ull;
+            auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+            mix(s.primitive); mix(s.indexSource); mix(s.indexCount); mix(indexBase); mix(indexSizeWord);
+            for (uint32_t slot = 0; slot < 96; slot++)
+                if ((vs.t.vertexFetchSlots[slot / 32] >> (slot % 32)) & 1)
+                {
+                    mix(slot);
+                    mix(readRegister(kFetchConstants + slot * 2));
+                    mix(readRegister(kFetchConstants + slot * 2 + 1));
+                }
+            return h;
+        }
+
         bool drawOnce(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord)
         {
+            // Redraws of geometry this frame already wrote depth for: see kRedrawBiasSlopePixels
+            constexpr uint32_t kZEqual = 2, kZLessEqual = 3;
+            if (s.depthTest && !s.polyOffsetFront && !s.polyOffsetBack)
+                if (Shader* geomVs = currentShader(0))
+                {
+                    uint64_t key = geometryKey(s, *geomVs, indexBase, indexSizeWord);
+                    if (s.depthWrite) g_depthWrittenGeometry.insert(key);
+                    else if ((s.depthFunc == kZLessEqual || s.depthFunc == kZEqual) && g_depthWrittenGeometry.count(key))
+                    {
+                        static bool logged = false;
+                        if (!logged)
+                        {
+                            logged = true;
+                            info("[render] depth-tested redraw of depth-written geometry (decal pass): depth bias toward the camera");
+                        }
+                        DrawState t = s;
+                        t.polyOffsetFront = t.polyOffsetBack = true;
+                        t.polyOffset = -kRedrawBiasUnits / 16777216.0f;   // depth-range units (see vkCmdSetDepthBias below)
+                        t.polyOffsetScale = -kRedrawBiasSlopePixels * 16.0f; // 1/16-pixel units
+                        return drawOnce(t, indexBase, indexSizeWord);
+                    }
+                }
             g_outOfSpace = false;
 
             // Topology
@@ -3129,6 +3183,7 @@ void main()
     void onSwap(uint32_t frontBuffer, uint32_t width, uint32_t height, uint64_t frameNumber)
     {
         if (!ready()) return;
+        g_depthWrittenGeometry.clear(); // geometry keys are per frame
         endPass();
         Frame& f = frame();
         auto it = g_resolved.find(frontBuffer & 0x1FFFFFFF);

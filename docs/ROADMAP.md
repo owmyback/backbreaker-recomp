@@ -466,6 +466,25 @@ Verified in the window by the maintainer (2026-11-14): the silhouette appears on
 switch to, on offense and defense, and jumps between receivers as the QB changes target.
 Validation is clean. The CPU writeback of depth resolves (step 13) still writes stencil as 0.
 
+**Step 16 - Decal passes stop flickering: redraws of depth-written geometry get a depth bias
+(#54).** The kicking power meter, the defensive zones and the play-call routes flickered in and
+out from frame to frame. They're drawn into an offscreen texture, and `zone composite` (ps
+`12a075e629d5d072`) lays that texture onto the field by drawing **the field's own quad again**
+(same vertex buffer, same indices) with LessEqual and no depth write. A frame capture with the
+vertex data showed both passes compute exactly the same depths in theory (margin 0). In practice
+our two compiled shaders round differently by about an ulp. The field quad reaches behind the
+camera, so it's clipped at the near plane, where that ulp becomes about a tenth of a pixel, and the
+field's depth slope at that grazing angle is about 3,800 units of 2^-24 per pixel. So the whole
+decal ended up a few hundred units in front of or behind the field, depending on the frame.
+Biasing that pass by 1024 units stopped the flicker; 64 and 256 didn't. (Declaring the vertex
+shaders' temporaries `precise` didn't help.)
+
+The renderer now notes each depth-writing draw's geometry for the frame (primitive, indices, and
+the vertex fetch constants its vertex shader reads). A later draw of the same geometry that tests
+LessEqual or Equal without writing depth gets a depth bias toward the camera: half a pixel's depth
+slope plus 16 units, which matters only where the two depths tie. In a headless kick-aim run (151
+frames) the meter's arc was steady; without the change the same stretch flickered every few frames.
+
 Remaining steps:
 1. 3D (volume) textures, texture signedness (signed formats are read unsigned).
 2. Resolves: written back to guest memory since step 13, except 16-bit, 16_16, 64-bit, float and
