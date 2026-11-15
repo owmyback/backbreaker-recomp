@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -143,8 +144,18 @@ namespace gpu::capture
                          depth > 1 ? (" x" + std::to_string(depth)).c_str() : "", tiled ? " tiled" : " linear");
                 g_textures.insert(key);
                 if (f)
-                    fprintf(f, "    tex[%2u] %s pitch=%u base=%08X mips=%08X  raw %08X %08X %08X %08X %08X %08X\n", slot, key,
-                            pitch, address, mips, d[0], d[1], d[2], d[3], d[4], d[5]);
+                {
+                    // What guest memory holds there: textures the game builds on the GPU and reads
+                    // back (or never fills) show as all zeros
+                    uint32_t scan = std::min<uint32_t>(256u << 10, 0x20000000u - std::min(address, 0x20000000u)), nonzero = 0;
+                    uint64_t hash = 1469598103934665603ull;
+                    const uint8_t* p = (const uint8_t*)mem::physical(address);
+                    for (uint32_t i = 0; i < scan; i++) { nonzero += p[i] != 0; hash = (hash ^ p[i]) * 1099511628211ull; }
+                    char head[100] = "";
+                    for (int i = 0; i < 32; i++) snprintf(head + 2 * i + i / 4, sizeof(head) - (2 * i + i / 4), i % 4 == 3 ? "%02X " : "%02X", p[i]);
+                    fprintf(f, "    tex[%2u] %s pitch=%u base=%08X mips=%08X  raw %08X %08X %08X %08X %08X %08X  data: %u/%u nonzero, fnv %016llX, first bytes %s\n",
+                            slot, key, pitch, address, mips, d[0], d[1], d[2], d[3], d[4], d[5], nonzero, scan, (unsigned long long)hash, head);
+                }
             }
         }
 
@@ -298,16 +309,26 @@ namespace gpu::capture
                 (unsigned long long)g_currentShader[1], describe(state).c_str());
         // Registers changed since the previous draw (ALU constants only counted)
         uint32_t aluChanged = 0;
+        std::set<uint32_t> changedConsts; // float constant vec4s with a changed dword (0-255 vertex, 256-511 pixel)
         for (uint32_t i = 0; i < reg::kCount; i++)
         {
             uint32_t v = readRegister(i);
             if (v == g_shadow[i] || isNoise(i)) continue;
-            if (i >= kAluConstants && i < kAluConstantsEnd) aluChanged++;
+            if (i >= kAluConstants && i < kAluConstantsEnd) aluChanged++, changedConsts.insert((i - kAluConstants) / 4);
             else if (!(i >= kFetchConstants && i < kFetchConstantsEnd))
                 fprintf(f, "  %04X %-36s %08X (was %08X)\n", i, regName(i) ? regName(i) : "?", v, g_shadow[i]);
             g_shadow[i] = v;
         }
-        if (aluChanged) fprintf(f, "  (%u ALU constant dwords changed)\n", aluChanged);
+        if (aluChanged)
+        {
+            fprintf(f, "  (%u ALU constant dwords changed)\n", aluChanged);
+            for (uint32_t c : changedConsts)
+            {
+                float v[4];
+                for (int k = 0; k < 4; k++) { uint32_t u = readRegister(kAluConstants + c * 4 + k); std::memcpy(&v[k], &u, 4); }
+                fprintf(f, "    %s c%u = (%g, %g, %g, %g)\n", c < 256 ? "vs" : "ps", c < 256 ? c : c - 256, v[0], v[1], v[2], v[3]);
+            }
+        }
         describeTextures(f);
     }
 

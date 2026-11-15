@@ -231,11 +231,38 @@ frame number:
   (`runtime/gpu/state.cpp`: primitive and indices, EDRAM mode, render targets with formats, tile
   bases, write masks and blending, depth/stencil, rasterizer, alpha test, viewport, scissor,
   shader setup), then the raw registers changed since the previous draw (named from Xenia's
-  register table) and the bound texture fetch constants; shader loads are listed in order
+  register table), the ALU constants that changed, as floats (`vs c12 = (...)`, `ps c38 = (...)`),
+  and the bound texture fetch constants; shader loads are listed in order. Each texture line ends
+  with what guest memory holds at its address (`data: N/M nonzero, fnv <hash>, first bytes <hex>`,
+  over the first 256 KB): a texture the game renders on the GPU and reads back, or never fills,
+  shows as all zeros or as the same pattern every frame
 - `registers_start.txt` - non-zero GPU registers at the start of the frame
 - `shaders/vs_*.bin`, `shaders/ps_*.bin` - shader microcode used in the frame (big-endian dwords)
 
 `--dump-shaders` writes every unique shader the game loads during a run to `captures/shaders/`.
+
+## Renderer debug aids
+Environment variables for chasing a wrong picture (`runtime/gpu/debug_aids.cpp`, issue #40). Each
+is off unless set, they're read once, and their log lines start with `[debug]`. Shader hashes are
+the ones in a capture's `draws.txt` (`ps=...`); addresses are hex, physical or in any of the
+A0/C0/E0000000 views.
+- `BB_DEBUG_PS=<hash>[,<hash>...]` paints those pixel shaders' color 0 in a flat color, by position
+  in the list: magenta, cyan, yellow, green, red, blue, white, orange. A hash can be shortened to
+  its first hex digits (`2bf5593d`). A draw that shows up in the screenshot in its color is that
+  shader's; one that stays hidden is covered, clipped or not drawn.
+- `BB_DEBUG_EXPR=<GLSL vec4>` (with `BB_DEBUG_PS`) outputs that expression instead, to look at one
+  value: `vec4(r[4].xyz, 1.0)` (a temporary register), `vec4(psc.c[38].xyz, 1.0)` (a constant).
+  The names are the translator's (`xenos-translate` prints a shader's GLSL).
+- `BB_DEBUG_DUMP=<address>` also saves the 8_8_8_8 resolve image at that address on `--screenshot`
+  and `--screenshot-at` frames, as `screenshots/resolve_<address>_<frame>.png`, and logs its channel means (an image that
+  is all transparent black, for example, shows as `A 0.000`). The PNG is in the image's own channel
+  order; the log says when the guest reads it with red and blue swapped.
+- `BB_DEBUG_WATCH=<address>[,<frames>]` hashes the 256 KB there at every swap and logs each frame
+  where it changed (nonzero bytes, first bytes). It logs every resolve whose destination overlaps
+  those 256 KB as it happens. With each change it also lists the resolves of the last `<frames>`
+  frames (default 30) wherever they went, one line per destination, largest first (top 16), since
+  the CPU may copy or compress a resolve into the watched range: the field lightmap in issue #45 was
+  resolved to 08B14000 and compressed to 05DC5000.
 
 ## Shader disassembler
 `./build/xenos-disasm captures/shaders` (files or directories, searched recursively) prints a

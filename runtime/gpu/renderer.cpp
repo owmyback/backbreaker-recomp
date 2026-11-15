@@ -17,6 +17,7 @@
 // Register meanings follow Xenia (BSD; docs/licenses/xenia-LICENSE.txt).
 #include "renderer.h"
 #include "clear_value.h"
+#include "debug_aids.h"
 #include "gpu.h"
 #include "shader_translator.h"
 #include "state.h"
@@ -166,6 +167,7 @@ namespace gpu::render
                 snprintf(name, sizeof(name), "%s_%016llx", type ? "ps" : "vs", (unsigned long long)it->first);
                 s.name = name;
                 s.t = translateToGlsl(s.words, s.type);
+                if (s.t.ok && type) debugaids::patchPixelShader(it->first, name, s.t.glsl); // BB_DEBUG_PS
                 if (!s.t.ok)
                     warn("[render] shader %s not translated: %s", name, s.t.error.c_str());
                 else
@@ -2598,6 +2600,8 @@ void main()
             VkRect2D hostRect = scaled(rect);
 
             uint32_t dw = std::max(destPitch, rect.offset.x + rect.extent.width), dh = std::max(destHeight, rect.offset.y + rect.extent.height);
+            debugaids::onResolve(source, rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height, destBase, destPitch, destHeight,
+                                 source < 4 && color ? std::max(formatBytes(color->format), 1u) : 4u, command); // BB_DEBUG_WATCH
             if (source == 4)
             {
                 if (depth && command != 3 && destPitch && destHeight)
@@ -3024,6 +3028,53 @@ void main()
             vkDestroyBuffer(D, buffer, nullptr);
             vkFreeMemory(D, memory, nullptr);
         }
+
+        // BB_DEBUG_DUMP (debug_aids.h), on screenshot frames: read the 8_8_8_8 resolve image at that
+        // address back now (this waits for the GPU) and save it
+        void dumpResolveImage(uint64_t frameNumber)
+        {
+            uint32_t address = debugaids::dumpAddress();
+            if (!address) return;
+            auto it = g_resolved.find(address);
+            if (it == g_resolved.end() || it->second.format != VK_FORMAT_R8G8B8A8_UNORM)
+            {
+                info("[debug] BB_DEBUG_DUMP: no 8_8_8_8 resolve image at %08X at frame %llu%s", address, (unsigned long long)frameNumber,
+                     it != g_resolved.end() ? " (the one there has another format)" : "");
+                return;
+            }
+            Image& r = it->second;
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size = VkDeviceSize(r.width) * r.height * 4;
+            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            VkBuffer buffer;
+            VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &buffer));
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(D, buffer, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize = req.size;
+            mai.memoryTypeIndex = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VkDeviceMemory memory;
+            VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &memory));
+            VK_CHECK(vkBindBufferMemory(D, buffer, memory, 0));
+            endPass();
+            VkCommandBuffer c = cmd();
+            transition(c, r, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.imageExtent = { r.width, r.height, 1 };
+            vkCmdCopyImageToBuffer(c, r.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            flushAndWait();
+            void* p = nullptr;
+            VK_CHECK(vkMapMemory(D, memory, 0, bci.size, 0, &p));
+            debugaids::writeDump(frameNumber, (const uint8_t*)p, r.width, r.height, r.swapRB);
+            vkUnmapMemory(D, memory);
+            vkDestroyBuffer(D, buffer, nullptr);
+            vkFreeMemory(D, memory, nullptr);
+        }
     }
 
     void disable() { g_disabled = true; }
@@ -3085,6 +3136,7 @@ void main()
         uint32_t w = front ? std::min(width * g_scale, front->width) : 0, h = front ? std::min(height * g_scale, front->height) : 0;
         if (!front) warnOnce("swap of a front buffer the renderer did not produce: showing guest memory");
         if (front) transition(cmd(), *front, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); // presenter reads it in this layout
+        debugaids::onSwap(frameNumber); // BB_DEBUG_WATCH
 
         // Screenshot: copy the front buffer image into a host-visible buffer in this submission
         VkBuffer shot = VK_NULL_HANDLE;
@@ -3105,6 +3157,7 @@ void main()
                 g_timedScreenshots.erase(g_timedScreenshots.begin());
             }
         }
+        if (!shotPath.empty()) dumpResolveImage(frameNumber); // BB_DEBUG_DUMP
         if (!shotPath.empty() && front && w && h)
         {
             VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
