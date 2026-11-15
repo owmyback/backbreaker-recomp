@@ -316,6 +316,7 @@ namespace hid
 
     void initGamepads()
     {
+        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // SIGINT/SIGTERM end the run (main.cpp)
         if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
         {
             warn("[hid] SDL gamepad support unavailable: %s", SDL_GetError());

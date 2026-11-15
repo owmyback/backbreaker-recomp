@@ -60,7 +60,7 @@ their guest address, and the presenter shows the image resolved to the front buf
 - Unsupported textures (1D/3D/cube and some formats, for now) show as magenta, and unsupported
   features log one `[render] WARNING` each.
 
-On a crash or timeout it prints the host backtrace (sub_XXXXXXXX names are guest functions),
+On a crash, timeout, `kill` or Ctrl+C it prints the host backtrace (sub_XXXXXXXX names are guest functions),
 the last 32 kernel calls, a per-import usage summary, and the allocations still held grouped by
 the import that made them.
 
@@ -273,7 +273,10 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - Crash report: host backtrace, guest registers, recent profiler scopes and import calls of the
   crashing thread. Indirect calls to addresses without a recompiled function are reported with
   the target and caller.
-- `--timeout N`: after N seconds print every thread's recent scopes and calls.
+- `--timeout N`: after N seconds print every thread's recent scopes and calls, then exit with 124.
+  `kill <pid>` (SIGTERM) and Ctrl+C (SIGINT) end a run the same way, headless or windowed, with
+  `==== SIGTERM received ====` (or `SIGINT`) and exit code 143 (130). A second signal while the
+  report prints ends the process at once.
 
 ## Known shortcuts
 - Kernel objects (KTHREAD, PCR, TLS slots, events) are never freed; only a thread's stack is

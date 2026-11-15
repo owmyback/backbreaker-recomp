@@ -607,6 +607,7 @@ namespace video
 
     void run(bool startFullscreen)
     {
+        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // SIGINT/SIGTERM end the run (main.cpp)
         if (!SDL_Init(SDL_INIT_VIDEO))
             fatal("[video] SDL_Init: %s (use --headless to run without a window)", SDL_GetError());
         g_settings = loadSettings();

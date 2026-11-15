@@ -22,6 +22,7 @@
 #include <fstream>
 #include <pthread.h>
 #include <string>
+#include <thread>
 #include <ucontext.h>
 #include <unistd.h>
 #include <vector>
@@ -79,9 +80,40 @@ namespace
         _exit(128 + sig);
     }
 
-    void timeoutHandler(int)
+    // SIGALRM (--timeout), SIGTERM and SIGINT (kill, Ctrl+C) all end a run with the same report.
+    // They're blocked in every thread and taken by one watcher thread with sigwait, so the report
+    // runs as ordinary code, not in a signal handler on whatever thread the signal landed on.
+    // Threads inherit the mask, so main() blocks them before it starts any thread.
+    sigset_t endSignals()
     {
-        std::fprintf(stderr, "\n==== timeout reached ====\n");
+        sigset_t set;
+        sigemptyset(&set);
+        for (int sig : { SIGALRM, SIGTERM, SIGINT })
+            sigaddset(&set, sig);
+        return set;
+    }
+
+    void blockEndSignals()
+    {
+        sigset_t set = endSignals();
+        pthread_sigmask(SIG_BLOCK, &set, nullptr);
+    }
+
+    void endSignalWatcher()
+    {
+        sigset_t set = endSignals();
+        int sig = 0;
+        while (sigwait(&set, &sig) != 0) {}
+        // A second kill or Ctrl+C while the report prints ends the process at once: this thread
+        // is then the only one that takes the signal, with the default action.
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
+        pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+
+        if (sig == SIGALRM)
+            std::fprintf(stderr, "\n==== timeout reached ====\n");
+        else
+            std::fprintf(stderr, "\n==== %s received ====\n", sig == SIGTERM ? "SIGTERM" : "SIGINT");
         for (kernel::GuestThread* t : kernel::allThreads())
         {
             std::fprintf(stderr, "\n#### thread %u\n", t->id);
@@ -89,7 +121,8 @@ namespace
             kernel::printTrace(t->id, 4);
         }
         printExitSummary();
-        _exit(124);
+        std::fflush(nullptr);
+        _exit(sig == SIGALRM ? 124 : 128 + sig);
     }
 
     void installHandlers()
@@ -105,7 +138,7 @@ namespace
         sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
         for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGABRT })
             sigaction(sig, &sa, nullptr);
-        signal(SIGALRM, timeoutHandler);
+        std::thread(endSignalWatcher).detach();
     }
 
     void loadImage(const std::string& path)
@@ -180,6 +213,7 @@ namespace
 
 int main(int argc, char** argv)
 {
+    blockEndSignals(); // first: every thread started from here on inherits the mask
     std::string image = "game/extracted/default.pe";
     std::string xex = "game/extracted/default.xex";
     int timeout = 0;
