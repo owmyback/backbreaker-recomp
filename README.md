@@ -86,3 +86,47 @@ if your distro does not ship it):
 
 ## Build and run the runtime
 See `docs/runtime.md` (import glue generation, CMake/Ninja build, `./build/backbreaker --timeout N`).
+
+## Play the newest build
+Once `build/` exists, updating is two commands from the repo root:
+
+    git pull
+    cmake --build build -j 8
+
+If the pull changed `config/backbreaker.toml` (or `config/backbreaker_switch_tables.toml`), the
+recompiled code under `ppc/` no longer matches the config. `git diff --stat ORIG_HEAD HEAD -- config`
+right after the pull says whether it did. Then regenerate `ppc/` before building, with only the
+last line of "Recompile" above (the two tools before it rewrite the config you just pulled):
+
+    third_party/XenonRecomp/build/XenonRecomp/XenonRecomp config/backbreaker.toml third_party/XenonRecomp/XenonUtils/ppc_context.h
+    cmake --build build -j 8
+
+Re-running `scripts/setup.sh` does not do this for you: it skips the recompile whenever `ppc/`
+already exists (`--force` redoes every step, extraction included).
+
+Run it from the repo root too - the game files are found by paths relative to it (`game/disc`,
+`game/extracted`):
+
+    ./build/backbreaker                          # windowed, at the game's own 1280x720
+    ./build/backbreaker --resolution-scale 2     # 3D at 2560x1440 - sharper, costs frame rate
+    ./build/backbreaker --anisotropy 16          # keeps the field sharp toward the horizon
+
+Both flags only change 3D scenes (`--resolution-scale` goes to 4, `--anisotropy` to 16); what each
+does to the picture - and what it leaves alone, like the 1280x720 attract movie and UI textures -
+is in `docs/runtime.md`. How much frame rate `--resolution-scale 2` costs is not measured yet
+([issue #82](https://github.com/owmyback/backbreaker-recomp/issues/82)), and it depends on the
+GPU: the runtime prints an `[gpu] N fps` line once a second, so try the flag and watch that number.
+
+In the window:
+- **F12** - save the picture you see as `screenshots/<date-time>.png`
+- **F10** - GPU frame capture (draws, shaders, render targets) of the next frame to `captures/frame_N/`
+- **F11** or **Alt+Enter** - borderless fullscreen; window size, position and fullscreen state are
+  remembered in `game/settings.ini`
+
+Everything else - headless runs, screenshots by frame number or by second, scripted input,
+controllers, the renderer's debug aids - is in [`docs/runtime.md`](docs/runtime.md).
+
+To report a bug: open an issue here with what you expected, what you got, and the F12 screenshot;
+for anything that looks wrong on screen, also attach the F10 capture taken at that moment (its
+`summary.txt` and `draws.txt` are what make a rendering bug fixable). Both folders are gitignored:
+attach the files to the issue, never commit them.
