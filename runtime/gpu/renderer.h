@@ -19,6 +19,9 @@ namespace gpu::render
     // linear filtering and mips (the ground at a shallow angle stays sharp). Default: what the
     // texture fetch constant asks for (mostly none).
     void setAnisotropy(uint32_t n);
+    // --no-shader-cache: compile every shader with shaderc instead of reusing compiled SPIR-V from
+    // the disk cache ($XDG_CACHE_HOME/backbreaker-recomp/spirv)
+    void setShaderCache(bool on);
 
     void onShaderLoad(uint32_t type, const uint32_t* bigEndianWords, uint32_t dwords);
     // indexBase / indexSizeWord: DRAW_INDX DMA index buffer (physical address, VGT_DMA_SIZE)

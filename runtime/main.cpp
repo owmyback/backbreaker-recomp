@@ -257,6 +257,8 @@ int main(int argc, char** argv)
             gpu::render::setResolutionScale(uint32_t(std::atoi(argv[++i])));
         else if (a == "--anisotropy" && i + 1 < argc)
             gpu::render::setAnisotropy(uint32_t(std::atoi(argv[++i])));
+        else if (a == "--no-shader-cache")
+            gpu::render::setShaderCache(false);
         else if (a == "--screenshot" && i + 1 < argc)
             // frame numbers, comma-separated: --screenshot 600,1200 -> screenshots/frame_600.png, ...
             forEachItem(argv[++i], [](const std::string& n) { gpu::render::requestScreenshot(std::strtoull(n.c_str(), nullptr, 10)); });

@@ -64,6 +64,13 @@ their guest address, and the presenter shows the image resolved to the front buf
   least N:1 anisotropic filtering (16 is the usual choice). The game asks for it on only a few
   textures, so the field blurs toward the horizon without it. UI textures (base level only) are
   left alone. Needs the GPU's `samplerAnisotropy`, and the log says if it's missing.
+- Compiled shaders are cached on disk: `$XDG_CACHE_HOME/backbreaker-recomp/spirv/` (else
+  `~/.cache/...`), one SPIR-V file per shader, keyed by a hash of its GLSL and compile options, so a
+  changed translation simply gets a new file. Compiling with shaderc was nearly all of a new shader's
+  cost (1.8 s for the 61 shaders the side select needs, a freeze, every run); with the cache only the
+  very first run pays it. The renderer logs once per second how many shaders it translated,
+  compiled and took from the cache, and how many pipelines it created, with the time each took.
+  Deleting the folder is always safe. `--no-shader-cache` compiles everything.
 - `--no-render` turns the renderer off (command stream side effects only, as in phase 3).
 - Unsupported textures (1D/3D/cube and some formats, for now) show as magenta, and unsupported
   features log one `[render] WARNING` each.

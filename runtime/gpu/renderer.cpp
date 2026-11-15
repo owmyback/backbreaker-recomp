@@ -38,7 +38,9 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <chrono>
 #include <map>
+#include <unistd.h>
 #include <unordered_set>
 #include <set>
 #include <string>
@@ -118,6 +120,12 @@ namespace gpu::render
         };
         std::unordered_map<uint64_t, Shader> g_shaders;
         uint64_t g_current[2] = { 0, 0 }; // vertex, pixel
+        // First-use cost (issue #73): time spent translating shaders, compiling them with shaderc and
+        // creating pipelines, logged once per second when there was any
+        struct CompileStats { uint32_t translated = 0, compiled = 0, cached = 0, pipelines = 0; double translateMs = 0, compileMs = 0, pipelineMs = 0; };
+        CompileStats g_compileStats;
+        double nowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
         shaderc_compiler_t g_compiler = nullptr;
         shaderc_compile_options_t g_options = nullptr;
         VkShaderModule g_rectGs = VK_NULL_HANDLE;
@@ -131,8 +139,111 @@ namespace gpu::render
             return h;
         }
 
+        // ---------------------------------------------------------------- shader cache (issue #73)
+        //
+        // Compiling GLSL to SPIR-V with shaderc is nearly all of a new shader's cost: the side select
+        // compiles 61 shaders in one second (1.8 s, a freeze), the match setup 45 (0.3 s), every run.
+        // Translating the microcode takes about 2 ms for all of them, and RADV caches its own
+        // pipeline compiles. So compiled SPIR-V is kept on disk, keyed by a hash of everything
+        // that goes into it (the GLSL text, the stage, the color mask, the target and a format
+        // tag): $XDG_CACHE_HOME/backbreaker-recomp/spirv/<key>.spv (or ~/.cache/...). A changed
+        // translation is a different key, so the cache never needs clearing; --no-shader-cache
+        // turns it off.
+        bool g_shaderCacheOff = false;
+        std::string g_shaderCacheDir; // empty: not set up yet, or unusable
+        uint32_t g_targetEnv = 0;
+
+        const std::string& shaderCacheDir()
+        {
+            static bool tried = false;
+            if (tried || g_shaderCacheOff) return g_shaderCacheDir;
+            tried = true;
+            std::string base;
+            if (const char* x = getenv("XDG_CACHE_HOME"); x && *x) base = x;
+            else if (const char* h = getenv("HOME"); h && *h) base = std::string(h) + "/.cache";
+            if (base.empty()) return g_shaderCacheDir;
+            std::error_code ec;
+            std::string dir = base + "/backbreaker-recomp/spirv";
+            std::filesystem::create_directories(dir, ec);
+            if (ec) warn("[render] shader cache off: cannot create %s (%s)", dir.c_str(), ec.message().c_str());
+            else
+            {
+                g_shaderCacheDir = dir;
+                info("[render] shader cache: %s", dir.c_str());
+            }
+            return g_shaderCacheDir;
+        }
+
+        uint64_t shaderCacheKey(const std::string& glsl, shaderc_shader_kind kind, uint32_t colorMask)
+        {
+            uint64_t h = 1469598103934665603ull;
+            auto mix = [&](const void* p, size_t n) {
+                for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t*)p)[i]) * 1099511628211ull;
+            };
+            const char tag[] = "bb-spirv-1 opt=performance"; // bump when the compile options change
+            uint32_t k = uint32_t(kind);
+            mix(tag, sizeof tag);
+            mix(&g_targetEnv, sizeof g_targetEnv);
+            mix(&k, sizeof k);
+            mix(&colorMask, sizeof colorMask);
+            mix(glsl.data(), glsl.size());
+            return h;
+        }
+
+        std::vector<uint32_t> loadCachedSpirv(uint64_t key)
+        {
+            const std::string& dir = shaderCacheDir();
+            if (dir.empty()) return {};
+            char name[32];
+            snprintf(name, sizeof name, "/%016llx.spv", (unsigned long long)key);
+            FILE* f = fopen((dir + name).c_str(), "rb");
+            if (!f) return {};
+            std::vector<uint32_t> words;
+            if (fseek(f, 0, SEEK_END) == 0)
+            {
+                long size = ftell(f);
+                if (size >= 20 && size % 4 == 0 && fseek(f, 0, SEEK_SET) == 0)
+                {
+                    words.resize(size_t(size) / 4);
+                    if (fread(words.data(), 4, words.size(), f) != words.size() || words[0] != 0x07230203u) words.clear();
+                }
+            }
+            fclose(f);
+            return words;
+        }
+
+        void storeCachedSpirv(uint64_t key, const void* data, size_t size)
+        {
+            const std::string& dir = shaderCacheDir();
+            if (dir.empty()) return;
+            char name[32];
+            snprintf(name, sizeof name, "/%016llx.spv", (unsigned long long)key);
+            std::string path = dir + name, tmp = path + ".tmp" + std::to_string(getpid());
+            FILE* f = fopen(tmp.c_str(), "wb");
+            if (!f) return;
+            bool ok = fwrite(data, 1, size, f) == size;
+            ok = (fclose(f) == 0) && ok;
+            if (ok) ok = rename(tmp.c_str(), path.c_str()) == 0; // atomic: a reader sees all or nothing
+            if (!ok) remove(tmp.c_str());
+        }
+
         VkShaderModule compile(const std::string& glsl, shaderc_shader_kind kind, const char* name, std::string& error, uint32_t colorMask = 15)
         {
+            uint64_t key = g_shaderCacheOff ? 0 : shaderCacheKey(glsl, kind, colorMask);
+            if (!g_shaderCacheOff)
+            {
+                std::vector<uint32_t> spirv = loadCachedSpirv(key);
+                if (!spirv.empty())
+                {
+                    VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+                    ci.codeSize = spirv.size() * 4;
+                    ci.pCode = spirv.data();
+                    VkShaderModule m = VK_NULL_HANDLE;
+                    VK_CHECK(vkCreateShaderModule(D, &ci, nullptr, &m));
+                    g_compileStats.cached++;
+                    return m;
+                }
+            }
             shaderc_compile_options_t options = shaderc_compile_options_clone(g_options);
             if (colorMask != 15) // see BB_COLOR_MASK in the translated shader
             {
@@ -140,8 +251,11 @@ namespace gpu::render
                 snprintf(value, sizeof(value), "0x%X", colorMask);
                 shaderc_compile_options_add_macro_definition(options, "BB_COLOR_MASK", 13, value, strlen(value));
             }
+            double t0 = nowMs();
             shaderc_compilation_result_t r = shaderc_compile_into_spv(g_compiler, glsl.data(), glsl.size(), kind, name, "main", options);
             shaderc_compile_options_release(options);
+            g_compileStats.compiled++;
+            g_compileStats.compileMs += nowMs() - t0;
             VkShaderModule m = VK_NULL_HANDLE;
             if (shaderc_result_get_compilation_status(r) == shaderc_compilation_status_success)
             {
@@ -149,6 +263,7 @@ namespace gpu::render
                 ci.codeSize = shaderc_result_get_length(r);
                 ci.pCode = (const uint32_t*)shaderc_result_get_bytes(r);
                 VK_CHECK(vkCreateShaderModule(D, &ci, nullptr, &m));
+                if (!g_shaderCacheOff) storeCachedSpirv(key, ci.pCode, ci.codeSize);
             }
             else
                 error = shaderc_result_get_error_message(r);
@@ -167,7 +282,10 @@ namespace gpu::render
                 char name[48];
                 snprintf(name, sizeof(name), "%s_%016llx", type ? "ps" : "vs", (unsigned long long)it->first);
                 s.name = name;
+                double t0 = nowMs();
                 s.t = translateToGlsl(s.words, s.type);
+                g_compileStats.translated++;
+                g_compileStats.translateMs += nowMs() - t0;
                 if (s.t.ok && type) debugaids::patchPixelShader(it->first, name, s.t.glsl); // BB_DEBUG_PS
                 if (!s.t.ok)
                     warn("[render] shader %s not translated: %s", name, s.t.error.c_str());
@@ -1863,7 +1981,10 @@ void main()
             gci.pDynamicState = &dy;
             gci.layout = g_layout;
             VkPipeline pl = VK_NULL_HANDLE;
+            double t0 = nowMs();
             VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
+            g_compileStats.pipelines++;
+            g_compileStats.pipelineMs += nowMs() - t0;
             info("[render] pipeline %zu %p: %s", g_pipelines.size() + 1, (void*)pl, pipelineKey(s).c_str());
             return g_pipelines[key] = pl;
         }
@@ -1983,8 +2104,8 @@ void main()
 
             g_compiler = shaderc_compiler_initialize();
             g_options = shaderc_compile_options_initialize();
-            shaderc_compile_options_set_target_env(g_options, shaderc_target_env_vulkan,
-                                                   C->demoteHelper ? shaderc_env_version_vulkan_1_3 : shaderc_env_version_vulkan_1_2);
+            g_targetEnv = C->demoteHelper ? shaderc_env_version_vulkan_1_3 : shaderc_env_version_vulkan_1_2;
+            shaderc_compile_options_set_target_env(g_options, shaderc_target_env_vulkan, g_targetEnv);
             if (!C->demoteHelper)
                 info("[render] GPU lacks shaderDemoteToHelperInvocation; shaders target Vulkan 1.2");
             shaderc_compile_options_set_optimization_level(g_options, shaderc_optimization_level_performance);
@@ -3134,6 +3255,7 @@ void main()
     void disable() { g_disabled = true; }
     void setResolutionScale(uint32_t scale) { g_scale = std::clamp(scale, 1u, 4u); }
     void setAnisotropy(uint32_t n) { g_forcedAniso = std::clamp(n, 1u, 16u); }
+    void setShaderCache(bool on) { g_shaderCacheOff = !on; }
     void requestScreenshot(uint64_t frame) { g_screenshots.insert(frame); }
     void requestScreenshotAt(double seconds, const std::string& label) { g_timedScreenshots.emplace(seconds, label); }
 
@@ -3183,6 +3305,18 @@ void main()
     void onSwap(uint32_t frontBuffer, uint32_t width, uint32_t height, uint64_t frameNumber)
     {
         if (!ready()) return;
+        {
+            static double lastLog = 0;
+            double t = nowMs();
+            CompileStats& cs = g_compileStats;
+            if ((cs.translated || cs.compiled || cs.cached || cs.pipelines) && t - lastLog >= 1000.0)
+            {
+                info("[render] first use: %u shaders translated (%.0f ms), %u compiled by shaderc (%.0f ms), %u from the shader cache, "
+                     "%u pipelines (%.0f ms)", cs.translated, cs.translateMs, cs.compiled, cs.compileMs, cs.cached, cs.pipelines, cs.pipelineMs);
+                cs = {};
+                lastLog = t;
+            }
+        }
         g_depthWrittenGeometry.clear(); // geometry keys are per frame
         endPass();
         Frame& f = frame();
