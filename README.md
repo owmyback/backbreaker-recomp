@@ -73,6 +73,10 @@ The mip level layout (`runtime/gpu/mip_layout.h`, issue #46) is header-only too:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/mip_layout_test.cpp -o build/mip_layout_test && build/mip_layout_test
 
+So are the resolve clear values per render target format (`runtime/gpu/clear_value.h`, issue #43):
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/clear_value_test.cpp -o build/clear_value_test && build/clear_value_test
+
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 `scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`

@@ -16,6 +16,7 @@
 //   are compatible (render to texture), including depth resolves (R32_SFLOAT).
 // Register meanings follow Xenia (BSD; docs/licenses/xenia-LICENSE.txt).
 #include "renderer.h"
+#include "clear_value.h"
 #include "gpu.h"
 #include "shader_translator.h"
 #include "state.h"
@@ -48,7 +49,7 @@ namespace gpu::render
     {
         constexpr uint32_t kAluConstants = 0x4000, kFetchConstants = 0x4800, kBoolConstants = 0x4900, kLoopConstants = 0x4908;
         constexpr uint32_t RB_COPY_CONTROL = 0x2318, RB_COPY_DEST_BASE = 0x2319, RB_COPY_DEST_PITCH = 0x231A;
-        constexpr uint32_t RB_DEPTH_CLEAR = 0x231D, RB_COLOR_CLEAR = 0x231E, RB_BLEND_RED = 0x2105;
+        constexpr uint32_t RB_DEPTH_CLEAR = 0x231D, RB_COLOR_CLEAR = 0x231E, RB_COLOR_CLEAR_LO = 0x231F, RB_BLEND_RED = 0x2105;
         constexpr uint32_t kFramesInFlight = 2;
         constexpr VkDeviceSize kUploadSize = 96ull << 20; // per frame in flight
         constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT; // D24S8 is not available on AMD
@@ -2642,15 +2643,16 @@ void main()
                 markResolved(dest);
             }
 
-            // Clears after the copy, of the copied rectangle
+            // Clears after the copy, of the copied rectangle. The registers hold the bits the clear
+            // writes into EDRAM, in the target's own format (clear_value.h).
             if (clearColor && color)
             {
                 syncPartialTiles(color, rect);
                 Image* targets[4] = { color, nullptr, nullptr, nullptr };
                 beginPass(targets, nullptr);
-                uint32_t v = readRegister(RB_COLOR_CLEAR);
                 VkClearAttachment a{ VK_IMAGE_ASPECT_COLOR_BIT, 0, {} };
-                a.clearValue.color = { { (v & 0xFF) / 255.0f, ((v >> 8) & 0xFF) / 255.0f, ((v >> 16) & 0xFF) / 255.0f, (v >> 24) / 255.0f } };
+                clear::color(s.color[source].format, clear::colorBits(readRegister(RB_COLOR_CLEAR), readRegister(RB_COLOR_CLEAR_LO)),
+                             a.clearValue.color.float32);
                 VkClearRect r{ hostRect, 0, 1 };
                 vkCmdClearAttachments(frame().cmd, 1, &a, 1, &r);
                 markWritten(color, rect);
@@ -2663,7 +2665,7 @@ void main()
                 beginPass(none, depth);
                 uint32_t v = readRegister(RB_DEPTH_CLEAR);
                 VkClearAttachment a{ VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, {} };
-                a.clearValue.depthStencil = { (v >> 8) / float(0xFFFFFF), v & 0xFF };
+                a.clearValue.depthStencil = { clear::depth(s.depthFormat, v), clear::stencil(v) };
                 VkRect2D dr{ hostRect.offset, { std::min(hostRect.extent.width, depth->width - uint32_t(hostRect.offset.x)),
                                                 std::min(hostRect.extent.height, depth->height - uint32_t(hostRect.offset.y)) } };
                 VkClearRect r{ dr, 0, 1 };
