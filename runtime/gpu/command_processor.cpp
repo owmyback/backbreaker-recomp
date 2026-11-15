@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -133,6 +134,10 @@ namespace gpu
         }
 
         void execute(Reader& r, uint32_t endPos);
+        void syncAll(const char* why);
+        void completeDeferred(bool wait);
+        enum class Target : uint8_t { Memory, Register, Rptr }; // where a deferred write goes (#73)
+        void writeWhenGpuDone(Target target, uint32_t addr, uint32_t value, const char* why);
 
         void executeIndirect(uint32_t addr, uint32_t dwords)
         {
@@ -192,6 +197,7 @@ namespace gpu
                         first = false;
                         render::submitBeforeWait(); // a real wait: the GPU can work on what is recorded meanwhile
                     }
+                    completeDeferred(false); // what it waits for may be a fence the GPU has just reached
                     std::this_thread::yield();
                     if (!warned && std::chrono::steady_clock::now() - start > std::chrono::seconds(1))
                     {
@@ -207,7 +213,7 @@ namespace gpu
                 uint32_t info = r.next(), pollAddr = r.next(), ref = r.next(), mask = r.next();
                 uint32_t writeAddr = r.next(), data = r.next();
                 r.skip(count - 6);
-                render::syncGuestMemory("cond_write");
+                syncAll("cond_write");
                 uint32_t value = (info & 0x10) ? loadGpu(pollAddr) : readRegister(pollAddr & 0x7FFF);
                 if (compare(info, value & mask, ref))
                 {
@@ -230,14 +236,14 @@ namespace gpu
             {
                 uint32_t regIndex = r.next(), addr = r.next();
                 r.skip(count - 2);
-                render::syncGuestMemory("reg_to_mem");
+                syncAll("reg_to_mem");
                 storeGpu(addr, readRegister(regIndex & 0x7FFF));
                 return;
             }
             case PM4_MEM_WRITE:
             {
                 uint32_t addr = r.next();
-                render::syncGuestMemory("mem_write");
+                syncAll("mem_write");
                 for (uint32_t i = 0; i < count - 1; i++)
                     storeGpu((addr & ~3u) + i * 4 | (addr & 3), r.next());
                 return;
@@ -246,16 +252,15 @@ namespace gpu
             {
                 uint32_t initiator = r.next(), addr = r.next(), value = r.next();
                 r.skip(count - 3);
-                render::syncGuestMemory("event_write_shd");
                 writeRegister(reg::VGT_EVENT_INITIATOR, initiator & 0x3F);
-                storeGpu(addr, (initiator >> 31) ? uint32_t(g_counter) : value);
+                writeWhenGpuDone(Target::Memory, addr, (initiator >> 31) ? uint32_t(g_counter) : value, "event_write_shd");
                 return;
             }
             case PM4_EVENT_WRITE_EXT:
             {
                 uint32_t initiator = r.next(), addr = r.next();
                 r.skip(count - 2);
-                render::syncGuestMemory("event_write_ext");
+                syncAll("event_write_ext");
                 writeRegister(reg::VGT_EVENT_INITIATOR, initiator & 0x3F);
                 // Screen extents (min/max x, y, z) as u16s: report "everything"
                 uint16_t ext[6] = { 0, 0x2000 >> 3, 0, 0x2000 >> 3, 0, 1 };
@@ -274,7 +279,7 @@ namespace gpu
             {
                 uint32_t cpuMask = r.next();
                 r.skip(count - 1);
-                render::syncGuestMemory("interrupt");
+                syncAll("interrupt");
                 for (uint32_t cpu = 0; cpu < 6; cpu++)
                     if (cpuMask & (1u << cpu))
                         dispatchInterrupt(1, cpu);
@@ -402,6 +407,67 @@ namespace gpu
         }
 
         // Scratch registers are mirrored to memory: D3D's fences
+        // Guest-visible writes that must wait until the GPU has run everything before them (#73): the
+        // game's fences (EVENT_WRITE_SHD to memory, D3D's scratch registers) and the read pointer. The
+        // console's CP writes them when the GPU gets there; so do we, instead of stopping until it
+        // has. Applied strictly in order.
+        struct DeferredWrite { uint64_t serial; Target target; uint32_t addr, value; };
+        std::deque<DeferredWrite> g_deferred;
+        uint32_t g_pollTick = 0;
+
+        void publishRptr(uint32_t rptr)
+        {
+            *regPtr(reg::CP_RB_RPTR) = __builtin_bswap32(rptr);
+            if (g_rptrWriteback)
+                *(uint32_t*)physical(g_rptrWriteback) = __builtin_bswap32(rptr);
+        }
+
+        void applyWrite(const DeferredWrite& d)
+        {
+            switch (d.target)
+            {
+            case Target::Memory: storeGpu(d.addr, d.value); break;
+            case Target::Register: writeRegister(d.addr, d.value); break;
+            case Target::Rptr: publishRptr(d.value); break;
+            }
+        }
+
+        // Apply the deferred writes whose GPU work has finished (all of them with `wait`)
+        void completeDeferred(bool wait)
+        {
+            if (g_deferred.empty()) return;
+            if (wait) render::waitGpu(g_deferred.back().serial);
+            uint64_t done = render::gpuDone(); // copies the finished GPU writes to guest memory first
+            while (!g_deferred.empty() && g_deferred.front().serial <= done)
+            {
+                applyWrite(g_deferred.front());
+                g_deferred.pop_front();
+            }
+        }
+
+        // A write the guest may take as "the GPU got here": now if nothing is outstanding, otherwise
+        // queued behind the GPU work recorded before it
+        void writeWhenGpuDone(Target target, uint32_t addr, uint32_t value, const char* why)
+        {
+            if (!render::asyncFences())
+            {
+                render::syncGuestMemory(why);
+                applyWrite({ 0, target, addr, value });
+                return;
+            }
+            uint64_t serial = render::fenceSerial();
+            if (!g_deferred.empty()) serial = std::max(serial, g_deferred.back().serial); // keep the order
+            if (!serial) { applyWrite({ 0, target, addr, value }); return; }
+            g_deferred.push_back({ serial, target, addr, value });
+        }
+
+        // Every other point where the guest can look: GPU writes and deferred writes all land first
+        void syncAll(const char* why)
+        {
+            render::syncGuestMemory(why);
+            completeDeferred(true);
+        }
+
         bool touchesScratch(uint32_t index, uint32_t count)
         {
             return index < reg::SCRATCH_REG0 + 8 && index + count > reg::SCRATCH_REG0;
@@ -411,6 +477,7 @@ namespace gpu
         {
             while (r.pos != endPos)
             {
+                if (!g_deferred.empty() && (++g_pollTick & 63) == 0) completeDeferred(false);
                 uint32_t header = r.next();
                 switch (header >> 30)
                 {
@@ -419,17 +486,24 @@ namespace gpu
                     uint32_t count = ((header >> 16) & 0x3FFF) + 1;
                     uint32_t index = header & 0x7FFF;
                     bool oneReg = header & 0x8000;
-                    if (touchesScratch(index, oneReg ? 1 : count)) render::syncGuestMemory("scratch_reg"); // D3D fences
+                    bool scratch = touchesScratch(index, oneReg ? 1 : count); // D3D fences: written when the GPU gets there
                     for (uint32_t i = 0; i < count; i++)
-                        writeRegister(oneReg ? index : index + i, r.next());
+                    {
+                        uint32_t reg = oneReg ? index : index + i, value = r.next();
+                        if (scratch && touchesScratch(reg, 1)) writeWhenGpuDone(Target::Register, reg, value, "scratch_reg");
+                        else writeRegister(reg, value);
+                    }
                     break;
                 }
                 case 1: // two registers
                 {
                     uint32_t r0 = header & 0x7FF, r1 = (header >> 11) & 0x7FF;
-                    if (touchesScratch(r0, 1) || touchesScratch(r1, 1)) render::syncGuestMemory("scratch_reg");
-                    writeRegister(r0, r.next());
-                    writeRegister(r1, r.next());
+                    for (uint32_t reg : { r0, r1 })
+                    {
+                        uint32_t value = r.next();
+                        if (touchesScratch(reg, 1)) writeWhenGpuDone(Target::Register, reg, value, "scratch_reg");
+                        else writeRegister(reg, value);
+                    }
                     break;
                 }
                 case 2: // nop
@@ -450,9 +524,10 @@ namespace gpu
                 uint32_t wptr;
                 if ((__builtin_bswap32(*regPtr(reg::CP_RB_WPTR)) % g_ringDwords) == g_rptr)
                     render::submitBeforeWait(); // no new commands yet: the GPU can work on what is recorded meanwhile
+                completeDeferred(false);
                 {
                     std::unique_lock lock(g_wakeLock);
-                    g_wake.wait_for(lock, std::chrono::milliseconds(1), [&] {
+                    g_wake.wait_for(lock, g_deferred.empty() ? std::chrono::microseconds(1000) : std::chrono::microseconds(100), [&] {
                         return (__builtin_bswap32(*regPtr(reg::CP_RB_WPTR)) % g_ringDwords) != g_rptr;
                     });
                     wptr = __builtin_bswap32(*regPtr(reg::CP_RB_WPTR)) % g_ringDwords;
@@ -461,11 +536,10 @@ namespace gpu
                     continue;
                 Reader ring{ g_ringBase, g_ringDwords, g_rptr, true };
                 execute(ring, wptr);
-                render::syncGuestMemory("rptr"); // a CPU waiting for the GPU to go idle polls the read pointer
                 g_rptr = wptr;
-                *regPtr(reg::CP_RB_RPTR) = __builtin_bswap32(g_rptr);
-                if (g_rptrWriteback)
-                    *(uint32_t*)physical(g_rptrWriteback) = __builtin_bswap32(g_rptr);
+                // A CPU waiting for the GPU to go idle polls the read pointer: it moves when the GPU has
+                // run the commands, as the fences do
+                writeWhenGpuDone(Target::Rptr, 0, wptr, "rptr");
             }
         }
 

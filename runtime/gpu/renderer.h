@@ -33,4 +33,15 @@ namespace gpu::render
     void syncGuestMemory(const char* why = "renderer"); // `why`: for the BB_PERF line
     void addCommandWaitMs(double ms);
     void submitBeforeWait();                // the CP is about to wait for the game: let the GPU start on what is recorded       // BB_PERF: time the CP spent polling in WAIT_REG_MEM
+
+    // Asynchronous guest fences (#73). fenceSerial(): 0 if no GPU write is waiting to reach guest
+    // memory (a fence can be written now); otherwise it submits what is recorded and returns the
+    // submit the GPU must finish first. gpuDone(): copies to guest memory the writes of every
+    // finished submit and returns the highest one finished. waitGpu(): blocks until that submit is
+    // done. All three are for the command processor thread; asyncFences() is false without
+    // timeline semaphores or with the renderer off, and then syncGuestMemory() is the only way.
+    bool asyncFences();
+    uint64_t fenceSerial();
+    uint64_t gpuDone();
+    void waitGpu(uint64_t serial);
 }

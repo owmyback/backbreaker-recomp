@@ -209,6 +209,9 @@ namespace vkctx
             VkPhysicalDeviceVulkan12Features f12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
             f12.pNext = &f13;
             f12.samplerMirrorClampToEdge = have12.samplerMirrorClampToEdge;
+            // The renderer counts its submits on a timeline semaphore so the command processor can
+            // write the game's fences when the GPU gets there instead of waiting (issue #73)
+            f12.timelineSemaphore = c.timelineSemaphore = have12.timelineSemaphore;
             VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
             features.pNext = &f12;
             features.features.geometryShader = have.features.geometryShader;

@@ -128,7 +128,7 @@ namespace gpu::render
         // BB_PERF=1: one line per second of where the renderer thread's time went (issue #73)
         struct PerfStats { uint64_t draws = 0, hashBytes = 0, uploads = 0, uploadBytes = 0, resolves = 0, writebacks = 0, flushes = 0;
                            uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0, chunks = 0,
-                                    idleSubmits = 0;
+                                    idleSubmits = 0, asyncFences = 0, asyncWaits = 0, copyInsAroundPending = 0;
                            double hashMs = 0, waitMs = 0, cpWaitMs = 0;
                            std::map<std::string, uint64_t> syncsBy;          // syncs that had pending writes, by trigger
                            struct Up { uint32_t format = 0, width = 0, height = 0; uint64_t count = 0, bytes = 0, fresh = 0; };
@@ -426,6 +426,48 @@ void main() {
 
         // ---------------------------------------------------------------- frames in flight
 
+        // Guest physical ranges [start, end) written by GPU work (resolve writebacks, memory export)
+        // that are not in guest memory yet. `serial` is the submit that carries the write (0: still
+        // being recorded); retire() copies a range out once the GPU has finished that submit.
+        struct PendingWrite { uint32_t start, end; uint64_t serial; bool exported; };
+        std::vector<PendingWrite> g_pendingWrites;
+        // A draw whose textures or indices come from a pending memory export cannot read them out of
+        // guest memory yet; it sets g_syncRetry, and draw() syncs and records it again (a sync in the
+        // middle of a draw would reset the upload buffer under it).
+        bool g_syncRetry = false;
+        void needsExportedData(uint64_t start, uint64_t end)
+        {
+            for (const PendingWrite& w : g_pendingWrites)
+                if (w.exported && start < w.end && w.start < end) { g_syncRetry = true; return; }
+        }
+
+        // Every renderer submit signals g_timeline with the next serial (#73), so "the GPU has run
+        // everything up to submit N" is one counter: a semaphore signal covers all earlier submits.
+        VkSemaphore g_timeline = VK_NULL_HANDLE;
+        uint64_t g_submitSerial = 0;
+
+        void queueSubmit(VkCommandBuffer cb, VkFence fence)
+        {
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &cb;
+            VkTimelineSemaphoreSubmitInfo ts{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+            uint64_t value = 0;
+            if (g_timeline)
+            {
+                value = ++g_submitSerial;
+                ts.signalSemaphoreValueCount = 1;
+                ts.pSignalSemaphoreValues = &value;
+                si.pNext = &ts;
+                si.signalSemaphoreCount = 1;
+                si.pSignalSemaphores = &g_timeline;
+                for (PendingWrite& w : g_pendingWrites)
+                    if (!w.serial) w.serial = value; // recorded into this command buffer or an earlier one
+            }
+            std::lock_guard guard(C->queueLock);
+            VK_CHECK(vkQueueSubmit(C->queue, 1, &si, fence));
+        }
+
         struct Frame
         {
             VkCommandPool pool = VK_NULL_HANDLE;
@@ -484,13 +526,7 @@ void main() {
                 VK_CHECK(vkCreateFence(D, &fci, nullptr, &fence));
                 f.chunkFences.push_back(fence);
             }
-            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-            si.commandBufferCount = 1;
-            si.pCommandBuffers = &f.cmd;
-            {
-                std::lock_guard guard(C->queueLock);
-                VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.chunkFences[f.chunksInFlight]));
-            }
+            queueSubmit(f.cmd, f.chunkFences[f.chunksInFlight]);
             f.chunksInFlight++;
             if (f.cmdBuffersUsed == f.cmdBuffers.size())
             {
@@ -534,16 +570,6 @@ void main() {
 
         // Offset in this frame's upload buffer, or UINT64_MAX (and g_outOfSpace) when it is full
         bool g_outOfSpace = false;
-        // The memory export part of g_pendingWrites. A draw whose textures or indices come from one of
-        // these ranges cannot read them out of guest memory yet; it sets g_syncRetry, and draw() syncs
-        // and records it again (a sync in the middle of a draw would reset the upload buffer under it).
-        std::vector<std::pair<uint32_t, uint32_t>> g_pendingExports;
-        bool g_syncRetry = false;
-        void needsExportedData(uint64_t start, uint64_t end)
-        {
-            for (auto [s, e] : g_pendingExports)
-                if (start < e && s < end) { g_syncRetry = true; return; }
-        }
         uint64_t g_drawsInFrame = 0;
         VkDeviceSize uploadAlloc(VkDeviceSize size, VkDeviceSize align = 256)
         {
@@ -670,11 +696,7 @@ void main() {
             {
                 VK_CHECK(vkEndCommandBuffer(f.cmd));
                 f.recording = false;
-                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-                si.commandBufferCount = 1;
-                si.pCommandBuffers = &f.cmd;
-                std::lock_guard guard(C->queueLock);
-                VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.fence));
+                queueSubmit(f.cmd, f.fence);
                 f.submitted = true;
             }
             g_drawsSinceSubmit = 0;
@@ -1818,7 +1840,7 @@ void main()
                     for (uint32_t layer = 0; layer < layers; layer++)
                     {
                         uint64_t at = uint64_t(r.mip ? mipAddress : base) + r.offset + uint64_t(layer) * r.sliceStride;
-                        if (!g_pendingExports.empty()) needsExportedData(at, at + r.srcBytes);
+                        if (!g_pendingWrites.empty()) needsExportedData(at, at + r.srcBytes);
                         if (at + r.srcBytes <= mem::kPhysicalSize) hash = hashBytes(mem::physical(uint32_t(at)), r.srcBytes, hash);
                         g_perf.hashBytes += r.srcBytes;
                     }
@@ -2193,13 +2215,7 @@ void main()
             {
                 VK_CHECK(vkEndCommandBuffer(f.cmd));
                 f.recording = false;
-                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-                si.commandBufferCount = 1;
-                si.pCommandBuffers = &f.cmd;
-                {
-                    std::lock_guard guard(C->queueLock);
-                    VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.fence));
-                }
+                queueSubmit(f.cmd, f.fence);
                 double w0 = nowMs();
                 VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
                 g_perf.waitMs += nowMs() - w0;
@@ -2220,6 +2236,16 @@ void main()
             if (!C) { g_failed = true; return false; }
             D = C->device;
             importGuestMemory();
+            if (C->timelineSemaphore)
+            {
+                VkSemaphoreTypeCreateInfo tci{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+                tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+                VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+                sci.pNext = &tci;
+                VK_CHECK(vkCreateSemaphore(D, &sci, nullptr, &g_timeline));
+            }
+            else
+                info("[render] no timeline semaphores: the game's GPU fences make the command processor wait");
 
             g_compiler = shaderc_compiler_initialize();
             g_options = shaderc_compile_options_initialize();
@@ -2653,8 +2679,6 @@ void main()
         VkPipeline g_writebackPipeline = VK_NULL_HANDLE;
         VkSampler g_writebackSampler = VK_NULL_HANDLE;
         bool g_writebackFailed = false;
-        // Guest physical ranges [start, end) written by writebacks recorded since the last sync
-        std::vector<std::pair<uint32_t, uint32_t>> g_pendingWrites;
         uint64_t g_writebacks = 0, g_writebackSyncs = 0, g_writebacksSkipped = 0; // for the stats line
         constexpr uint32_t kGpuOnlyAfterFrames = 60;
         struct Recurrence { uint64_t lastFrame = 0; uint32_t run = 0; }; // frames in a row with a resolve there
@@ -2676,10 +2700,76 @@ void main()
             return true;
         }
 
+        // Copy pending writes to guest memory: those of every submit up to `serial`, which the GPU has
+        // finished (all of them with `all`, after a full wait).
+        void retire(uint64_t serial, bool all = false)
+        {
+            if (g_pendingWrites.empty()) return;
+            // Ranges can overlap (a resolve over a pending one): copying the older out may already
+            // carry some of the newer, as the GPU writing memory as it runs would; the newer one
+            // retires later and lands whole.
+            size_t kept = 0;
+            for (size_t i = 0; i < g_pendingWrites.size(); i++)
+            {
+                const PendingWrite& w = g_pendingWrites[i];
+                if (all || (w.serial && w.serial <= serial))
+                {
+                    if (g_exportMap) // staging copy of guest memory: copy the written range out
+                        std::memcpy(mem::physical(w.start), g_exportMap + w.start, w.end - w.start);
+                }
+                else
+                    g_pendingWrites[kept++] = w;
+            }
+            g_pendingWrites.resize(kept);
+            if (kept) return;
+            for (auto& [base, img] : g_resolved) // their writebacks have landed: fingerprint them now
+                if (img.memSigPending)
+                {
+                    uint32_t start, end;
+                    img.memSigPending = false;
+                    if (memRange(img, start, end))
+                    {
+                        img.memSig = memSignature(start, end);
+                        img.memSigFrame = g_frameSerial;
+                    }
+                }
+        }
+
+        uint64_t gpuProgress()
+        {
+            uint64_t v = 0;
+            if (g_timeline) VK_CHECK(vkGetSemaphoreCounterValue(D, g_timeline, &v));
+            return v;
+        }
+
+        // Before deciding a write must wait for pending ones: retire what the GPU has already done
+        void retireCompleted()
+        {
+            if (g_timeline && !g_pendingWrites.empty()) retire(gpuProgress());
+        }
+
+        // Copy guest memory [start, end) into the staging buffer, except the parts pending GPU writes
+        // cover (there the staging buffer is ahead of guest memory)
+        void copyInAroundPending(uint32_t start, uint32_t end)
+        {
+            std::vector<std::pair<uint32_t, uint32_t>> skip;
+            for (const PendingWrite& w : g_pendingWrites)
+                if (w.start < end && start < w.end) skip.push_back({ std::max(w.start, start), std::min(w.end, end) });
+            std::sort(skip.begin(), skip.end());
+            uint32_t at = start;
+            for (auto [s0, s1] : skip)
+            {
+                if (s0 > at) std::memcpy(g_exportMap + at, mem::physical(at), s0 - at);
+                at = std::max(at, s1);
+            }
+            if (end > at) std::memcpy(g_exportMap + at, mem::physical(at), end - at);
+            if (!skip.empty()) g_perf.copyInsAroundPending++;
+        }
+
         bool pendingOverlap(uint32_t start, uint32_t end)
         {
-            for (auto [s, e] : g_pendingWrites)
-                if (start < e && s < end) return true;
+            for (const PendingWrite& w : g_pendingWrites)
+                if (start < w.end && w.start < end) return true;
             return false;
         }
 
@@ -2756,8 +2846,12 @@ void main()
             }
             if (g_exportMap)
             {
-                if (pendingOverlap(img.guestBase, uint32_t(end))) syncGuestMemory("resolve_over_pending");
-                std::memcpy(g_exportMap + img.guestBase, mem::physical(img.guestBase), end - img.guestBase);
+                // The staging copy has to hold what the guest memory holds around the rectangle the
+                // shader writes. Where an earlier GPU write is still pending, the staging copy is
+                // already the newer one (and queue order puts this write after it): copy in only the
+                // rest, instead of waiting for the GPU (#73: 75-150 waits a second in some scenes).
+                if (!g_pendingWrites.empty()) retireCompleted();
+                copyInAroundPending(img.guestBase, uint32_t(end));
             }
             endPass();
             VkCommandBuffer c = cmd();
@@ -2795,7 +2889,7 @@ void main()
             vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1,
                                  &mb, 0, nullptr, 0, nullptr);
             transition(c, img, was == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : was);
-            g_pendingWrites.push_back({ img.guestBase, uint32_t(end) });
+            g_pendingWrites.push_back({ img.guestBase, uint32_t(end), 0, false });
             g_perf.pendingAdded++;
             g_writebacks++;
         }
@@ -2943,7 +3037,7 @@ void main()
             IndexBuffer ib;
             uint32_t count = s.indexCount;
             bool dma = s.indexSource == 0;
-            if (dma && !g_pendingExports.empty())
+            if (dma && !g_pendingWrites.empty())
                 needsExportedData(indexBase & 0x1FFFFFFF, uint64_t(indexBase & 0x1FFFFFFF) + uint64_t(count) * (s.indexSize ? 4 : 2) + 4);
             std::vector<uint32_t> values; // only needed when expanding quads
             uint32_t endian = indexSizeWord >> 30;
@@ -3123,7 +3217,7 @@ void main()
             // (run, but not copied out yet): sync it first, before this draw records anything
             if (g_exportMap)
                 for (auto [start, bytes] : exportRanges)
-                    if (pendingOverlap(start, start + bytes)) syncGuestMemory("export_over_pending");
+                    if (pendingOverlap(start, start + bytes)) { retireCompleted(); if (pendingOverlap(start, start + bytes)) syncGuestMemory("export_over_pending"); }
 
             // Snapshot guest data into the upload buffer: constants, vertex data, indices
             Frame& f = frame();
@@ -3173,10 +3267,25 @@ void main()
                 std::memcpy(f.uploadMap + off, mem::physical(src), dwords * 4);
                 // Parts written by a memory export or resolve writeback that is recorded but not yet
                 // synced are only right in the GPU's copy of guest memory: copy those over the CPU's
-                for (auto [ps, pe] : g_pendingWrites)
+                // Only the pending ranges inside this slot's bytes (almost always none), merged where
+                // they overlap so no byte is copied twice
+                static std::vector<std::pair<uint64_t, uint64_t>> hits;
+                hits.clear();
+                for (const PendingWrite& w : g_pendingWrites)
                 {
-                    uint64_t a = std::max<uint64_t>(ps, src), b = std::min<uint64_t>(pe, uint64_t(src) + dwords * 4);
-                    if (a < b && g_guestMem) gpuVertexCopies.push_back({ a, off + (a - src), b - a });
+                    uint64_t a = std::max<uint64_t>(w.start, src), b = std::min<uint64_t>(w.end, uint64_t(src) + dwords * 4);
+                    if (a < b) hits.push_back({ a, b });
+                }
+                if (!hits.empty() && g_guestMem)
+                {
+                    std::sort(hits.begin(), hits.end());
+                    uint64_t a = hits[0].first, b = hits[0].second;
+                    for (size_t i = 1; i <= hits.size(); i++)
+                    {
+                        if (i < hits.size() && hits[i].first <= b) { b = std::max(b, hits[i].second); continue; }
+                        gpuVertexCopies.push_back({ a, off + (a - src), b - a });
+                        if (i < hits.size()) { a = hits[i].first; b = hits[i].second; }
+                    }
                 }
                 d0 = uint32_t(off / 4) - uint32_t(first); // shader: mem[d0 + index * stride] (mod 2^32)
             }
@@ -3326,8 +3435,7 @@ void main()
                 else
                     for (auto [start, bytes] : exportRanges)
                     {
-                        g_pendingWrites.push_back({ start, start + bytes });
-                        g_pendingExports.push_back({ start, start + bytes });
+                        g_pendingWrites.push_back({ start, start + bytes, 0, true });
                     }
                 g_drawsSinceSubmit++;
                 maybeSubmitChunk(); // the pass is ended here anyway
@@ -3454,22 +3562,48 @@ void main()
             waitChunks(f);
         }
         g_perf.waitMs += nowMs() - w0;
-        if (g_exportMap) // staging copy of guest memory: copy the written ranges out
-            for (auto [start, end] : g_pendingWrites) std::memcpy(mem::physical(start), g_exportMap + start, end - start);
-        g_pendingWrites.clear();
-        g_pendingExports.clear();
+        retire(0, true);
         g_writebackSyncs++;
-        for (auto& [base, img] : g_resolved) // their writebacks have landed: fingerprint them now
-            if (img.memSigPending)
-            {
-                uint32_t start, end;
-                img.memSigPending = false;
-                if (memRange(img, start, end))
-                {
-                    img.memSig = memSignature(start, end);
-                    img.memSigFrame = g_frameSerial;
-                }
-            }
+    }
+
+    bool asyncFences() { return !g_disabled && !g_failed && D && g_timeline; }
+
+    uint64_t fenceSerial()
+    {
+        if (!asyncFences()) return 0;
+        retireCompleted();
+        if (g_pendingWrites.empty()) return 0;
+        for (const PendingWrite& w : g_pendingWrites)
+            if (!w.serial) { submitChunk(); break; } // still being recorded: hand it to the GPU now
+        uint64_t serial = 0;
+        for (const PendingWrite& w : g_pendingWrites)
+        {
+            if (!w.serial) { syncGuestMemory("untagged"); return 0; } // cannot happen: a submit tags every range
+            serial = std::max(serial, w.serial);
+        }
+        g_perf.asyncFences++;
+        return serial;
+    }
+
+    uint64_t gpuDone()
+    {
+        if (!asyncFences()) return UINT64_MAX;
+        uint64_t done = gpuProgress();
+        retire(done);
+        return done;
+    }
+
+    void waitGpu(uint64_t serial)
+    {
+        if (!asyncFences() || gpuProgress() >= serial) return;
+        double w0 = nowMs();
+        VkSemaphoreWaitInfo wi{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &g_timeline;
+        wi.pValues = &serial;
+        VK_CHECK(vkWaitSemaphores(D, &wi, UINT64_MAX));
+        g_perf.waitMs += nowMs() - w0;
+        g_perf.asyncWaits++;
     }
 
     void onShaderLoad(uint32_t type, const uint32_t* words, uint32_t dwords)
@@ -3525,13 +3659,15 @@ void main()
                     info("[perf] %.1fs: %llu swaps, %llu draws, renderer thread CPU %.0f ms (of it polling WAIT_REG_MEM %.0f ms), GPU waits %.0f ms (%llu flushes), "
                          "textures hashed %.1f MB in %.0f ms, %llu uploads (%.1f MB), %llu resolves, %llu writeBack calls (%llu queued); "
                          "%llu memexport draws (%llu waited for), %llu syncs with pending writes, %llu GPU vertex copies, %llu sync retries, "
-                         "%llu early submits (%llu while the CP waited)",
+                         "%llu early submits (%llu while the CP waited), %llu fences written when the GPU got there (%llu waited for), "
+                         "%llu writebacks over pending ones",
                          (t - perfLast) / 1000.0, (unsigned long long)swaps, (unsigned long long)p.draws, cpu - cpuLast, p.cpWaitMs, p.waitMs,
                          (unsigned long long)p.flushes, p.hashBytes / 1048576.0, p.hashMs, (unsigned long long)p.uploads,
                          p.uploadBytes / 1048576.0, (unsigned long long)p.resolves, (unsigned long long)p.writebacks,
                          (unsigned long long)p.pendingAdded, (unsigned long long)p.exportDraws, (unsigned long long)p.flushExport, (unsigned long long)p.flushSync,
                          (unsigned long long)p.gpuVertexCopies, (unsigned long long)p.syncRetries, (unsigned long long)p.chunks,
-                         (unsigned long long)p.idleSubmits);
+                         (unsigned long long)p.idleSubmits, (unsigned long long)p.asyncFences, (unsigned long long)p.asyncWaits,
+                         (unsigned long long)p.copyInsAroundPending);
                     if (!p.syncsBy.empty() || !p.uploadsBy.empty())
                     {
                         std::string why, ups;

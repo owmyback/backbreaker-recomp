@@ -46,8 +46,8 @@ their guest address, and the presenter shows the image resolved to the front buf
 - Resolves are also written to guest memory (#45), tiled and in the destination's format, by a
   compute shader. The CPU reads some of them: the game's "Stadium texture generator" thread
   renders the field lightmap and compresses the resolved picture to DXT1 itself, so without this
-  the grass is black. The command processor waits for these writes before anything the CPU can
-  see (fences, interrupts, the read pointer). Formats written: 8_8_8_8, 2_10_10_10 and D24S8
+  the grass is black. These writes reach guest memory before anything that tells the CPU the GPU
+  got that far (fences, interrupts, the read pointer; see "GPU fences" below). Formats written: 8_8_8_8, 2_10_10_10 and D24S8
   depth. Others (the log says which, once each) stay on the GPU. Where guest memory can't be
   imported as a Vulkan buffer (it fails on RADV), the writes go through memory export's staging
   buffer and are copied out. Each write costs a GPU sync, so a destination resolved in each of the
@@ -417,6 +417,22 @@ A0/C0/E0000000 views.
   the CPU may copy or compress a resolve into the watched range: the field lightmap in issue #45 was
   resolved to 08B14000 and compressed to 05DC5000.
 
+## GPU fences
+The game learns how far the GPU has got from fences: `EVENT_WRITE_SHD` packets that write a value
+to memory, D3D's scratch registers, and the ring's read pointer. On the console the command
+processor writes them when the GPU reaches them. The runtime does the same (issue #73): the
+renderer counts its submits on a Vulkan timeline semaphore, each pending GPU write (resolve
+writebacks, memory export) carries the submit that makes it, and a fence written after pending
+writes is queued with that submit instead of stopping the command processor. Once the GPU has
+finished it, the pending writes are copied to guest memory and then the fence is written, in
+order. The command processor applies finished ones between packets, while it waits in
+`WAIT_REG_MEM` (the game may be waiting for one of them) and while the ring is idle. Everything
+else the guest can see a GPU result through (`MEM_WRITE`, `REG_TO_MEM`, `COND_WRITE`,
+`EVENT_WRITE_EXT`, interrupts) still waits for all of it first. The renderer also submits its
+work in pieces as it records (after resolves and memory export draws, and before the command
+processor waits for the game), so the GPU runs while the CPU records instead of after it. Without
+timeline semaphores (a log line says so) the command processor waits at every fence instead.
+
 ## Renderer performance line
 `BB_PERF=1` adds one `[perf]` line per second (issue #73) that says where the renderer's time went:
 swaps and draws, the CPU time of the command processor thread (which also runs the renderer) and
@@ -457,8 +473,7 @@ same addresses is used and the stream ranges (from the `mad eA, r#, const0100, c
 constants) are copied in when the draw is recorded and out when they are synced. An export draw
 does not wait for the GPU (issue #73: the match records about 130 of them per frame, and a submit
 and wait for each one was most of the renderer's GPU waiting). Its ranges are pending like resolve
-writebacks: the command processor syncs them before anything the CPU can see (fences, interrupts,
-the read pointer). A later draw that fetches vertices from a pending range gets them copied GPU to
+writebacks: they reach guest memory before any fence after them does (see "GPU fences"). A later draw that fetches vertices from a pending range gets them copied GPU to
 GPU from that buffer, and a draw whose textures or indices come from one syncs first and is
 recorded again. `BB_EXPORT_WAIT=1` brings back the wait after every export draw, for comparisons.
 
