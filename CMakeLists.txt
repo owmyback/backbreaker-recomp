@@ -52,6 +52,20 @@ target_compile_options(backbreaker PRIVATE ${COMMON_FLAGS} -Wall -Wno-unused-fun
 find_package(Vulkan REQUIRED)
 find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
 target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3 shaderc_shared)
+
+# XMA audio decoder (issue #93): FFmpeg's "xmaframes" decoder, built by scripts/build_xma_decoder.sh
+# into third_party/ffmpeg-xma (static, decoder-only, LGPL-2.1+). Optional: without it XMA sounds
+# play as silence.
+set(FFMPEG_XMA ${CMAKE_SOURCE_DIR}/third_party/ffmpeg-xma)
+if (EXISTS ${FFMPEG_XMA}/lib/libavcodec.a AND EXISTS ${FFMPEG_XMA}/lib/libavutil.a)
+    target_include_directories(backbreaker PRIVATE ${FFMPEG_XMA}/include)
+    target_compile_definitions(backbreaker PRIVATE BB_XMA_DECODER=1)
+    target_link_libraries(backbreaker PRIVATE ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a m)
+    message(STATUS "XMA decoder: ${FFMPEG_XMA}")
+else()
+    message(WARNING "No XMA decoder (third_party/ffmpeg-xma): game sounds will be silent. "
+                    "Run scripts/build_xma_decoder.sh, then re-run cmake.")
+endif()
 # export symbols so crash backtraces show guest function names
 target_link_options(backbreaker PRIVATE -rdynamic)
 

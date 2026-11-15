@@ -26,6 +26,7 @@ jobs=""
 force=0
 regenerate=0
 check_only=0
+xma_decoder=1
 
 usage() {
     cat <<'TXT'
@@ -37,6 +38,7 @@ Options:
   --regenerate      re-derive config/backbreaker_switch_tables.toml and the leaf-function
                     block of config/backbreaker.toml from your image (two recompile passes;
                     restores are one "git checkout config" away)
+  --no-xma-decoder  skip building the XMA audio decoder (game sounds are then silent)
   --check-only      only check the prerequisites and exit
   --help            this text
 
@@ -56,6 +58,7 @@ while [ $# -gt 0 ]; do
         --jobs=*) jobs=${1#*=} ;;
         --force) force=1 ;;
         --regenerate) regenerate=1 ;;
+        --no-xma-decoder) xma_decoder=0 ;;
         --check-only) check_only=1 ;;
         --help | -h) usage; exit 0 ;;
         -*) die "unknown option '$1' (--help)" ;;
@@ -320,6 +323,19 @@ step_imports() {
     fi
 }
 
+step_xma_decoder() { # optional: without it the runtime builds and XMA plays as silence (#93)
+    if [ $xma_decoder -eq 0 ]; then
+        say "skipping the XMA decoder (--no-xma-decoder): game sounds will be silent"
+        return
+    fi
+    local args=()
+    [ $force -eq 1 ] && args+=(--force)
+    [ -n "$jobs" ] && args+=(-j "$jobs")
+    if ! scripts/build_xma_decoder.sh "${args[@]}"; then
+        warn "the XMA decoder did not build: the game runs, but its sounds are silent (scripts/build_xma_decoder.sh retries it)"
+    fi
+}
+
 step_build() {
     say "configuring and building the runtime (build/backbreaker)"
     run_quiet cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
@@ -365,6 +381,7 @@ step_disc
 step_xenonrecomp
 step_recompile
 step_imports
+step_xma_decoder
 step_build
 step_tests
 

@@ -214,8 +214,8 @@ Subsystems:
 - `runtime/apu/audio.cpp` - XAudio render driver: the game's (FMOD's) render callback every 256
   samples at 48 kHz, submitted frames to SDL3 and `--audio-dump` (see "Audio" below)
 - `runtime/apu/xma.cpp` - XMA decoder: 320-context array (register 0x600), kick/lock/clear
-  registers (0x650/0x690/0x6A0), decoder thread that walks packets frame by frame and writes
-  SILENCE of the right length (real XMA2 decoding needs a WMA Pro capable decoder)
+  registers (0x650/0x690/0x6A0); a kick runs one decoder pass on the kicking thread
+  (`xma_context.h`, frames decoded by `xma_frame_decoder.cpp`; see "XMA" below)
 - `runtime/hid/` - one neutral pad on user 0, no keystrokes
 - `runtime/kernel/xam.cpp` - notifications, local profile "Player", profile settings (empty values)
 - `runtime/kernel/xnet.cpp` - networking, offline: XNet/WSA startup succeeds, no Ethernet link,
@@ -256,13 +256,35 @@ nor grow. Without a device the timer alone paces it.
   without a device (the header is rewritten about once a second, so a killed run leaves a valid file).
   `SDL_AUDIO_DRIVER=disk SDL_AUDIO_DISK_OUTPUT_FILE=<file>` with `--audio` exercises the device path
   (pacing, underrun counting) without sound.
-- Every 5 s the log has `[apu] N frames (+n, a audible), queue q, underruns u, skipped s, extra e`
-  (queue in frames, -1 without a device; "audible" = a sample above 1/32768); the exit report adds
-  per-channel peaks and RMS levels.
+- Every 5 s the log has `[apu] N frames (+n, a audible), queue q, underruns u, skipped s, extra e;
+  xma kicks k, frames d decoded s silent, errors e decode p parse, t ms/s in passes (u decoding)`
+  (queue in frames, -1 without a device; "audible" = a sample above 1/32768; xma counts are totals
+  since launch; the times are CPU time per second of the last 5 s, summed over the game threads
+  that kick); the exit report adds per-channel peaks and RMS levels.
 
-XMA decoding is still silent (see `runtime/apu/xma.cpp`), and nearly every sound in the banks is
-XMA, so for now only about 4 s of sound at the logo screens and a short one at the first button
-press of the test route (t = 20 s) come out.
+### XMA
+Nearly every sound in the banks is XMA (FSB sample mode `FSOUND_XMA`). FMOD drives the decoder
+hardware itself: it fills a context (two input buffers of 2 KB packets, an output ring of 256-byte
+blocks, loop points, subframe counts) and kicks it through the kick register; it then reads 16-bit
+big-endian PCM from the ring, moves the read offset, sets the output valid again and kicks again.
+
+A kick runs one decoder pass on the kicking thread (`runtime/apu/xma_context.h`, a port of Xenia's
+`XmaContextNew`): frame by frame, following frames across packets and into the other input buffer,
+until the output ring is full or the input runs out; a full ring is reported by clearing the
+output valid bit. Lock waits for a pass in progress on that context, and a pass's result is merged
+into the context as it is in memory at the end (only the fields the decoder owns), so the game's
+own writes meanwhile survive. `tests/xma_context_test.cpp` checks the walk on synthetic packets.
+
+Each frame goes to `runtime/apu/xma_frame_decoder.cpp`: FFmpeg's `xmaframes` decoder (one frame
+per packet, preceded by a byte with the bit padding), built from the FFmpeg fork Xenia uses by
+`scripts/build_xma_decoder.sh` into `third_party/ffmpeg-xma` (static, decoder only, LGPL-2.1+;
+`scripts/setup.sh` runs it, `--no-xma-decoder` skips it). CMake links it when it is there and
+says so; without it the build still works and every frame plays as silence (the log's first
+`[xma]` line says which). A frame the decoder rejects also plays as silence; the first 20 are
+logged with FFmpeg's error.
+
+One difference from Xenia: a pass that starts with no valid input still delivers the rest of the
+stream's last frame (Xenia's starved-input branch resets the write offset and drops it).
 
 ## Controllers
 Controllers are read through SDL3 (users 0-3 = the first four controllers SDL lists; a
@@ -473,7 +495,8 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Timer APC routines are not delivered
 - Networking carries no data (socket objects exist, nothing is ever connected); movies (XMV) are
-  stubs; XMA output is silence (so audio output carries little more than the logo movie's sound)
+  stubs; XMA plays as silence in a build without the decoder (`scripts/build_xma_decoder.sh`); the
+  XMA "interrupt when done" and "stop when done" bits are ignored
 - Profile settings are returned empty; WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); resolves take their rectangle from the window scissor; resolves to formats other

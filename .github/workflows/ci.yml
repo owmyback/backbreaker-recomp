@@ -75,6 +75,12 @@ jobs:
       - name: Run audio frame conversion test
         run: ./build/audio_convert_test
 
+      - name: Build XMA context test (header-only, synthetic packets, no decoder)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/xma_context_test.cpp -o build/xma_context_test
+
+      - name: Run XMA context test
+        run: ./build/xma_context_test
+
       # PNG writer round trip: zlib inflates IDAT back, which is the only place the tests use it.
       - name: Build PNG writer test
         run: |

@@ -30,7 +30,8 @@ itself, and the next play call (Pass / Run / Special / Ask Coach) with the clock
 screen (stadium, crowd, players, replays, the video board), with the artifacts in the blocker
 below. Kicking works with the right stick pulled back and then pushed forward (a plain release
 is not seen at the current frame rate, see phase 9). The game's mixed audio goes to the host's
-playback device (#90), but XMA decoding is still silent, so almost nothing is heard yet.
+playback device (#90), and XMA is decoded (#93) when the decoder is built
+(`scripts/build_xma_decoder.sh`), so the game's music and sounds play.
 
 **Current state of the picture (2026-11-14):** the field renders (grass, yard lines, end-zone
 logo, player shadows) since resolves are written back to guest memory (#45). Before that it was
@@ -61,7 +62,7 @@ caches) until the heap ran out a minute into the match.
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
 | 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-14 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels) | `258ec24`, `7bf4023`, `9ac4cb9` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
-| 6 | Audio output (real XMA decoding, mixing) | **In progress** (output to SDL3 done, #90; XMA decoding next) | - |
+| 6 | Audio output (real XMA decoding, mixing) | **Done** (output to SDL3, #90; XMA decoding, #93; confirmed by ear 2026-11-15) | #92, #95 |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
 | 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
 | 9 | Gameplay correctness and performance | Planned | - |
@@ -551,7 +552,7 @@ A on the title screen stops the attract loop and moves on to the storage-device 
 
 Open issues: #6 (SDL3 controller backend).
 
-## Phase 6 - Audio output (in progress)
+## Phase 6 - Audio output (done)
 
 The game's audio engine is FMOD Ex (`media/sounds/XBox360/*.fev` + FSB4 banks). Nearly every sound
 in the banks is XMA (FSB sample mode `FSOUND_XMA`); one ambience stream is IMA ADPCM. FMOD drives
@@ -564,10 +565,25 @@ render-driver callback.
   `--audio-dump <wav>`; `[apu]` status lines and per-channel levels in the exit report. The game
   mixes in 5.1 (all six channels carry sound once XMA decodes, #93). Headless check: 187.5 frames/s (= 48000 /
   256), callbacks = frames, the logo screens' sound in the dump. See docs/runtime.md, "Audio".
-- Real XMA2 decoding (next). Fedora's `ffmpeg-free` has no XMA decoder (WMA Pro family is excluded).
-  Xenia decodes one XMA frame at a time with an `xmaframes` decoder from its FFmpeg fork; the plan
-  is to build that decoder (only) from a pinned commit, then replace the silent frames in
-  `runtime/apu/xma.cpp`.
+- Real XMA2 decoding (#93, in progress). Fedora's `ffmpeg-free` has no XMA decoder (WMA Pro family
+  is excluded), and upstream FFmpeg only decodes whole multi-stream packets. Xenia decodes one XMA
+  frame at a time with an `xmaframes` decoder from its FFmpeg fork; `scripts/build_xma_decoder.sh`
+  builds just that decoder from a pinned commit (static, into `third_party/ffmpeg-xma`), and CMake
+  links it when present. `runtime/apu/xma_context.h` is a port of Xenia's `XmaContextNew` (frames
+  across packets and buffers, split frame headers, loops with subframe precision, subframe decode
+  counts, output padding, merged write-back), checked on synthetic packets by
+  `tests/xma_context_test.cpp`. A kick now runs one pass on the kicking thread, as in Xenia,
+  instead of a polling thread. On the test route without the decoder: about 3,600 kicks/s and
+  2,700 frames/s (played as silence), no parse errors, and the route plays as before. With the
+  decoder (2026-11-15, main d4ba320 + #90 + #93): 486,300 frames decoded in 260 s with 0 decode
+  and 0 parse errors, sound in every second except 4-9 s (between the logo screens and the title music), all six
+  channels in use, 30.1 fps in the match (unchanged), memory flat, and about 23 ms/s of CPU in
+  XMA passes in the match (12.4 ms/s of it in FFmpeg). The game's own mix sometimes goes above
+  full scale (channel peaks up to 1.24), so a few dozen samples per run clip.
+  Listening test in the window (2026-11-15, the maintainer): "audio works perfectly".
+
+Left for later: a soft limiter if the occasional over-full-scale peaks ever become audible; the
+XMA "interrupt when done" / "stop when done" bits (ignored, as in Xenia). Movies are phase 7.
 
 ## Phase 7 - Movies (planned)
 

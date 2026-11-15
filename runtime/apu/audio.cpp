@@ -158,15 +158,25 @@ namespace
 
     void report()
     {
-        static uint64_t lastSubmitted = 0, lastAudible = 0;
+        static uint64_t lastSubmitted = 0, lastAudible = 0, lastPassNs = 0, lastDecodeNs = 0;
+        static auto lastTime = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        double seconds = std::max(1e-3, std::chrono::duration<double>(now - lastTime).count());
         uint64_t s = g_submitted, a = g_audible;
         int queued = g_stream ? SDL_GetAudioStreamQueued(g_stream) / g_hostFrameBytes : -1;
-        info("[apu] %llu frames (+%llu, %llu audible), queue %d, underruns %llu, skipped %llu, extra %llu",
+        apu::XmaCounters x = apu::xmaCounters();
+        info("[apu] %llu frames (+%llu, %llu audible), queue %d, underruns %llu, skipped %llu, extra %llu; "
+             "xma kicks %llu, frames %llu decoded %llu silent, errors %llu decode %llu parse, %.1f ms/s in passes (%.1f decoding)",
              (unsigned long long)s, (unsigned long long)(s - lastSubmitted), (unsigned long long)(a - lastAudible),
              queued, (unsigned long long)g_underruns.load(), (unsigned long long)g_skipped.load(),
-             (unsigned long long)g_extra.load());
+             (unsigned long long)g_extra.load(), (unsigned long long)x.kicks, (unsigned long long)x.decoded,
+             (unsigned long long)x.silent, (unsigned long long)x.decodeErrors, (unsigned long long)x.parseErrors,
+             double(x.passNs - lastPassNs) / 1e6 / seconds, double(x.decodeNs - lastDecodeNs) / 1e6 / seconds);
         lastSubmitted = s;
         lastAudible = a;
+        lastPassNs = x.passNs;
+        lastDecodeNs = x.decodeNs;
+        lastTime = now;
     }
 
     void audioWorker()
