@@ -15,7 +15,7 @@ the commands are still listed individually because they are also useful on their
     ./build/backbreaker --timeout 15     # run from the repo root
 
 By default a window opens (SDL3 + Vulkan) showing what the game renders; its title shows the
-game's frame rate and the display rate. Press **F12** in that window to save the picture you see as
+revision it was built from, the game's frame rate and the display rate. Press **F12** in that window to save the picture you see as
 `screenshots/<date-time>.png` (`_2`, `_3` ... for repeats within one second): the presenter copies
 the swapchain image it has just drawn and a helper thread writes the PNG, so no guest thread is
 involved and presentation does not stop. That read-back needs the swapchain image to be usable as a
@@ -27,6 +27,16 @@ fullscreen; window size, position and fullscreen state are remembered in `game/s
 whatever that file says. Build dependencies: Vulkan headers/loader, SDL3 and shaderc (Fedora:
 `libshaderc-devel`) development packages. Set `BB_VK_VALIDATION=1` to
 enable the Vulkan validation layer (needs it installed; Fedora: `vulkan-validation-layers`).
+
+Every build stamps in where it came from. `cmake/git_version.cmake` asks git for the short
+revision, the branch and whether the tree had uncommitted edits, and writes them to
+`build/generated/build_version.h` (`runtime/build_id.cpp` is the only file that reads it). That
+string is printed by `--version` (which exits before any game file is opened), is the first line of
+every run's log, is the second word of the window title, and heads every
+`captures/frame_N/summary.txt`, so a log, a screenshot of the window and a capture folder all trace
+back to one checkout. The stamp is redone on every build, so it follows `HEAD`, the branch or a new
+edit straight away; a source tarball, or a machine without git, says `unknown` rather than failing
+the build.
 
 ## Renderer
 `runtime/gpu/renderer.cpp` executes the game's draws with Vulkan (one device shared with the

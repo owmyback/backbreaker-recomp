@@ -3,6 +3,7 @@
 #include "capture.h"
 #include "gpu.h"
 #include "state.h"
+#include "../build_id.h"
 #include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
@@ -210,6 +211,8 @@ namespace gpu::capture
             FILE* f = fopen((dir / "summary.txt").c_str(), "w");
             if (!f) return;
             fprintf(f, "Backbreaker GPU frame capture - frame %llu\n", (unsigned long long)g_frame);
+            // Which binary made this capture: a capture folder gets emailed around on its own (#75).
+            fprintf(f, "built from %s\n", build_id::line());
             fprintf(f, "front buffer %08X %ux%u\n\n", front, width, height);
             fprintf(f, "draws: %llu (of which EDRAM copies/resolves: %llu)\n", (unsigned long long)g_draws, (unsigned long long)g_copies);
             fprintf(f, "\nprimitive types:\n");

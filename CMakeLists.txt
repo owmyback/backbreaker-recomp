@@ -35,6 +35,19 @@ file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/runtime/generated/*.cpp)
 add_executable(backbreaker ${RUNTIME_SOURCES})
 target_include_directories(backbreaker PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
+
+# Build identity (issue #75): which source a binary came from, printed at startup, in the window
+# title, in every capture's summary.txt and by --version. cmake/git_version.cmake regenerates the
+# header on every build and rewrites it only when the text changed.
+find_package(Git QUIET)
+set(BUILD_VERSION_HEADER ${CMAKE_BINARY_DIR}/generated/build_version.h)
+add_custom_target(build_version ALL
+    COMMAND ${CMAKE_COMMAND} -DGIT_EXECUTABLE=${GIT_EXECUTABLE} -DSRC=${CMAKE_SOURCE_DIR}
+            -DOUT=${BUILD_VERSION_HEADER} -P ${CMAKE_SOURCE_DIR}/cmake/git_version.cmake
+    BYPRODUCTS ${BUILD_VERSION_HEADER}
+    COMMENT "build identity (git)")
+add_dependencies(backbreaker build_version)
+target_include_directories(backbreaker PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_compile_options(backbreaker PRIVATE ${COMMON_FLAGS} -Wall -Wno-unused-function)
 find_package(Vulkan REQUIRED)
 find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)

@@ -8,6 +8,7 @@
 // submission order plus the barrier below order its writes before our read.
 #include "presenter.h"
 #include "vk_context.h"
+#include "../build_id.h"
 #include "../debug/png.h"
 #include "../gpu/capture.h"
 #include "../hid/hid.h"
@@ -611,7 +612,10 @@ namespace video
         if (!SDL_Init(SDL_INIT_VIDEO))
             fatal("[video] SDL_Init: %s (use --headless to run without a window)", SDL_GetError());
         g_settings = loadSettings();
-        vk.window = SDL_CreateWindow("Backbreaker (recomp)", g_settings.width, g_settings.height,
+        // The revision is in the title so a screenshot of a window identifies the checkout (#75).
+        char openTitle[128];
+        snprintf(openTitle, sizeof(openTitle), "Backbreaker (recomp) %s", build_id::revision());
+        vk.window = SDL_CreateWindow(openTitle, g_settings.width, g_settings.height,
                                      SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
         if (!vk.window)
             fatal("[video] SDL_CreateWindow: %s (use --headless to run without a window)", SDL_GetError());
@@ -673,12 +677,15 @@ namespace video
             {
                 uint64_t f = g_frameNumber.load();
                 char title[160];
-                snprintf(title, sizeof(title), "Backbreaker (recomp) - game %.0f fps - display %.0f fps", (f - lastGuestFrame) / dt,
-                         presents / dt);
+                snprintf(title, sizeof(title), "Backbreaker (recomp) %s - game %.0f fps - display %.0f fps", build_id::revision(),
+                         (f - lastGuestFrame) / dt, presents / dt);
                 SDL_SetWindowTitle(vk.window, title);
                 if (now - lastLog >= std::chrono::seconds(5))
                 {
-                    info("[video] %s, window %ux%u", title + 23, vk.swapExtent.width, vk.swapExtent.height);
+                    // Spelled out instead of slicing the title text: the title now starts with the
+                    // revision, so a fixed offset into it meant nothing.
+                    info("[video] game %.0f fps, display %.0f fps, window %ux%u", (f - lastGuestFrame) / dt,
+                         presents / dt, vk.swapExtent.width, vk.swapExtent.height);
                     lastLog = now;
                 }
                 lastGuestFrame = f;

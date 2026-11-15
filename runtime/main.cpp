@@ -12,6 +12,7 @@
 #include "video/vk_context.h"
 #include "hid/hid.h"
 #include "video/presenter.h"
+#include "build_id.h"
 #include "log.h"
 #include "memory.h"
 
@@ -243,7 +244,14 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; i++)
     {
         std::string a = argv[i];
-        if (a == "--timeout" && i + 1 < argc)
+        if (a == "--version")
+        {
+            // On stdout, unlike the log: it is the answer to a question, not a run's output, and
+            // this is what a bug report should quote. It exits before any game file is touched.
+            std::printf("backbreaker %s\n", build_id::line());
+            return 0;
+        }
+        else if (a == "--timeout" && i + 1 < argc)
             timeout = std::atoi(argv[++i]);
         else if (a == "--headless")
             headless = true;
@@ -290,6 +298,7 @@ int main(int argc, char** argv)
     }
 
     installHandlers();
+    info("built from %s", build_id::line()); // first line of every log says what made it (#75)
     mem::init();
     loadImage(image);
     buildFunctionTable();

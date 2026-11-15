@@ -80,3 +80,23 @@ jobs:
 
       - name: Check tools scripts compile
         run: python3 -m py_compile tools/*.py
+
+      - name: Check the build identity (issue #75)
+        # The runtime itself cannot be linked here: it needs ppc/, the recompiled game code, which
+        # only exists after a game checkout. What can be checked without game files is the identity
+        # itself - the header the build stamps out of git, and the one translation unit that turns
+        # it into the strings the log, the window title, capture summaries and --version print.
+        run: |
+          cmake -DGIT_EXECUTABLE=git -DSRC="$PWD" -DOUT=build/build_version.h -P cmake/git_version.cmake
+          cat build/build_version.h
+          grep -qE '^#define BB_GIT_REV    "[0-9a-f]{7,}"$' build/build_version.h
+          grep -qE '^#define BB_GIT_BRANCH "[^"]+"$' build/build_version.h
+          grep -qE '^#define BB_BUILD_DATE "[0-9]{4}-[0-9]{2}-[0-9]{2}"$' build/build_version.h
+          # A CI checkout is detached, so the branch has to come from the ref Actions asked for;
+          # "HEAD" or "unknown" in the log would make a CI-built binary untraceable.
+          # (An "if", not "! grep": bash -e ignores a failing "!" pipeline, so that never fails.)
+          if grep -qE '^#define BB_GIT_BRANCH "(HEAD|unknown)"$' build/build_version.h; then exit 1; fi
+          clang++ -std=c++20 -Wall -Wextra -c runtime/build_id.cpp -I runtime -I build -o build/build_id.o
+          # Not a git checkout (source tarball) must still build, and say so rather than guess.
+          cmake -DGIT_EXECUTABLE=git -DSRC="$RUNNER_TEMP" -DOUT=build/build_version_nogit.h -P cmake/git_version.cmake
+          grep -qE '^#define BB_GIT_REV    "unknown"$' build/build_version_nogit.h
