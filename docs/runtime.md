@@ -286,6 +286,33 @@ logged with FFmpeg's error.
 One difference from Xenia: a pass that starts with no valid input still delivers the rest of the
 stream's last frame (Xenia's starved-input branch resets the write offset and drops it).
 
+## Achievements
+The game's 29 achievements (1000 G) come from its own SPA resource: an XDBF blob in the XEX,
+named after the title id 464F07DA, at 0x82E00000 in the loaded image (`runtime/kernel/spa.h`
+parses it; `tests/spa_test.cpp` checks the parser on hand-built blobs). Only English strings are
+in it.
+
+The game reports an unlock with the XDK's `XUserWriteAchievements` (recompiled as `sub_828F7A30`),
+which is `XMsgStartIORequest(0xFB, 0x000B0008, overlapped, {count, X_USER_ACHIEVEMENT*}, 8)`: a
+message to XAM's XGI app, not an import of its own. `runtime/kernel/xam_achievements.cpp` handles
+it: the first time an id is reported, the log says
+`[xam] achievement unlocked: First of Many (10 G)` and the unlock is written to
+`game/achievements/464F07DA.txt` (`<id> <unix time>  # name` per line; gitignored with the rest
+of `game/`). When a match starts the game reads the list back through
+`XamUserCreateAchievementEnumerator` (all 29, with texts), and earned ones carry the "achieved"
+flag and their unlock time, as in Xenia, so the game knows they are done.
+
+The game has no achievements screen of its own: on the console that was the system Guide's, and
+the game does not even import `XamShowAchievementsUI`. `--achievements` prints the list with what
+is unlocked (when, and the description; secret ones stay hidden until earned) and exits without
+starting the game. Run it from the repo root. An in-game pop-up and an overlay list are roadmap
+phase 11 parts 3-5 (presenter work).
+
+The other XGI messages the game sends: `XUserSetContext` (0x000B0006) and `XUserSetPropertyEx`
+(0x000B0007) for presence and stats (nothing to do offline), and `XUserReadStats` (0x000B0021),
+which is refused as "not signed in to LIVE" (0x80151802, as Xenia). Any other `XMsgStartIORequest`
+is reported as done, and every message is logged once.
+
 ## Controllers
 Controllers are read through SDL3 (users 0-3 = the first four controllers SDL lists; a
 DualSense's Cross/Circle/Square/Triangle are A/B/X/Y, Create/Options are Back/Start). The log

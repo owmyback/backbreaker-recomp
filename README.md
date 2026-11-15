@@ -89,6 +89,12 @@ not a multiple of a frame, and a frame the decoder rejects:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/xma_context_test.cpp -o build/xma_context_test && build/xma_context_test
 
+The achievement database parser (`runtime/kernel/spa.h`, issue #97) reads hand-built XDBF blobs:
+achievements, their strings per language with the fallback to the title's default, the image
+table, UTF-8 to UTF-16, and blobs that are cut short or claim more than they hold:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/spa_test.cpp -o build/spa_test && build/spa_test
+
 The PNG writer (`runtime/debug/png.cpp`, issue #76) is checked by writing images and reading them
 back: chunk framing and CRC-32, the IHDR fields, the IDAT zlib stream and its Adler-32, and every
 pixel. It links zlib to do the inflating (`zlib1g-dev` on Ubuntu, `zlib-devel` on Fedora), so it

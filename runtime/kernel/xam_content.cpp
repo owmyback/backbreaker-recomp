@@ -8,6 +8,7 @@
 #include "kernel.h"
 #include "objects.h"
 #include "import_support.h"
+#include "xam_enum.h"
 #include "../log.h"
 
 #include <algorithm>
@@ -148,12 +149,19 @@ namespace
     std::map<std::string, std::string> g_open;
     uint32_t g_nextDevice = 1;
 
-    struct ContentEnumerator : kernel::Object
+    struct ContentEnumerator : kernel::XamEnumerator
     {
         std::vector<std::array<uint8_t, kContentDataSize>> items;
         size_t next = 0;
         uint32_t perCall = 1;
-        ContentEnumerator() : kernel::Object(Type::Other) {}
+
+        uint32_t write(uint32_t buf, uint32_t length, uint32_t& count) override
+        {
+            count = uint32_t(std::min<size_t>({ items.size() - next, perCall, length / kContentDataSize }));
+            for (uint32_t i = 0; i < count; i++) memcpy(host(buf + i * kContentDataSize), items[next + i].data(), kContentDataSize);
+            next += count;
+            return count ? ERROR_SUCCESS : ERROR_NO_MORE_FILES;
+        }
     };
 
     std::string guestString(uint32_t p)
@@ -194,10 +202,10 @@ GUEST_IMPORT(XamContentCreateEnumerator)
 GUEST_IMPORT(XamEnumerate)
 {
     uint32_t handle = ctx.r3.u32, buf = ctx.r5.u32, length = ctx.r6.u32, pReturned = ctx.r7.u32, overlapped = ctx.r8.u32;
-    auto* e = dynamic_cast<ContentEnumerator*>(kernel::objectFromHandle(handle));
+    auto* e = dynamic_cast<kernel::XamEnumerator*>(kernel::objectFromHandle(handle));
     if (!e)
     {
-        warn("[xam] XamEnumerate on handle %08X: not a content enumerator", handle);
+        warn("[xam] XamEnumerate on handle %08X: not an enumerator", handle);
         ctx.r3.u64 = 6; // ERROR_INVALID_HANDLE
         return;
     }
@@ -205,12 +213,7 @@ GUEST_IMPORT(XamEnumerate)
     if (!buf)
         result = ERROR_INVALID_PARAMETER;
     else
-    {
-        count = uint32_t(std::min<size_t>({ e->items.size() - e->next, e->perCall, length / kContentDataSize }));
-        for (uint32_t i = 0; i < count; i++) memcpy(host(buf + i * kContentDataSize), e->items[e->next + i].data(), kContentDataSize);
-        e->next += count;
-        result = count ? ERROR_SUCCESS : ERROR_NO_MORE_FILES;
-    }
+        result = e->write(buf, length, count);
     if (overlapped)
         ctx.r3.u64 = kernel::completeOverlapped(overlapped, result, count);
     else

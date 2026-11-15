@@ -67,7 +67,7 @@ caches) until the heap ran out a minute into the match.
 | 8 | Saves and profile (XAM content) | **Saves done** (profile settings still empty) | `69ba008` |
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `100ec86` |
-| 11 | Achievements (unlocks, pop-ups, achievements screen) | Planned | - |
+| 11 | Achievements (unlocks, pop-ups, achievements screen) | **Started** (database, unlocks, store, `--achievements`: #97; pop-up and overlay not started) | - |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
 "Phase 2 (Vulkan renderer)". The numbering above replaces that.
@@ -630,7 +630,7 @@ Still open in this phase: optional integration with a launcher such as recomplau
 whatever a release build needs (install prefix, the game files next to the binary instead of
 `game:\` pointing into the checkout).
 
-## Phase 11 - Achievements (planned)
+## Phase 11 - Achievements (started)
 
 Goal: the game's Xbox 360 achievements work again - unlocks are recorded, an "Achievement
 unlocked" pop-up appears in game, and an achievements screen lists them all.
@@ -639,11 +639,15 @@ What the game provides (checked 2026-11-13):
 - Its achievement database is embedded in the executable as an XDBF (".spa") resource: 29
   achievements worth 1000 gamerscore, with name/description strings (per language) and images.
   It is read at startup from the user's own game files; nothing derived from it is committed.
-- Unlocks are reported to the system: the game imports `XMsgStartIORequest` (the XGI app's
-  write-achievements message, 0x000B0025 in Xenia's `xgi_app.cc`), and it lists existing unlocks
-  with `XamUserCreateAchievementEnumerator`. Both are unimplemented today, so unlocks are lost.
-- It imports `XamShowAchievementsUI` / `XamShowAchievementsUIEx` (the Guide's achievements
-  screen on the console).
+- Unlocks are reported to the system through `XMsgStartIORequest`: the XGI app (0xFB), message
+  0x000B0008 (`XUserWriteAchievements`, recompiled as `sub_828F7A30`; Xenia `xgi_app.cc`), and the
+  game reads existing unlocks with `XamUserCreateAchievementEnumerator` when a match starts.
+  (Corrected 2026-11-15: an earlier note here said 0x000B0025 and that the game imports
+  `XamShowAchievementsUI`; it imports neither, and it has no achievements screen of its own.)
+
+Status (#97): parts 1 and 2 are done. The SPA reader (`runtime/kernel/spa.h`, tested), the
+unlock path with a per-machine store (`game/achievements/`), the enumerator, and
+`--achievements` to see the list. See docs/runtime.md, "Achievements".
 
 Planned parts:
 1. Database reader: parse the XDBF resource (achievements, strings, images) from the loaded

@@ -241,7 +241,7 @@ int main(int argc, char** argv)
     std::string image = "game/extracted/default.pe";
     std::string xex = "game/extracted/default.xex";
     int timeout = 0;
-    bool headless = false, fullscreen = false, mute = false, audio = false;
+    bool headless = false, fullscreen = false, mute = false, audio = false, listAchievements = false;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
     {
@@ -263,6 +263,8 @@ int main(int argc, char** argv)
             audio = true; // play audio in a headless run too
         else if (a == "--audio-dump" && i + 1 < argc)
             audioDump = argv[++i]; // the stereo output as a 32-bit float WAV
+        else if (a == "--achievements")
+            listAchievements = true; // print the list with what is unlocked, then exit
         else if (a == "--fullscreen")
             fullscreen = true; // windowed runs only; see game/settings.ini (issue #9)
         else if (a == "--sample-threads" && i + 1 < argc)
@@ -314,6 +316,12 @@ int main(int argc, char** argv)
     kernel::patchImports();
     kernel::startTimeStampThread(); // keeps KeTimeStampBundle current while the game runs
     kernel::initFileSystem("game/disc", "game/cache", "game/saves");
+    kernel::initAchievements("game/achievements");
+    if (listAchievements)
+    {
+        kernel::printAchievements();
+        return 0;
+    }
 
     g_mainThread = kernel::createGuestThread(g_mainCtx, 0x100000);
     gpu::init();

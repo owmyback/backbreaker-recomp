@@ -17,6 +17,10 @@ namespace kernel
     // Map guest devices (game:, d:, cache:) to host directories. Saves (XAM content packages)
     // live under savesRoot.
     void initFileSystem(const std::string& discRoot, const std::string& cacheRoot, const std::string& savesRoot);
+    // Achievements (xam_achievements.cpp): reads the title's list from the loaded image and the
+    // unlocks earned so far from dir (game/achievements). After the image and XEX header load.
+    void initAchievements(const std::string& dir);
+    void printAchievements(); // --achievements
     const std::string& savesRoot();
     // Runtime mounts, used by XAM content packages: device path prefix such as
     // "\Device\Content\1" -> host directory, and symbolic links such as "save:" -> device path.
