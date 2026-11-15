@@ -77,6 +77,16 @@ So are the resolve clear values per render target format (`runtime/gpu/clear_val
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/clear_value_test.cpp -o build/clear_value_test && build/clear_value_test
 
+The PNG writer (`runtime/debug/png.cpp`, issue #76) is checked by writing images and reading them
+back: chunk framing and CRC-32, the IHDR fields, the IDAT zlib stream and its Adler-32, and every
+pixel. It links zlib to do the inflating (`zlib1g-dev` on Ubuntu, `zlib-devel` on Fedora), so it
+covers IDAT however it is encoded - stored blocks today, real deflate if the writer changes:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/png_test.cpp runtime/debug/png.cpp -lz -o build/png_test && build/png_test
+
+It writes its test images to a temporary directory and removes them again; `PNG_TEST_VERBOSE=1`
+prints one line per image (file size, IDAT bytes, which row filters it met).
+
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 `scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`
