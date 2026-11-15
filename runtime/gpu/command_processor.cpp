@@ -178,7 +178,7 @@ namespace gpu
                 r.next(); // poll interval
                 r.skip(count - 5);
                 auto start = std::chrono::steady_clock::now();
-                bool warned = false;
+                bool warned = false, first = true;
                 for (;;)
                 {
                     uint32_t value = (info & 0x10) ? loadGpu(addr) : readRegister(addr & 0x7FFF);
@@ -186,6 +186,11 @@ namespace gpu
                     {
                         render::addCommandWaitMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
                         break;
+                    }
+                    if (first)
+                    {
+                        first = false;
+                        render::submitBeforeWait(); // a real wait: the GPU can work on what is recorded meanwhile
                     }
                     std::this_thread::yield();
                     if (!warned && std::chrono::steady_clock::now() - start > std::chrono::seconds(1))
@@ -202,7 +207,7 @@ namespace gpu
                 uint32_t info = r.next(), pollAddr = r.next(), ref = r.next(), mask = r.next();
                 uint32_t writeAddr = r.next(), data = r.next();
                 r.skip(count - 6);
-                render::syncGuestMemory();
+                render::syncGuestMemory("cond_write");
                 uint32_t value = (info & 0x10) ? loadGpu(pollAddr) : readRegister(pollAddr & 0x7FFF);
                 if (compare(info, value & mask, ref))
                 {
@@ -225,14 +230,14 @@ namespace gpu
             {
                 uint32_t regIndex = r.next(), addr = r.next();
                 r.skip(count - 2);
-                render::syncGuestMemory();
+                render::syncGuestMemory("reg_to_mem");
                 storeGpu(addr, readRegister(regIndex & 0x7FFF));
                 return;
             }
             case PM4_MEM_WRITE:
             {
                 uint32_t addr = r.next();
-                render::syncGuestMemory();
+                render::syncGuestMemory("mem_write");
                 for (uint32_t i = 0; i < count - 1; i++)
                     storeGpu((addr & ~3u) + i * 4 | (addr & 3), r.next());
                 return;
@@ -241,7 +246,7 @@ namespace gpu
             {
                 uint32_t initiator = r.next(), addr = r.next(), value = r.next();
                 r.skip(count - 3);
-                render::syncGuestMemory();
+                render::syncGuestMemory("event_write_shd");
                 writeRegister(reg::VGT_EVENT_INITIATOR, initiator & 0x3F);
                 storeGpu(addr, (initiator >> 31) ? uint32_t(g_counter) : value);
                 return;
@@ -250,7 +255,7 @@ namespace gpu
             {
                 uint32_t initiator = r.next(), addr = r.next();
                 r.skip(count - 2);
-                render::syncGuestMemory();
+                render::syncGuestMemory("event_write_ext");
                 writeRegister(reg::VGT_EVENT_INITIATOR, initiator & 0x3F);
                 // Screen extents (min/max x, y, z) as u16s: report "everything"
                 uint16_t ext[6] = { 0, 0x2000 >> 3, 0, 0x2000 >> 3, 0, 1 };
@@ -269,7 +274,7 @@ namespace gpu
             {
                 uint32_t cpuMask = r.next();
                 r.skip(count - 1);
-                render::syncGuestMemory();
+                render::syncGuestMemory("interrupt");
                 for (uint32_t cpu = 0; cpu < 6; cpu++)
                     if (cpuMask & (1u << cpu))
                         dispatchInterrupt(1, cpu);
@@ -414,7 +419,7 @@ namespace gpu
                     uint32_t count = ((header >> 16) & 0x3FFF) + 1;
                     uint32_t index = header & 0x7FFF;
                     bool oneReg = header & 0x8000;
-                    if (touchesScratch(index, oneReg ? 1 : count)) render::syncGuestMemory(); // D3D fences
+                    if (touchesScratch(index, oneReg ? 1 : count)) render::syncGuestMemory("scratch_reg"); // D3D fences
                     for (uint32_t i = 0; i < count; i++)
                         writeRegister(oneReg ? index : index + i, r.next());
                     break;
@@ -422,7 +427,7 @@ namespace gpu
                 case 1: // two registers
                 {
                     uint32_t r0 = header & 0x7FF, r1 = (header >> 11) & 0x7FF;
-                    if (touchesScratch(r0, 1) || touchesScratch(r1, 1)) render::syncGuestMemory();
+                    if (touchesScratch(r0, 1) || touchesScratch(r1, 1)) render::syncGuestMemory("scratch_reg");
                     writeRegister(r0, r.next());
                     writeRegister(r1, r.next());
                     break;
@@ -443,6 +448,8 @@ namespace gpu
             for (;;)
             {
                 uint32_t wptr;
+                if ((__builtin_bswap32(*regPtr(reg::CP_RB_WPTR)) % g_ringDwords) == g_rptr)
+                    render::submitBeforeWait(); // no new commands yet: the GPU can work on what is recorded meanwhile
                 {
                     std::unique_lock lock(g_wakeLock);
                     g_wake.wait_for(lock, std::chrono::milliseconds(1), [&] {
@@ -454,7 +461,7 @@ namespace gpu
                     continue;
                 Reader ring{ g_ringBase, g_ringDwords, g_rptr, true };
                 execute(ring, wptr);
-                render::syncGuestMemory(); // a CPU waiting for the GPU to go idle polls the read pointer
+                render::syncGuestMemory("rptr"); // a CPU waiting for the GPU to go idle polls the read pointer
                 g_rptr = wptr;
                 *regPtr(reg::CP_RB_RPTR) = __builtin_bswap32(g_rptr);
                 if (g_rptrWriteback)

@@ -30,6 +30,7 @@ namespace gpu::render
     // Resolves are written to guest memory by the GPU, when the recorded commands run. Before the
     // command processor lets the CPU see its progress (a fence or other memory write, an
     // interrupt, the read pointer), this waits until the writebacks recorded so far have landed.
-    void syncGuestMemory();
-    void addCommandWaitMs(double ms);       // BB_PERF: time the CP spent polling in WAIT_REG_MEM
+    void syncGuestMemory(const char* why = "renderer"); // `why`: for the BB_PERF line
+    void addCommandWaitMs(double ms);
+    void submitBeforeWait();                // the CP is about to wait for the game: let the GPU start on what is recorded       // BB_PERF: time the CP spent polling in WAIT_REG_MEM
 }

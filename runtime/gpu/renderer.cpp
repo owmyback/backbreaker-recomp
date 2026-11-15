@@ -127,8 +127,12 @@ namespace gpu::render
         CompileStats g_compileStats;
         // BB_PERF=1: one line per second of where the renderer thread's time went (issue #73)
         struct PerfStats { uint64_t draws = 0, hashBytes = 0, uploads = 0, uploadBytes = 0, resolves = 0, writebacks = 0, flushes = 0;
-                           uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0;
-                           double hashMs = 0, waitMs = 0, cpWaitMs = 0; };
+                           uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0, chunks = 0,
+                                    idleSubmits = 0;
+                           double hashMs = 0, waitMs = 0, cpWaitMs = 0;
+                           std::map<std::string, uint64_t> syncsBy;          // syncs that had pending writes, by trigger
+                           struct Up { uint32_t format = 0, width = 0, height = 0; uint64_t count = 0, bytes = 0, fresh = 0; };
+                           std::map<uint32_t, Up> uploadsBy; };              // texture uploads by guest base address
         PerfStats g_perf;
         double nowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -425,8 +429,14 @@ void main() {
         struct Frame
         {
             VkCommandPool pool = VK_NULL_HANDLE;
-            VkCommandBuffer cmd = VK_NULL_HANDLE;
-            VkFence fence = VK_NULL_HANDLE;
+            VkCommandBuffer cmd = VK_NULL_HANDLE;     // the one being recorded (or recorded next)
+            VkFence fence = VK_NULL_HANDLE;           // the frame's last submit, at the swap (or a flushAndWait)
+            // Early submits (#73): the frame's command buffers so far, all from `pool`, and the fences of
+            // the chunks submitted before the swap without waiting for them
+            std::vector<VkCommandBuffer> cmdBuffers;
+            uint32_t cmdBuffersUsed = 1;
+            std::vector<VkFence> chunkFences;
+            uint32_t chunksInFlight = 0;
             bool recording = false, submitted = false;
             VkBuffer upload = VK_NULL_HANDLE;
             VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
@@ -451,6 +461,75 @@ void main() {
                 f.recording = true;
             }
             return f.cmd;
+        }
+
+        void endPass();
+        uint32_t g_drawsSinceSubmit = 0;
+        constexpr uint32_t kChunkDraws = 128; // draws recorded before an early submit is worth its cost
+
+        // Hand what is recorded to the GPU now, without waiting for it (#73): the GPU runs while the CPU
+        // records the rest of the frame, and a sync later waits only for what came after. Queue
+        // submission order keeps every barrier recorded so far in force for the next command buffer.
+        void submitChunk()
+        {
+            endPass();
+            Frame& f = frame();
+            if (!f.recording) return;
+            VK_CHECK(vkEndCommandBuffer(f.cmd));
+            f.recording = false;
+            if (f.chunksInFlight == f.chunkFences.size())
+            {
+                VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+                VkFence fence;
+                VK_CHECK(vkCreateFence(D, &fci, nullptr, &fence));
+                f.chunkFences.push_back(fence);
+            }
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &f.cmd;
+            {
+                std::lock_guard guard(C->queueLock);
+                VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.chunkFences[f.chunksInFlight]));
+            }
+            f.chunksInFlight++;
+            if (f.cmdBuffersUsed == f.cmdBuffers.size())
+            {
+                VkCommandBufferAllocateInfo cai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+                cai.commandPool = f.pool;
+                cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                cai.commandBufferCount = 1;
+                VkCommandBuffer b;
+                VK_CHECK(vkAllocateCommandBuffers(D, &cai, &b));
+                f.cmdBuffers.push_back(b);
+            }
+            f.cmd = f.cmdBuffers[f.cmdBuffersUsed++];
+            g_drawsSinceSubmit = 0;
+            g_perf.chunks++;
+        }
+
+        void maybeSubmitChunk()
+        {
+            if (g_drawsSinceSubmit >= kChunkDraws) submitChunk();
+        }
+
+        // Wait for a frame's early submits and make their fences reusable
+        void waitChunks(Frame& f)
+        {
+            if (!f.chunksInFlight) return;
+            double w0 = nowMs();
+            VK_CHECK(vkWaitForFences(D, f.chunksInFlight, f.chunkFences.data(), VK_TRUE, UINT64_MAX));
+            g_perf.waitMs += nowMs() - w0;
+            VK_CHECK(vkResetFences(D, f.chunksInFlight, f.chunkFences.data()));
+            f.chunksInFlight = 0;
+        }
+
+        // Everything the frame recorded has executed: start it over at its first command buffer
+        void restartFrame(Frame& f)
+        {
+            VK_CHECK(vkResetCommandPool(D, f.pool, 0));
+            f.cmdBuffersUsed = 1;
+            f.cmd = f.cmdBuffers[0];
+            f.used = 0;
         }
 
         // Offset in this frame's upload buffer, or UINT64_MAX (and g_outOfSpace) when it is full
@@ -598,6 +677,7 @@ void main() {
                 VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.fence));
                 f.submitted = true;
             }
+            g_drawsSinceSubmit = 0;
             g_frameIndex = (g_frameIndex + 1) % kFramesInFlight;
             Frame& next = frame();
             if (next.submitted)
@@ -607,9 +687,9 @@ void main() {
                 g_perf.waitMs += nowMs() - w0;
                 next.submitted = false;
             }
+            waitChunks(next);
             VK_CHECK(vkResetFences(D, 1, &next.fence));
-            VK_CHECK(vkResetCommandPool(D, next.pool, 0));
-            next.used = 0;
+            restartFrame(next);
         }
 
         struct TargetKey
@@ -1259,6 +1339,7 @@ void main() {
             uint64_t uploadedFrame = 0;
             uint64_t hash = 0; // of the guest bytes last uploaded (0: never uploaded)
             std::map<uint32_t, VkImageView> views; // by fetch constant swizzle
+            bool everUploaded = false;             // BB_PERF: first upload vs re-upload
         };
         std::map<TextureKey, Texture> g_textures;
         uint64_t g_texturesUploaded = 0, g_texturesKept = 0; // for the stats line
@@ -1815,7 +1896,14 @@ void main()
                 t.hash = hash;
                 g_texturesUploaded++;
                 g_perf.uploads++;
-                g_perf.uploadBytes += at;
+                g_perf.uploadBytes += at - off; // `at` ran from the allocation's offset to its end
+                {
+                    PerfStats::Up& u = g_perf.uploadsBy[base];
+                    u.format = format; u.width = width; u.height = height;
+                    u.count++; u.bytes += at - off;
+                    if (!t.everUploaded) u.fresh++; // first upload of this key, not a re-upload of changed data
+                }
+                t.everUploaded = true;
             }
             VkImageView& view = t.views[swizzle];
             if (!view) view = createView(t.img.image, cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D, tf.vk, layers, swizzle, false);
@@ -2100,24 +2188,28 @@ void main()
         {
             endPass();
             Frame& f = frame();
-            if (!f.recording) return;
-            VK_CHECK(vkEndCommandBuffer(f.cmd));
-            f.recording = false;
-            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-            si.commandBufferCount = 1;
-            si.pCommandBuffers = &f.cmd;
+            if (!f.recording && !f.chunksInFlight) return;
+            if (f.recording)
             {
-                std::lock_guard guard(C->queueLock);
-                VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.fence));
+                VK_CHECK(vkEndCommandBuffer(f.cmd));
+                f.recording = false;
+                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+                si.commandBufferCount = 1;
+                si.pCommandBuffers = &f.cmd;
+                {
+                    std::lock_guard guard(C->queueLock);
+                    VK_CHECK(vkQueueSubmit(C->queue, 1, &si, f.fence));
+                }
+                double w0 = nowMs();
+                VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
+                g_perf.waitMs += nowMs() - w0;
+                VK_CHECK(vkResetFences(D, 1, &f.fence));
             }
-            double w0 = nowMs();
-            VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
-            g_perf.waitMs += nowMs() - w0;
+            waitChunks(f); // the early submits before it
             g_perf.flushes++;
-            VK_CHECK(vkResetFences(D, 1, &f.fence));
             f.submitted = false;
-            VK_CHECK(vkResetCommandPool(D, f.pool, 0));
-            f.used = 0; // everything recorded so far has executed
+            g_drawsSinceSubmit = 0;
+            restartFrame(f); // everything recorded so far has executed
         }
 
         bool ready()
@@ -2178,6 +2270,7 @@ void main()
                 cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
                 cai.commandBufferCount = 1;
                 VK_CHECK(vkAllocateCommandBuffers(D, &cai, &f.cmd));
+                f.cmdBuffers = { f.cmd };
                 VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
                 VK_CHECK(vkCreateFence(D, &fci, nullptr, &f.fence));
                 VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
@@ -2663,7 +2756,7 @@ void main()
             }
             if (g_exportMap)
             {
-                if (pendingOverlap(img.guestBase, uint32_t(end))) syncGuestMemory();
+                if (pendingOverlap(img.guestBase, uint32_t(end))) syncGuestMemory("resolve_over_pending");
                 std::memcpy(g_exportMap + img.guestBase, mem::physical(img.guestBase), end - img.guestBase);
             }
             endPass();
@@ -3030,7 +3123,7 @@ void main()
             // (run, but not copied out yet): sync it first, before this draw records anything
             if (g_exportMap)
                 for (auto [start, bytes] : exportRanges)
-                    if (pendingOverlap(start, start + bytes)) syncGuestMemory();
+                    if (pendingOverlap(start, start + bytes)) syncGuestMemory("export_over_pending");
 
             // Snapshot guest data into the upload buffer: constants, vertex data, indices
             Frame& f = frame();
@@ -3236,17 +3329,20 @@ void main()
                         g_pendingWrites.push_back({ start, start + bytes });
                         g_pendingExports.push_back({ start, start + bytes });
                     }
+                g_drawsSinceSubmit++;
+                maybeSubmitChunk(); // the pass is ended here anyway
             }
             for (int i = 0; i < 4; i++) markWritten(color[i], edramRect);
             if (depth && (s.depthWrite || s.stencil)) markWritten(depth, edramRect);
             g_drawsInFrame++;
+            if (!memExport) g_drawsSinceSubmit++;
             return true;
         }
 
         void draw(uint32_t initiator, uint32_t indexBase, uint32_t indexSizeWord)
         {
             DrawState s = captureDrawState(initiator);
-            if (s.edramMode == 6) { resolve(s); return; }
+            if (s.edramMode == 6) { resolve(s); maybeSubmitChunk(); return; }
             if (s.edramMode != 4 && s.edramMode != 5) return;
             if (!s.indexCount) return;
             if (drawOnce(s, indexBase, indexSizeWord)) return;
@@ -3254,7 +3350,7 @@ void main()
             {
                 // Textures or indices from a memory export still pending on the GPU: sync, record again
                 g_perf.syncRetries++;
-                syncGuestMemory();
+                syncGuestMemory("retry");
                 if (drawOnce(s, indexBase, indexSizeWord)) return;
                 if (g_syncRetry) { warnOnce("a draw still reads pending memory export output after a sync: skipped"); return; }
             }
@@ -3338,14 +3434,25 @@ void main()
 
     void addCommandWaitMs(double ms) { g_perf.cpWaitMs += ms; }
 
-    void syncGuestMemory()
+    void submitBeforeWait()
+    {
+        if (g_disabled || g_failed || !D || !frame().recording || !g_drawsSinceSubmit) return;
+        g_perf.idleSubmits++;
+        submitChunk();
+    }
+
+    void syncGuestMemory(const char* why)
     {
         if (g_pendingWrites.empty()) return;
+        g_perf.syncsBy[why]++;
         g_perf.flushSync++;
         flushAndWait(); // the frame being recorded
         double w0 = nowMs();
-        for (Frame& f : g_frames) // and frames submitted at swaps, still running
+        for (Frame& f : g_frames) // and frames submitted at swaps, still running (with their early submits)
+        {
             if (f.submitted) VK_CHECK(vkWaitForFences(D, 1, &f.fence, VK_TRUE, UINT64_MAX));
+            waitChunks(f);
+        }
         g_perf.waitMs += nowMs() - w0;
         if (g_exportMap) // staging copy of guest memory: copy the written ranges out
             for (auto [start, end] : g_pendingWrites) std::memcpy(mem::physical(start), g_exportMap + start, end - start);
@@ -3417,12 +3524,31 @@ void main()
                     PerfStats& p = g_perf;
                     info("[perf] %.1fs: %llu swaps, %llu draws, renderer thread CPU %.0f ms (of it polling WAIT_REG_MEM %.0f ms), GPU waits %.0f ms (%llu flushes), "
                          "textures hashed %.1f MB in %.0f ms, %llu uploads (%.1f MB), %llu resolves, %llu writeBack calls (%llu queued); "
-                         "%llu memexport draws (%llu waited for), %llu syncs with pending writes, %llu GPU vertex copies, %llu sync retries",
+                         "%llu memexport draws (%llu waited for), %llu syncs with pending writes, %llu GPU vertex copies, %llu sync retries, "
+                         "%llu early submits (%llu while the CP waited)",
                          (t - perfLast) / 1000.0, (unsigned long long)swaps, (unsigned long long)p.draws, cpu - cpuLast, p.cpWaitMs, p.waitMs,
                          (unsigned long long)p.flushes, p.hashBytes / 1048576.0, p.hashMs, (unsigned long long)p.uploads,
                          p.uploadBytes / 1048576.0, (unsigned long long)p.resolves, (unsigned long long)p.writebacks,
                          (unsigned long long)p.pendingAdded, (unsigned long long)p.exportDraws, (unsigned long long)p.flushExport, (unsigned long long)p.flushSync,
-                         (unsigned long long)p.gpuVertexCopies, (unsigned long long)p.syncRetries);
+                         (unsigned long long)p.gpuVertexCopies, (unsigned long long)p.syncRetries, (unsigned long long)p.chunks,
+                         (unsigned long long)p.idleSubmits);
+                    if (!p.syncsBy.empty() || !p.uploadsBy.empty())
+                    {
+                        std::string why, ups;
+                        for (auto& [k, n] : p.syncsBy) why += (why.empty() ? "" : ", ") + k + " " + std::to_string(n);
+                        std::vector<std::pair<uint32_t, PerfStats::Up>> top(p.uploadsBy.begin(), p.uploadsBy.end());
+                        std::sort(top.begin(), top.end(), [](auto& a, auto& b) { return a.second.bytes > b.second.bytes; });
+                        for (size_t i = 0; i < top.size() && i < 6; i++)
+                        {
+                            char b[160];
+                            snprintf(b, sizeof(b), "%s%08X fmt %u %ux%u x%llu (%.1f MB%s)", i ? ", " : "", top[i].first, top[i].second.format,
+                                     top[i].second.width, top[i].second.height, (unsigned long long)top[i].second.count,
+                                     top[i].second.bytes / 1048576.0, top[i].second.fresh ? ", first" : "");
+                            ups += b;
+                        }
+                        info("[perf]   syncs by trigger: %s | uploads (%zu textures): %s", why.empty() ? "-" : why.c_str(), p.uploadsBy.size(),
+                             ups.empty() ? "-" : ups.c_str());
+                    }
                     p = {};
                     swaps = 0;
                     perfLast = t;
