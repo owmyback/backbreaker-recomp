@@ -124,3 +124,9 @@ jobs:
           grep -qF 'frames total 286 vs 194: 67.8%' compare.txt
           python3 tools/fps_report.py tests/data/fps_report_sample.log --compare tests/data/fps_report_sample_b.log --from 3 --to 9 > compare_narrow.txt
           grep -qF 'frames total 162 vs 109: 67.3%' compare_narrow.txt
+
+      # The capture comparison rules (tools/capture_diff.py, issue #79) against the small capture
+      # pairs in tests/data: which differences count, which are noise, and what the exit status
+      # means. No game files or built runtime needed.
+      - name: Test the tools scripts
+        run: python3 -m unittest discover -s tests -p 'test_*.py'

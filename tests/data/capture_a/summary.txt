@@ -1,0 +1,31 @@
+Backbreaker GPU frame capture - frame 1200
+front buffer 00840000 640x360
+
+draws: 5 (of which EDRAM copies/resolves: 1)
+
+primitive types:
+  point_list               1
+  quad_list                2
+  rectangle_list           1
+  triangle_strip           1
+
+shaders used: 1 vertex, 3 pixel (microcode in shaders/, big-endian dwords)
+
+render target setups seen at draws:
+  mode=color_depth pitch=320 msaa=1x rt0=8_8_8_8@tile160 depth=24_8@tile160
+  mode=copy pitch=320 msaa=1x rt0=8_8_8_8@tile160 depth=24_8@tile160
+
+textures seen at draws (format, dimension, size, tiling):
+  8_8_8_8 2D 256x256 tiled
+
+pipeline states (fixed-function state per draw, see runtime/gpu/state.cpp): 4 unique
+    1  PointList|ColorDepth|msaa1|rt0:8_8_8_8:rgba:on|z:D24S8:on:1|cull:00:ccw|alpha:off
+    2  QuadList|ColorDepth|msaa1|rt0:8_8_8_8:rgba:on|z:D24S8:on:1|cull:00:ccw|alpha:off
+    1  TriangleStrip|ColorDepth|msaa1|rt0:8_8_8_8:rgba:on|z:D24S8:on:1|cull:00:ccw|alpha:off
+    1  Copy|rt0:@tile|depth:@tile|cull:none|alpha:off
+
+PM4 type-3 packets:
+  0x17    1
+  0x22    3
+  0x27    5
+  0x43    2

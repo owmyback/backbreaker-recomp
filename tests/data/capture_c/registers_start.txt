@@ -1,0 +1,7 @@
+0081 ?                                        80010000
+01DC SCRATCH_UMSK                             00020037
+057C CALLBACK_ADDRESS                         0BADF00D
+057D CALLBACK_CONTEXT                         00000264
+2000 RB_SURFACE_INFO                          00000401
+2A09 UNKNOWN_2A09                             00000108
+(ALU constants 0x4000-0x47FF: 12 non-zero, not listed)

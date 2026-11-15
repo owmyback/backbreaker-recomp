@@ -273,6 +273,40 @@ frame number:
 
 `--dump-shaders` writes every unique shader the game loads during a run to `captures/shaders/`.
 
+To compare two of those folders: `python3 -I tools/capture_diff.py captures/frame_1006
+captures/frame_1026` (issue #79). It prints only the parts that moved - the counts, the sets of
+render targets, textures, pipeline states and shaders (including whether the microcode behind a
+shader name matches the bytes the name hashes to), the EDRAM copy list, the frame-start registers,
+and the draw sequence - and stays silent about the parts that did not. What moved is what changed
+in what the renderer asked for: a pipeline state only `summary.txt` records, a texture the frame
+stopped sampling, one shader's microcode, one uniform, one draw's blending.
+
+Two frames of the same scene differ in things that say nothing about what was drawn, so by default
+it ignores the draw numbers (`draw 133` in `draws.txt`), the raw register deltas, and the base
+addresses in the index-buffer pointer and in the texture lines; `--raw` puts those back when where
+something was allocated is the thing being chased. Two of the things printed among those register
+deltas are not registers, and stay in either way: the shader constants (`vs c4 = (...)` is a
+uniform, and it says where an object stands and what colour it is) and the textures, which are
+compared as what they are - format, dimension, size, tiling - rather than the address they were
+uploaded to. Two things there are left with the deltas: the `(N ALU constant dwords changed)`
+marker, which counts what moved since the draw *before* this one and so changes when that draw
+changes; and the vertex fetch constants, whose `data=` hash is taken, by design, over the first
+64 KB at the address rather than over the vertices the draw reads, so it moves between two frames
+of a still picture. `--raw` prints both as written. Draws line up on what
+they are rather than on exact text, so a draw whose blending changed is printed as that one field,
+and one extra draw is printed as one insertion instead of the rest of the frame having changed.
+`--brief` names what moved without printing the draw blocks, `--max N` caps the items per section,
+`--fields N` the changed fields of one draw, `--all` shows the sections that match too.
+
+Exit status is 0 if the frames agree, 1 if they differ, 2 if a folder is not a capture, so a bisect
+can be driven by it: capture the same frame on two builds and compare the folders (the `built from`
+line each capture's summary starts with is shown in the header and never counted as a difference). A capture that
+contradicts its own files (a `draws.txt` short of the draw count in `summary.txt`, a shader list
+that does not match `shaders/`) is reported as a problem instead of being trusted, and a section of
+`summary.txt` this script does not read is reported rather than skipped, so a capture from a newer
+runtime cannot hide a difference. Those rules are checked by `tests/test_capture_diff.py` against
+the small capture pairs in `tests/data/`, which CI runs.
+
 ## Renderer debug aids
 Environment variables for chasing a wrong picture (`runtime/gpu/debug_aids.cpp`, issue #40). Each
 is off unless set, they're read once, and their log lines start with `[debug]`. Shader hashes are

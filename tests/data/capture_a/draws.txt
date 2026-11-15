@@ -1,0 +1,63 @@
+load vertex shader 1111111111111111 (4 dwords at 0)
+load pixel shader 2222222222222222 (3 dwords at 0)
+load pixel shader 5555555555555555 (3 dwords at 0)
+
+draw 1  DRAW_INDX_2  prim=point_list count=1 source=auto_index
+  vs=1111111111111111 ps=5555555555555555
+  draw: PointList 1 indices (AutoIndex) offset=0
+  edram: ColorDepth pitch=320 msaa=1x
+  rt0: 8_8_8_8 @tile 160 write=rgba blend Add(One, Zero) a Add(One, Zero)
+  depth: D24S8 @tile 160 test=le write=1
+  raster: cull=none front=ccw clip_disabled
+  raw register changes since the previous draw:
+  2104 RB_COLOR_MASK                        0000000F (was 00000000)
+
+draw 2  DRAW_INDX  prim=quad_list count=4 source=dma indices=u16 base=052D7000 size_word=40000100
+  vs=1111111111111111 ps=2222222222222222
+  draw: QuadList 4 indices (Dma) offset=0
+  edram: ColorDepth pitch=320 msaa=1x
+  rt0: 8_8_8_8 @tile 160 write=rgba blend Add(One, Zero) a Add(One, Zero)
+  depth: D24S8 @tile 160 test=le write=1
+  viewport: scale=(640.0, -360.0, 1.000) offset=(320.0, 180.0, 0.000) window_offset=(0, 0)
+  scissor: window (0,0)-(640,360) screen (0,0)-(8192,8192)
+  shaders: vs 4 regs export_mode=0 exports=1, ps 3 regs export_mode=2, consts vs 0+255 ps 256+255
+  raw register changes since the previous draw:
+  2081 PA_SC_WINDOW_SCISSOR_TL              00000000 (was 000001C0)
+  2082 PA_SC_WINDOW_SCISSOR_BR              016B0280 (was 016B0160)
+  (2 ALU constant dwords changed)
+    vs c4 = (640, -360, 1, 0)
+    tex[ 0] 8_8_8_8 2D 256x256 tiled pitch=256 base=0A7FC000 mips=00000000  raw 00001080 8CC0C000 80000080 00000000 00000000
+    vtx[ 0] base=00105B00 dwords=6 endian=2 data=aaf1eddd5017e1bc
+
+draw 3  DRAW_INDX  prim=quad_list count=4 source=auto_index
+  vs=1111111111111111 ps=2222222222222222
+  draw: QuadList 4 indices (AutoIndex) offset=0
+  edram: ColorDepth pitch=320 msaa=1x
+  rt0: 8_8_8_8 @tile 160 write=rgba blend Add(One, Zero) a Add(One, Zero)
+  depth: D24S8 @tile 160 test=le write=1
+  scissor: window (0,0)-(640,360) screen (0,0)-(8192,8192)
+  raw register changes since the previous draw:
+  2100 VGT_MAX_VTX_INDX                     00000003 (was 00000000)
+
+draw 4  DRAW_INDX  prim=triangle_strip count=4 source=auto_index
+  vs=1111111111111111 ps=2222222222222222
+  draw: TriangleStrip 4 indices (AutoIndex) offset=0
+  edram: ColorDepth pitch=320 msaa=1x
+  rt0: 8_8_8_8 @tile 160 write=rgba blend Add(One, Zero) a Add(One, Zero)
+  depth: D24S8 @tile 160 test=le write=1
+  scissor: window (0,0)-(640,360) screen (0,0)-(8192,8192)
+  raw register changes since the previous draw:
+  2001 RB_COLOR_INFO                        000000A0 (was 00000090)
+  2002 RB_DEPTH_INFO                        200000A0 (was 20000090)
+
+load pixel shader 4444444444444444 (2 dwords at 0)
+
+draw 5  DRAW_INDX_2  prim=rectangle_list count=3 source=auto_index
+  vs=1111111111111111 ps=4444444444444444
+  draw: RectangleList 3 indices (AutoIndex) offset=0
+  edram: Copy pitch=320 msaa=1x
+  rt0: 8_8_8_8 @tile 160 write=rgba
+  depth: D24S8 @tile 160
+  raw register changes since the previous draw:
+  0A31 COHER_STATUS_HOST                    80000140 (was 000000A0)
+  0A30 COHER_BASE_HOST                      00011F00 (was 0000AF00)
