@@ -158,6 +158,10 @@ the file if it isn't there yet; the window writes the rest when it closes):
 
 `--resolution-scale` still overrides it for one run, and headless runs ignore it.
 
+Matches render at 1280x720 instead of the game's 1152x640 stretched to 1280x720, which keeps the
+ball and the grass sharp. `native_720p=0` in `game/settings.ini` (or `--native-720p 0` for one run)
+gives the game's own size back.
+
 The game runs at 60 frames a second, twice the console's 30. For the console's rate, add `fps=30`
 to `game/settings.ini` the same way, or pass `--fps 30` for one run (`--fps 60` likewise).
 Headless runs use 30 unless given `--fps`. What 60 changes in the game, and how:
@@ -180,7 +184,7 @@ In the window:
 - **F12** - save the picture you see as `screenshots/<date-time>.png`
 - **F10** - GPU frame capture (draws, shaders, render targets) of the next frame to `captures/frame_N/`
 - **F11** or **Alt+Enter** - borderless fullscreen; window size, position and fullscreen state are
-  remembered in `game/settings.ini`, next to the `resolution_scale`, `fps` and `anisotropy` above
+  remembered in `game/settings.ini`, next to the `resolution_scale`, `native_720p`, `fps` and `anisotropy` above
 
 Everything else - headless runs, screenshots by frame number or by second, scripted input,
 controllers, the renderer's debug aids - is in [`docs/runtime.md`](docs/runtime.md).

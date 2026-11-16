@@ -27,6 +27,9 @@ namespace settings
         // blurs toward the horizon, as on the console; 16 costs nothing measurable (#82). Windowed
         // runs only; --anisotropy overrides it for one run and leaves the file alone.
         uint32_t anisotropy = 16;
+        // Render matches at 1280x720 instead of the game's 1152x640 stretched to 1280x720 (what that
+        // changes: docs/runtime.md). Windowed runs only; --native-720p overrides it for one run.
+        bool native720p = true;
     };
 
     // No file or no key: the defaults above. A value out of range gets a warning and the nearest

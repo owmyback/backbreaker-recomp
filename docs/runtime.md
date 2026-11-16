@@ -75,6 +75,11 @@ their guest address, and the presenter shows the image resolved to the front buf
   and resolved as 1_5_5_5, each row 256 KB further on. Counted in 4-byte pixels that was 64 rows
   instead of 128, so every row of fans landed on the legs of the row before and the stands showed
   torsos beside their legs and fans sunk to the shoulders.
+- A resolve copies the rectangle its vertices span (Xenia's GetResolveInfo), within the scissor -
+  which is often a power of two or whole EDRAM tile rows bigger - and within the destination the
+  game declared (`RB_COPY_DEST_PITCH`), so a resolve image is exactly as big as the textures that
+  read it. Sized by the scissor, a 320x180 destination came out 320x184 (four rows of whatever EDRAM
+  held), and the 320x180 texture that sampled all of it spread those rows into the bloom.
 - Resolves are also written to guest memory (#45), tiled and in the destination's format, by a
   compute shader. The CPU reads some of them: the game's "Stadium texture generator" thread
   renders the field lightmap and compresses the resolved picture to DXT1 itself, so without this
@@ -110,6 +115,16 @@ their guest address, and the presenter shows the image resolved to the front buf
   7,268 frames, scale 2 with `--anisotropy 16` 7,251 and 7,261, scale 3 with `--anisotropy 16`
   7,248 and 7,241 - all at the 30 fps cap. The renderer's cost is per draw on the CPU, not per
   pixel, so resolution only starts to matter once a GPU is the limit.
+- Matches render at 1280x720 (`native_720p=1` in `game/settings.ini`, the default; `--native-720p
+  0|1` for one run; headless runs keep the game's size unless given the flag). With a 1280x720
+  display the game draws the match at 1152x640 and stretches it to 1280x720, as on the console
+  (`sub_82381928` picks 1152x640 for displays up to 1280 wide, 1920x1080 above), which softens the
+  whole 3D picture a little: the ball and the grass at kickoff most visibly. The runtime asks
+  `sub_827A09B0` for a 1280x720 view instead (and 1280x360 for the two-player split), and
+  everything after follows the view's size - the game re-tiles the scene for EDRAM (four 320-wide
+  tiles instead of two 576-wide ones) and sizes its post-processing buffers from it (640x360,
+  320x180) - so nothing is stretched, and at resolution scale 2 the picture is exactly 2560x1440.
+  About 25% more pixels to draw; the rain route still holds 60 fps at scale 2 on the RX 9070 XT.
 - Anisotropic filtering: every texture the game minifies with linear filtering and mips gets at
   least N:1 anisotropic filtering. The game asks for it on only a few textures, so without it the
   field blurs toward the horizon, worst from the low kickoff camera. Windowed runs use
@@ -117,8 +132,8 @@ their guest address, and the presenter shows the image resolved to the front buf
   overrides it for one run, and headless runs stay at 1 (the game's own) unless they pass the flag.
   The log says which (`[gpu] anisotropic filtering 16x (game/settings.ini)`). UI textures (base
   level only) are left alone. Needs the GPU's `samplerAnisotropy`, and the log says if it's missing.
-  Two other things soften the 3D picture and are not filtering: the game renders the match at
-  1152x640 and stretches it to 1280x720 (draw `post_process` 12e50a79, at every resolution scale),
+  Two other things soften the 3D picture and are not filtering: unless `native_720p` (above) is on, the game
+  renders the match at 1152x640 and stretches it to 1280x720 (draw `post_process` 12e50a79),
   and a window shorter than the scaled frame gets it shrunk to fit (2560x1440 into a maximized
   2560x1362 window is 0.95x); fullscreen (F11) shows the frame 1:1. Depth of field and motion blur
   (`bb_post_process`) are off for still pictures such as the kick aim: checked with `BB_DEBUG_EXPR`.

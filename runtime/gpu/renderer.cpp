@@ -2900,21 +2900,26 @@ void main()
         // The draw's vertex positions in pixel space as the host draws it (window offset, Direct3D's
         // pixel centers at .0), when the vertex shader passes them through from vertex data: their
         // bounding box (x0, y0, x1, y1), and whether every vertex is one of its corners
-        bool vertexBox(const DrawState& s, const PositionFetch& p, float box[4], bool* allCorners = nullptr)
+        // (`anyScissor`: also when a scissor bounds the draw, for resolves, which always have one)
+        bool vertexBox(const DrawState& s, const PositionFetch& p, float box[4], bool* allCorners = nullptr, bool anyScissor = false)
         {
             bool area = s.primitive == 4 || s.primitive == 5 || s.primitive == 6 || s.primitive == 8 || s.primitive == 13 || s.primitive == 14;
             if (!p.valid || !s.clipDisable || !area || s.indexSource != 2 || !s.indexCount || s.indexCount > 64) return false;
             int32_t right = int32_t(s.scissorBR[0]), bottom = int32_t(s.scissorBR[1]);
             if (!s.windowOffsetDisabled) { right += s.windowOffsetX; bottom += s.windowOffsetY; }
-            if (std::min(right, int32_t(s.screenScissorBR[0])) < 8192 || std::min(bottom, int32_t(s.screenScissorBR[1])) < 8192) return false;
+            if (!anyScissor && (std::min(right, int32_t(s.screenScissorBR[0])) < 8192 || std::min(bottom, int32_t(s.screenScissorBR[1])) < 8192))
+                return false;
             uint32_t d0 = readRegister(kFetchConstants + p.slot * 2), d1 = readRegister(kFetchConstants + p.slot * 2 + 1);
             uint64_t baseDw = d0 >> 2, sizeDw = (d1 >> 2) & 0xFFFFFF;
             uint32_t endian = d1 & 3;
             float x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY, xs[4]{}, ys[4]{};
+            uint32_t dwords = 0; // of each vertex read: up to the last fetched component used (a resolve's 2 floats)
+            for (uint32_t c = 0; c < 4; c++)
+                if (p.comp[c] < 4 && (c < 2 || !s.xyDividedByW)) dwords = std::max<uint32_t>(dwords, p.comp[c] + 1u);
             for (uint32_t i = 0; i < s.indexCount; i++)
             {
                 int64_t at = (int64_t(i) + s.indexOffset) * p.stride + p.offset;
-                if (at < 0 || (sizeDw && uint64_t(at) + 4 > sizeDw)) return false;
+                if (at < 0 || (sizeDw && uint64_t(at) + dwords > sizeDw)) return false;
                 const uint32_t* v = (const uint32_t*)mem::physical(uint32_t((baseDw + uint64_t(at)) * 4));
                 auto comp = [&](uint32_t c) {
                     uint8_t k = p.comp[c];
@@ -3523,6 +3528,25 @@ void main()
             VkRect2D rect;
             VkExtent2D limit = src ? VkExtent2D{ src->width / g_scale, src->height / g_scale } : VkExtent2D{ 8192, 8192 };
             if (!scissorRect(s, limit, rect)) return; // guest pixels
+            // The pixels copied: the ones the resolve rectangle's vertices span, within the scissor
+            // (Xenia's GetResolveInfo; the scissor alone is often a power of two or whole EDRAM tile rows
+            // bigger), and within the destination the game declared (RB_COPY_DEST_PITCH), which is all a
+            // texture of that size reads. The resolve image is then the destination's size, as the
+            // texture: at 1280x720 the quarter-size passes copy 320x184 into 320x180 destinations, and the
+            // 320x180 textures sampled all 184 rows of the image, four of them whatever EDRAM held.
+            if (Shader* rvs = currentShader(0))
+            {
+                float b[4];
+                if (vertexBox(s, rvs->t.position, b, nullptr, true))
+                {
+                    float shift = s.pixelCenterHalf ? 0.0f : 0.5f; // vertexBox's Direct3D pixel-center shift
+                    int32_t vx0 = int32_t(std::lround(std::max(b[0] - shift, 0.0f))), vy0 = int32_t(std::lround(std::max(b[1] - shift, 0.0f)));
+                    int32_t vx1 = int32_t(std::lround(std::min(b[2] - shift, 8192.0f))), vy1 = int32_t(std::lround(std::min(b[3] - shift, 8192.0f)));
+                    VkRect2D v{ { vx0, vy0 }, { uint32_t(std::max(vx1 - vx0, 0)), uint32_t(std::max(vy1 - vy0, 0)) } };
+                    if (v.extent.width && v.extent.height && !intersect(rect, v, rect)) return; // nothing to copy
+                }
+            }
+            if (destPitch && destHeight && !intersect(rect, VkRect2D{ { 0, 0 }, { destPitch, destHeight } }, rect)) return;
             VkRect2D hostRect = scaled(rect);
 
             uint32_t dw = std::max(destPitch, rect.offset.x + rect.extent.width), dh = std::max(destHeight, rect.offset.y + rect.extent.height);
