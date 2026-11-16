@@ -67,7 +67,11 @@ their guest address, and the presenter shows the image resolved to the front buf
   seconds and frames. Before the coin toss, runs of the same build match with either form; avoid
   times right at a scripted press (the frame before and after it differ).
 - `--resolution-scale N` (1-4) renders at N times the game's resolution: 2 = 2560x1440,
-  3 = 3840x2160. The game still sees 1280x720; render targets, viewports, scissors, resolves and
+  3 = 3840x2160. To keep a scale for every windowed run, put `resolution_scale=N` in
+  `game/settings.ini` (#115); the flag overrides the file for one run and doesn't change it, and
+  headless runs ignore the file, so scripted routes and screenshots stay at 1 unless they pass the
+  flag. The log says where a scale other than 1 came from (`[gpu] resolution scale 2
+  (game/settings.ini)`). The game still sees 1280x720; render targets, viewports, scissors, resolves and
   clears are scaled. (The attract movie itself is a 1280x720 video, so it only gets smoother
   scaling; 3D scenes are where the extra resolution shows.) Measured on a Radeon RX 9070 XT
   (issue #82, main at 2a16722, headless Exhibition route, 245 s, ABBA): scale 1 rendered 7,265 and
@@ -203,7 +207,8 @@ Subsystems:
   command processor only publishes the front-buffer address/size (lock-free) and the presenter
   copies it on its own schedule, so the game never waits on the window. Currently a raw copy:
   the picture is black because nothing renders into the front buffer yet. Window size, position
-  and fullscreen state are read from `game/settings.ini` (issue #9)
+  and fullscreen state are read from `game/settings.ini` (issue #9); `runtime/settings.cpp` reads
+  and writes that file with every key it knows, the resolution scale (#115) included
 - `runtime/gpu/` - Vd* imports, PM4 command processor, register file at 0x7FC80000, 60 Hz vblank
   interrupt; MMIO stores reach it through `runtime/ppc_hooks.h` (force-included into ppc/).
   `GuestMmioStore32` only warns about a store no device handles inside the device window

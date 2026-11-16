@@ -16,6 +16,7 @@
 #include "build_id.h"
 #include "log.h"
 #include "memory.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -245,6 +246,7 @@ int main(int argc, char** argv)
     std::string xex = "game/extracted/default.xex";
     int timeout = 0;
     bool headless = false, fullscreen = false, mute = false, audio = false, listAchievements = false;
+    int scaleArg = -1; // --resolution-scale; without it, windowed runs use game/settings.ini's (#115)
     std::string overlayPreview;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
@@ -278,7 +280,7 @@ int main(int argc, char** argv)
         else if (a == "--no-render")
             gpu::render::disable();
         else if (a == "--resolution-scale" && i + 1 < argc)
-            gpu::render::setResolutionScale(uint32_t(std::atoi(argv[++i])));
+            scaleArg = std::atoi(argv[++i]);
         else if (a == "--anisotropy" && i + 1 < argc)
             gpu::render::setAnisotropy(uint32_t(std::atoi(argv[++i])));
         else if (a == "--no-shader-cache")
@@ -315,6 +317,16 @@ int main(int argc, char** argv)
 
     installHandlers();
     info("built from %s", build_id::line()); // first line of every log says what made it (#75)
+
+    // Render scale of the 3D scenes. The flag wins for this run and leaves the file alone. Headless
+    // runs (test routes, scripted screenshots) don't read the file, so what they produce doesn't
+    // depend on the player's setting.
+    uint32_t scale = scaleArg >= 0 ? uint32_t(std::clamp(scaleArg, 1, 4))
+                   : headless      ? 1u
+                                   : settings::load().resolutionScale;
+    gpu::render::setResolutionScale(scale);
+    if (scale != 1)
+        info("[gpu] resolution scale %u (%s)", scale, scaleArg >= 0 ? "--resolution-scale" : settings::kPath);
     mem::init();
     loadImage(image);
     buildFunctionTable();

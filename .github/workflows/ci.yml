@@ -112,6 +112,12 @@ jobs:
       - name: Run memory write watch test
         run: ./build/memory_watch_test
 
+      - name: Build settings file test (game/settings.ini, #115)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 -I runtime tests/settings_test.cpp runtime/settings.cpp -o build/settings_test
+
+      - name: Run settings file test
+        run: ./build/settings_test
+
       - name: Check tools scripts compile
         run: python3 -m py_compile tools/*.py
 

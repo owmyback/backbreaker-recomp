@@ -116,6 +116,12 @@ threads writing while the pages are re-protected:
 
     mkdir -p build && clang++ -std=c++20 -O2 -pthread -I runtime tests/memory_watch_test.cpp runtime/memory.cpp -o build/memory_watch_test && build/memory_watch_test
 
+The settings file (`runtime/settings.cpp`, #115) is read and written in a temporary directory:
+defaults, a file from before `resolution_scale` existed, save-then-load of every key, hand-edited
+lines, and out-of-range or non-numeric scales:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 -I runtime tests/settings_test.cpp runtime/settings.cpp -o build/settings_test && build/settings_test
+
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 `scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`
@@ -145,6 +151,13 @@ Run it from the repo root too - the game files are found by paths relative to it
     ./build/backbreaker --resolution-scale 2     # 3D at 2560x1440 - sharper, costs frame rate
     ./build/backbreaker --anisotropy 16          # keeps the field sharp toward the horizon
 
+To keep a resolution scale without typing the flag, add a line to `game/settings.ini` (create
+the file if it isn't there yet; the window writes the rest when it closes):
+
+    resolution_scale=2
+
+`--resolution-scale` still overrides it for one run, and headless runs ignore it.
+
 Both flags only change 3D scenes (`--resolution-scale` goes to 4, `--anisotropy` to 16); what each
 does to the picture - and what it leaves alone, like the 1280x720 attract movie and UI textures -
 is in `docs/runtime.md`. On a Radeon RX 9070 XT neither costs measurable frame rate: headless over
@@ -158,7 +171,7 @@ In the window:
 - **F12** - save the picture you see as `screenshots/<date-time>.png`
 - **F10** - GPU frame capture (draws, shaders, render targets) of the next frame to `captures/frame_N/`
 - **F11** or **Alt+Enter** - borderless fullscreen; window size, position and fullscreen state are
-  remembered in `game/settings.ini`
+  remembered in `game/settings.ini`, next to the `resolution_scale` above
 
 Everything else - headless runs, screenshots by frame number or by second, scripted input,
 controllers, the renderer's debug aids - is in [`docs/runtime.md`](docs/runtime.md).

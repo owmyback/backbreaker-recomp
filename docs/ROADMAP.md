@@ -232,7 +232,8 @@ presenter just drew and writes `screenshots/<date-time>.png` (what the window sh
 saves the renderer's front buffer instead). Window polish #9 is done (`bf0641c`): F11 or Alt+Enter
 toggles borderless fullscreen, and the windowed size, position and fullscreen state are remembered
 in `game/settings.ini` between runs (`--fullscreen` to start fullscreen). Only the windowed geometry
-is remembered, so leaving fullscreen gives the same window back.
+is remembered, so leaving fullscreen gives the same window back. The same file can keep the
+resolution scale for windowed runs (`resolution_scale=2`, #115).
 
 **Step 2 - Shader disassembler (done, `c5562a6`).** `runtime/gpu/ucode.h` decodes Xenos microcode
 (control flow, vertex/texture fetch, paired vector+scalar ALU; layouts from Xenia's `ucode.h`),

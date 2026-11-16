@@ -15,6 +15,7 @@
 #include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
+#include "../settings.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -89,42 +90,10 @@ namespace video
         } vk;
 
         // ---- Window state remembered between runs (issue #9) ----
-        // game/settings.ini, plain key=value lines. game/ is gitignored, so this is per-machine
-        // state rather than project data.
-        struct Settings
-        {
-            int width = 1280, height = 720;
-            int x = 0, y = 0;
-            bool hasPosition = false;
-            bool fullscreen = false;
-        };
-        Settings g_settings;
+        // game/settings.ini (runtime/settings.h). The window writes the file back when it closes,
+        // with every key as it was read, so the resolution scale (#115) stays as the player set it.
+        settings::Settings g_settings;
         bool g_fullscreen = false;
-
-        Settings loadSettings()
-        {
-            Settings s;
-            FILE* f = fopen("game/settings.ini", "r");
-            if (!f)
-                return s; // first run: defaults
-            char line[128];
-            while (fgets(line, sizeof(line), f))
-            {
-                char* eq = strchr(line, '=');
-                if (!eq)
-                    continue;
-                std::string key(line, eq);
-                int value = std::atoi(eq + 1);
-                if (key == "width") s.width = value;
-                else if (key == "height") s.height = value;
-                else if (key == "x") { s.x = value; s.hasPosition = true; }
-                else if (key == "y") { s.y = value; s.hasPosition = true; }
-                else if (key == "fullscreen") s.fullscreen = value != 0;
-            }
-            fclose(f);
-            if (s.width <= 0 || s.height <= 0) { s.width = 1280; s.height = 720; }
-            return s;
-        }
 
         // Only the windowed geometry is worth remembering: in borderless fullscreen the window is
         // the whole display, so what is stored is the size it was before going fullscreen.
@@ -144,16 +113,7 @@ namespace video
             if (!g_fullscreen)
                 rememberWindowGeometry();
             g_settings.fullscreen = g_fullscreen;
-            FILE* f = fopen("game/settings.ini", "w");
-            if (!f)
-            {
-                warn("[video] cannot write game/settings.ini: %s", strerror(errno));
-                return;
-            }
-            std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\n",
-                         g_settings.width, g_settings.height, g_settings.x, g_settings.y,
-                         int(g_settings.fullscreen));
-            fclose(f);
+            settings::save(g_settings);
         }
 
         void setFullscreen(bool on)
@@ -616,7 +576,7 @@ namespace video
         SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // SIGINT/SIGTERM end the run (main.cpp)
         if (!SDL_Init(SDL_INIT_VIDEO))
             fatal("[video] SDL_Init: %s (use --headless to run without a window)", SDL_GetError());
-        g_settings = loadSettings();
+        g_settings = settings::load();
         // The revision is in the title so a screenshot of a window identifies the checkout (#75).
         char openTitle[128];
         snprintf(openTitle, sizeof(openTitle), "Backbreaker (recomp) %s", build_id::revision());
