@@ -33,6 +33,7 @@
 #include <shaderc/shaderc.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <array>
 #include <cmath>
@@ -126,11 +127,14 @@ namespace gpu::render
         struct CompileStats { uint32_t translated = 0, compiled = 0, cached = 0, pipelines = 0; double translateMs = 0, compileMs = 0, pipelineMs = 0; };
         CompileStats g_compileStats;
         // BB_PERF=1: one line per second of where the renderer thread's time went (issue #73)
+        enum CpStep { kCpSetup, kCpConstants, kCpIndices, kCpVertices, kCpTextures, kCpEdram, kCpRecord, kCpExport, kCpSteps };
+        const char* const kCpStepNames[kCpSteps] = { "setup", "constants", "indices", "vertices", "textures", "EDRAM sync", "pass+record", "export/after" };
+        const bool g_cpTime = getenv("BB_CP_TIME") != nullptr;
         struct PerfStats { uint64_t draws = 0, hashBytes = 0, uploads = 0, uploadBytes = 0, resolves = 0, writebacks = 0, flushes = 0;
                            uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0, chunks = 0,
                                     idleSubmits = 0, asyncFences = 0, asyncWaits = 0, copyInsAroundPending = 0,
                                     hashSkips = 0, passes = 0, barriers = 0, gpuMarksDropped = 0,
-                                    transfers = 0, transferTiles = 0, exportBarriers = 0, transferTilesSkipped = 0;
+                                    transfers = 0, transferTiles = 0, exportBarriers = 0, transferTilesSkipped = 0, copiesReused = 0, bytesReused = 0;
                            double hashMs = 0, waitMs = 0, cpWaitMs = 0;
                            std::vector<double> gpuMs;       // BB_GPU_TIME: GPU time by kind of work (see gpuMark)
                            std::vector<uint32_t> gpuSpans;  // how many stretches of each kind
@@ -138,8 +142,23 @@ namespace gpu::render
                            std::map<uint16_t, Calls> callsBy; // BB_GPU_TIME=2: transfers (tiles), =3: also draws (indices)
                            std::map<std::string, uint64_t> syncsBy;          // syncs that had pending writes, by trigger
                            struct Up { uint32_t format = 0, width = 0, height = 0; uint64_t count = 0, bytes = 0, fresh = 0; };
-                           std::map<uint32_t, Up> uploadsBy; };              // texture uploads by guest base address
+                           std::map<uint32_t, Up> uploadsBy;                // texture uploads by guest base address
+                           std::array<uint64_t, kCpSteps> cpTicks{}, cpBytes{}; }; // BB_CP_TIME: TSC ticks and bytes copied, by step
         PerfStats g_perf;
+        // BB_CP_TIME=1: the command processor thread's time in each step of a draw, from the TSC
+        // (a few ns a read), for the [perf] lines. The CP thread records every draw; in heavy
+        // frames its time per frame, not the GPU's, decides whether the frame makes the vblank.
+        struct CpTimer
+        {
+            uint64_t t = g_cpTime ? __builtin_ia32_rdtsc() : 0;
+            void step(CpStep k)
+            {
+                if (!g_cpTime) return;
+                uint64_t n = __builtin_ia32_rdtsc();
+                g_perf.cpTicks[k] += n - t;
+                t = n;
+            }
+        };
         double nowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
         shaderc_compiler_t g_compiler = nullptr;
@@ -452,6 +471,52 @@ void main() {
                 if (w.exported && start < w.end && w.start < end) { g_syncRetry = true; return; }
         }
 
+        // ---------------------------------------------------------------- copies reused within a frame (#121)
+        //
+        // The shadow, reflection and main passes draw the same meshes, and every draw copied its
+        // indices and vertices into the upload buffer again: in the heaviest rain frames (2,300
+        // draws) 11 MB of indices and 48 MB of vertices, 6.3 ms of the CP thread's 11.4. Of those
+        // bytes 84% and 62% repeated a copy already in this frame's upload buffer, with the guest
+        // bytes unchanged; reusing them takes the CP thread's work in such a frame to 8.5 ms. A
+        // draw reuses a copy while the guest cannot have changed those bytes since:
+        //  - The guest rewrites memory the GPU reads only once it knows the GPU is past those reads,
+        //    and it learns that from the command processor: a fence or other memory write, a scratch
+        //    register, the read pointer, an interrupt. Each of those bumps g_guestSeen (any thread:
+        //    the vblank interrupt comes from its own), and copies from before it are not reused.
+        //  - GPU writes to guest memory (resolve writebacks, memory export) mark their pages, when
+        //    recorded and when they land; a copy of a range a GPU write has touched since is not
+        //    reused, and ranges a pending GPU write overlaps are never kept.
+        // The copies live in the frame's upload buffer, so they are forgotten when it restarts.
+        std::atomic<uint64_t> g_guestSeen{ 0 };
+        uint64_t g_gpuWriteSerial = 0;
+        std::vector<uint64_t> g_pageGpuWrite; // per 4 KB page of guest memory: g_gpuWriteSerial of the last GPU write
+        constexpr uint32_t kPageShift = 12;
+
+        void gpuWritesMemory(uint64_t start, uint64_t end)
+        {
+            if (g_pageGpuWrite.empty()) g_pageGpuWrite.resize(mem::kPhysicalSize >> kPageShift);
+            end = std::min<uint64_t>(end, mem::kPhysicalSize);
+            if (start >= end) return;
+            g_gpuWriteSerial++;
+            for (uint64_t p = start >> kPageShift; p <= (end - 1) >> kPageShift; p++) g_pageGpuWrite[p] = g_gpuWriteSerial;
+        }
+
+        struct CopyStamp { uint64_t seen = 0, gpuWrites = 0; };
+        CopyStamp copyStamp() { return { g_guestSeen.load(std::memory_order_relaxed), g_gpuWriteSerial }; }
+
+        bool copyStillGood(const CopyStamp& c, uint64_t start, uint64_t end)
+        {
+            if (c.seen != g_guestSeen.load(std::memory_order_relaxed)) return false;
+            if (c.gpuWrites == g_gpuWriteSerial || g_pageGpuWrite.empty()) return true;
+            end = std::min<uint64_t>(end, mem::kPhysicalSize);
+            for (uint64_t p = start >> kPageShift; start < end && p <= (end - 1) >> kPageShift; p++)
+                if (g_pageGpuWrite[p] > c.gpuWrites) return false;
+            return true;
+        }
+
+        bool pendingOverlap(uint32_t start, uint32_t end);
+        void forgetCopies();
+
         // Every renderer submit signals g_timeline with the next serial (#73), so "the GPU has run
         // everything up to submit N" is one counter: a semaphore signal covers all earlier submits.
         VkSemaphore g_timeline = VK_NULL_HANDLE;
@@ -695,6 +760,7 @@ void main() {
         void restartFrame(Frame& f)
         {
             collectGpuTime(f);
+            forgetCopies(); // they are in the upload buffer being reset
             VK_CHECK(vkResetCommandPool(D, f.pool, 0));
             f.cmdBuffersUsed = 1;
             f.cmd = f.cmdBuffers[0];
@@ -3212,6 +3278,7 @@ void main()
                 if (all || (w.serial && w.serial <= serial))
                 {
                     mem::watch::release(w.start, w.end); // a GPU result lands: textures there have changed
+                    gpuWritesMemory(w.start, w.end);      // and copies of it in the upload buffer
                     if (g_exportMap) // staging copy of guest memory: copy the written range out
                         std::memcpy(mem::physical(w.start), g_exportMap + w.start, w.end - w.start);
                 }
@@ -3384,6 +3451,7 @@ void main()
                                  &mb, 0, nullptr, 0, nullptr);
             transition(c, img, was == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : was);
             g_pendingWrites.push_back({ img.guestBase, uint32_t(end), 0, false });
+            gpuWritesMemory(img.guestBase, end);
             g_perf.pendingAdded++;
             g_writebacks++;
         }
@@ -3566,7 +3634,7 @@ void main()
             uint32_t minIndex = 0, maxIndex = 0; // range of guest indices used (before VGT_INDX_OFFSET)
         };
 
-        IndexBuffer indices(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord, bool quads)
+        IndexBuffer decodeIndices(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord, bool quads)
         {
             IndexBuffer ib;
             uint32_t count = s.indexCount;
@@ -3650,6 +3718,54 @@ void main()
             return { off, s.indexSize ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16, count, true, lo == UINT32_MAX ? 0 : lo, hi };
         }
 
+        // This frame's index copies, by what they were decoded from (see g_guestSeen)
+        struct IndexCopyKey
+        {
+            uint32_t base, count, restartIndex, flags;
+            bool operator==(const IndexCopyKey&) const = default;
+        };
+        struct IndexCopyKeyHash
+        {
+            size_t operator()(const IndexCopyKey& k) const
+            {
+                return ((uint64_t(k.base) << 32 | k.count) * 0x9E3779B97F4A7C15ull) ^ ((uint64_t(k.restartIndex) << 8 | k.flags) * 0xC2B2AE3D27D4EB4Full);
+            }
+        };
+        struct IndexCopy { IndexBuffer ib; CopyStamp stamp; };
+        std::unordered_map<IndexCopyKey, IndexCopy, IndexCopyKeyHash> g_indexCopies;
+        struct VertexCopy { VkDeviceSize offset; CopyStamp stamp; };
+        std::unordered_map<uint64_t, VertexCopy> g_vertexCopies; // by guest address << 32 | dwords
+
+        void forgetCopies()
+        {
+            g_indexCopies.clear();
+            g_vertexCopies.clear();
+        }
+
+        IndexBuffer indices(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord, bool quads)
+        {
+            if (s.indexSource != 0) return decodeIndices(s, indexBase, indexSizeWord, quads);
+            uint32_t start = indexBase & 0x1FFFFFFF & ~3u;
+            uint64_t end = uint64_t(indexBase & 0x1FFFFFFF) + uint64_t(s.indexCount) * (s.indexSize ? 4 : 2) + 4;
+            IndexCopyKey key{ indexBase, s.indexCount, s.primitiveRestart ? s.restartIndex : 0,
+                              uint32_t(s.indexSize) | (indexSizeWord >> 30) << 1 | uint32_t(s.primitiveRestart) << 3 | uint32_t(quads) << 4 };
+            bool keep = !pendingOverlap(start, uint32_t(std::min<uint64_t>(end, mem::kPhysicalSize)));
+            if (keep)
+            {
+                auto it = g_indexCopies.find(key);
+                if (it != g_indexCopies.end() && copyStillGood(it->second.stamp, start, end))
+                {
+                    g_perf.copiesReused++;
+                    g_perf.bytesReused += uint64_t(it->second.ib.count) * (it->second.ib.type == VK_INDEX_TYPE_UINT32 ? 4 : 2);
+                    return it->second.ib;
+                }
+            }
+            CopyStamp stamp = copyStamp(); // before reading guest memory
+            IndexBuffer ib = decodeIndices(s, indexBase, indexSizeWord, quads);
+            if (keep && ib.ok && !g_syncRetry) g_indexCopies[key] = { ib, stamp };
+            return ib;
+        }
+
         // false: the upload buffer ran out before anything of this draw was recorded
         // ---------------------------------------------------------------- redraws of depth-written geometry
         //
@@ -3709,6 +3825,7 @@ void main()
                 }
             g_outOfSpace = false;
             g_syncRetry = false;
+            CpTimer cpt;
 
             // Topology
             VkPrimitiveTopology topology;
@@ -3790,6 +3907,7 @@ void main()
                     if (pendingOverlap(start, start + bytes)) { retireCompleted(); if (pendingOverlap(start, start + bytes)) syncGuestMemory("export_over_pending"); }
 
             // Snapshot guest data into the upload buffer: constants, vertex data, indices
+            cpt.step(kCpSetup);
             Frame& f = frame();
             VkDeviceSize constants = uploadAlloc(kConstantsSize);
             if (constants == UINT64_MAX) return false;
@@ -3813,6 +3931,8 @@ void main()
             copySwapped(other + 8, kLoopConstants, 32);
             uint32_t* fetch = other + 40;
             copySwapped(fetch, kFetchConstants, 192);
+            cpt.step(kCpConstants);
+            if (g_cpTime) g_perf.cpBytes[kCpConstants] += kConstantsSize;
             IndexBuffer ib;
             int64_t minIndex = 0, maxIndex = int64_t(s.indexCount) - 1;
             if (s.indexSource == 0 || quads)
@@ -3820,7 +3940,9 @@ void main()
                 ib = indices(s, indexBase, indexSizeWord, quads);
                 if (!ib.ok) return false;
                 if (s.indexSource == 0) { minIndex = ib.minIndex; maxIndex = ib.maxIndex; }
+                if (g_cpTime) g_perf.cpBytes[kCpIndices] += uint64_t(ib.count) * (ib.type == VK_INDEX_TYPE_UINT32 ? 4 : 2);
             }
+            cpt.step(kCpIndices);
             minIndex += s.indexOffset;
             maxIndex += s.indexOffset;
             std::vector<VkBufferCopy> gpuVertexCopies;
@@ -3840,10 +3962,7 @@ void main()
                 }
                 end = std::min(end, first + (4u << 20));
                 uint64_t dwords = end > first ? end - first : 0;
-                VkDeviceSize off = uploadAlloc(dwords * 4 + 16, 16);
-                if (off == UINT64_MAX) return false;
                 uint32_t src = uint32_t((baseDw + first) * 4);
-                std::memcpy(f.uploadMap + off, mem::physical(src), dwords * 4);
                 // Parts written by a memory export or resolve writeback that is recorded but not yet
                 // synced are only right in the GPU's copy of guest memory: copy those over the CPU's
                 // Only the pending ranges inside this slot's bytes (almost always none), merged where
@@ -3854,6 +3973,25 @@ void main()
                 {
                     uint64_t a = std::max<uint64_t>(w.start, src), b = std::min<uint64_t>(w.end, uint64_t(src) + dwords * 4);
                     if (a < b) hits.push_back({ a, b });
+                }
+                // The same bytes copied earlier in the frame, unchanged since (see g_guestSeen)
+                uint64_t copyKey = uint64_t(src) << 32 | dwords;
+                auto copied = hits.empty() ? g_vertexCopies.find(copyKey) : g_vertexCopies.end();
+                VkDeviceSize off;
+                if (copied != g_vertexCopies.end() && copyStillGood(copied->second.stamp, src, uint64_t(src) + dwords * 4))
+                {
+                    off = copied->second.offset;
+                    g_perf.copiesReused++;
+                    g_perf.bytesReused += dwords * 4;
+                }
+                else
+                {
+                    CopyStamp stamp = copyStamp(); // before reading guest memory
+                    off = uploadAlloc(dwords * 4 + 16, 16);
+                    if (off == UINT64_MAX) return false;
+                    std::memcpy(f.uploadMap + off, mem::physical(src), dwords * 4);
+                    if (g_cpTime) g_perf.cpBytes[kCpVertices] += dwords * 4;
+                    if (hits.empty()) g_vertexCopies[copyKey] = { off, stamp };
                 }
                 if (!hits.empty() && g_guestMem)
                 {
@@ -3881,6 +4019,7 @@ void main()
                 g_perf.gpuVertexCopies += gpuVertexCopies.size();
             }
 
+            cpt.step(kCpVertices);
             // Textures (uploads end the current pass)
             VkDescriptorImageInfo images[32]{};
             uint32_t textureSlots = vs->t.textureSlots | ps->t.textureSlots;
@@ -3888,6 +4027,7 @@ void main()
                 if ((textureSlots >> slot) & 1)
                     images[slot] = texture(slot, ((ps->t.textureSlots >> slot) & 1) ? ps->t.textureDims[slot] : vs->t.textureDims[slot]);
             if (g_outOfSpace || g_syncRetry) return false;
+            cpt.step(kCpTextures);
 
             // Scissor over all attachments, in guest pixels
             VkExtent2D guestExtent{ UINT32_MAX, UINT32_MAX };
@@ -3912,6 +4052,7 @@ void main()
                 syncTarget(depth, edramRect, depthOverwritten ? covered : VkRect2D{});
             }
 
+            cpt.step(kCpEdram);
             g_exportBatching = memExport && g_exportBarrierPending && !exportsOverlapPending(exportRanges);
             beginPass(color, depth);
             if (g_gpuTimeDraws)
@@ -4005,8 +4146,10 @@ void main()
             }
             else
                 vkCmdDraw(c, s.indexCount, 1, 0, 0);
+            cpt.step(kCpRecord);
             if (memExport && g_exportMap)
                 for (auto [start, bytes] : exportRanges) std::memcpy(g_exportMap + start, mem::physical(start), bytes);
+            if (g_cpTime && memExport) for (auto [start, bytes] : exportRanges) g_perf.cpBytes[kCpExport] += bytes;
             if (memExport)
             {
                 // Make the shader's writes to guest memory visible to the host and to later commands.
@@ -4025,18 +4168,24 @@ void main()
                     g_perf.flushExport++;
                     flushAndWait();
                     if (g_exportMap)
-                        for (auto [start, bytes] : exportRanges) std::memcpy(mem::physical(start), g_exportMap + start, bytes);
+                        for (auto [start, bytes] : exportRanges)
+                        {
+                            std::memcpy(mem::physical(start), g_exportMap + start, bytes);
+                            gpuWritesMemory(start, start + bytes);
+                        }
                 }
                 else
                     for (auto [start, bytes] : exportRanges)
                     {
                         g_pendingWrites.push_back({ start, start + bytes, 0, true });
+                        gpuWritesMemory(start, start + bytes);
                     }
                 g_drawsSinceSubmit++;
                 maybeSubmitChunk(); // the pass is ended here anyway
             }
             for (int i = 0; i < 4; i++) markWritten(color[i], edramRect);
             if (depth && (s.depthWrite || s.stencil)) markWritten(depth, edramRect);
+            cpt.step(kCpExport);
             g_drawsInFrame++;
             if (!memExport) g_drawsSinceSubmit++;
             return true;
@@ -4144,6 +4293,8 @@ void main()
         g_perf.idleSubmits++;
         submitChunk();
     }
+
+    void guestSawProgress() { g_guestSeen.fetch_add(1, std::memory_order_relaxed); }
 
     void syncGuestMemory(const char* why)
     {
@@ -4255,6 +4406,7 @@ void main()
                     info("[perf] %.1fs: %llu swaps, %llu draws, renderer thread CPU %.0f ms (of it polling WAIT_REG_MEM %.0f ms), GPU waits %.0f ms (%llu flushes), "
                          "textures hashed %.1f MB in %.0f ms, %llu uploads (%.1f MB), %llu resolves, %llu writeBack calls (%llu queued); "
                          "%llu memexport draws (%llu waited for), %llu syncs with pending writes, %llu GPU vertex copies, %llu sync retries, "
+                         "%llu index/vertex copies reused (%.1f MB), "
                          "%llu early submits (%llu while the CP waited), %llu fences written when the GPU got there (%llu waited for), "
                          "%llu writebacks over pending ones; textures known unchanged without reading %llu, write faults %llu, "
                          "pages watched %u",
@@ -4262,11 +4414,36 @@ void main()
                          (unsigned long long)p.flushes, p.hashBytes / 1048576.0, p.hashMs, (unsigned long long)p.uploads,
                          p.uploadBytes / 1048576.0, (unsigned long long)p.resolves, (unsigned long long)p.writebacks,
                          (unsigned long long)p.pendingAdded, (unsigned long long)p.exportDraws, (unsigned long long)p.flushExport, (unsigned long long)p.flushSync,
-                         (unsigned long long)p.gpuVertexCopies, (unsigned long long)p.syncRetries, (unsigned long long)p.chunks,
+                         (unsigned long long)p.gpuVertexCopies, (unsigned long long)p.syncRetries, (unsigned long long)p.copiesReused,
+                         p.bytesReused / 1048576.0, (unsigned long long)p.chunks,
                          (unsigned long long)p.idleSubmits, (unsigned long long)p.asyncFences, (unsigned long long)p.asyncWaits,
                          (unsigned long long)p.copyInsAroundPending, (unsigned long long)p.hashSkips,
                          (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages());
                     faultsLast = mem::watch::faults();
+                    if (g_cpTime)
+                    {
+                        static uint64_t tscLast = 0;
+                        static double tLast = 0;
+                        uint64_t tsc = __builtin_ia32_rdtsc();
+                        double ticksPerMs = tLast ? double(tsc - tscLast) / (t - tLast) : 0;
+                        tscLast = tsc;
+                        tLast = t;
+                        if (ticksPerMs > 0)
+                        {
+                            std::string parts;
+                            double sum = 0;
+                            char b[160];
+                            for (int k = 0; k < kCpSteps; k++)
+                            {
+                                double ms = p.cpTicks[k] / ticksPerMs;
+                                sum += ms;
+                                snprintf(b, sizeof b, "%s%s %.1f ms", k ? ", " : "", kCpStepNames[k], ms);
+                                parts += b;
+                                if (p.cpBytes[k]) { snprintf(b, sizeof b, " (%.1f MB)", p.cpBytes[k] / 1048576.0); parts += b; }
+                            }
+                            info("[perf]   CP time in draws: %.0f ms | %s", sum, parts.c_str());
+                        }
+                    }
                     if (g_gpuTime)
                     {
                         // GPU time collected this second (from frames up to two swaps back)

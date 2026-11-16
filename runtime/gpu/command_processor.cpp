@@ -83,7 +83,11 @@ namespace gpu
         }
 
         // Memory accesses with GPU endian modes: the address carries the mode in its low 2 bits.
-        void storeGpu(uint32_t addr, uint32_t v) { *(uint32_t*)physical(addr & ~3u) = gpuSwap(v, addr & 3); }
+        void storeGpu(uint32_t addr, uint32_t v)
+        {
+            *(uint32_t*)physical(addr & ~3u) = gpuSwap(v, addr & 3);
+            render::guestSawProgress();
+        }
         uint32_t loadGpu(uint32_t addr) { return gpuSwap(*(uint32_t*)physical(addr & ~3u), addr & 3); }
 
         struct Reader
@@ -109,6 +113,7 @@ namespace gpu
         {
             if (!g_callback)
                 return;
+            render::guestSawProgress();
             std::lock_guard guard(g_interruptLock);
             PPCContext& ctx = *g_irqCtx;
             ctx.r1.u64 = g_irqThread->stackBase - 0x100;
@@ -267,6 +272,7 @@ namespace gpu
                 uint16_t ext[6] = { 0, 0x2000 >> 3, 0, 0x2000 >> 3, 0, 1 };
                 for (int i = 0; i < 6; i++)
                     *(uint16_t*)physical((addr & ~3u) + i * 2) = __builtin_bswap16(ext[i]);
+                render::guestSawProgress();
                 return;
             }
             case PM4_EVENT_WRITE:
@@ -421,6 +427,7 @@ namespace gpu
 
         void publishRptr(uint32_t rptr)
         {
+            render::guestSawProgress();
             *regPtr(reg::CP_RB_RPTR) = __builtin_bswap32(rptr);
             if (g_rptrWriteback)
                 *(uint32_t*)physical(g_rptrWriteback) = __builtin_bswap32(rptr);
@@ -618,6 +625,7 @@ namespace gpu
         if (index >= reg::SCRATCH_REG0 && index < reg::SCRATCH_REG0 + 8)
         {
             // Scratch registers are mirrored to memory when enabled in SCRATCH_UMSK (D3D fences)
+            render::guestSawProgress();
             uint32_t n = index - reg::SCRATCH_REG0;
             if (readRegister(reg::SCRATCH_UMSK) & (1u << n))
                 *(uint32_t*)physical(readRegister(reg::SCRATCH_ADDR) + n * 4) = __builtin_bswap32(value);
@@ -626,6 +634,7 @@ namespace gpu
         {
             // Cache flush request: complete immediately
             *regPtr(index) = __builtin_bswap32(value & ~0x80000000u);
+            render::guestSawProgress();
         }
     }
 

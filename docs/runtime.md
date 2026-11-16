@@ -57,6 +57,17 @@ their guest address, and the presenter shows the image resolved to the front buf
   written with the test always passing and all 8 stencil bits replaced. Tiles only partly covered
   are transferred as before. In the rain at scale 2 this skips about 300,000 of 1.1 million tiles a
   second.
+- Each draw's constants, indices and vertices are copied out of guest memory into the frame's
+  upload buffer, where the GPU reads them. The shadow, reflection and main passes draw the same
+  meshes, so a draw whose indices or vertex range are the same bytes an earlier draw of the frame
+  copied uses that copy instead (#121), as long as the guest cannot have changed them since. The
+  guest rewrites memory the GPU reads only after the command processor has shown it the GPU is
+  past those reads (a fence or other memory write, a scratch register, the read pointer, an
+  interrupt), and every one of those makes earlier copies unusable. GPU writes to guest memory
+  (resolve writebacks, memory export) do the same for the pages they touch, and ranges with a GPU
+  write pending are copied every time. In the heaviest rain frames this reuses 84% of the index
+  bytes and 62% of the vertex bytes and takes the command processor thread's work from 11.4 to
+  8.5 ms a frame.
 - Resolves are also written to guest memory (#45), tiled and in the destination's format, by a
   compute shader. The CPU reads some of them: the game's "Stadium texture generator" thread
   renders the field lightmap and compresses the resolved picture to DXT1 itself, so without this
@@ -572,9 +583,16 @@ swaps and draws, the CPU time of the command processor thread (which also runs t
 how much of it was spent polling in `WAIT_REG_MEM`, i.e. waiting for the game rather than working,
 GPU waits and flushes, texture bytes hashed and the time it took, texture uploads, resolves and
 writebacks, memory export draws (and how many waited for the GPU), syncs that had pending writes,
-GPU vertex copies and draws recorded again after a sync, and the write watch: texture checks
-answered without reading, write faults and pages watched. Pair it with `tools/fps_report.py` on the
-same log for the fps side.
+GPU vertex copies and draws recorded again after a sync, index and vertex copies reused (see
+"Renderer"), and the write watch: texture checks answered without reading, write faults and pages
+watched. Pair it with `tools/fps_report.py` on the same log for the fps side.
+
+`BB_CP_TIME=1` (with `BB_PERF=1`) adds a line with the command processor thread's time in draws,
+split by step: setup, constants, indices, vertices, textures, EDRAM sync, pass and recording, and
+memory export and after, with the bytes each copied into the upload buffer (#121). In heavy frames
+that thread, not the GPU, decides whether a frame is ready by the next vblank: the game's present
+waits for the GPU to drain, then for the vblank, so the CP's work per frame plus that drain has to
+fit in 16.7 ms.
 
 `BB_GPU_TIME=1` (with `BB_PERF=1`) adds where the GPU's time went (issue #121). The renderer writes
 a Vulkan timestamp each time the kind of work it records changes, and reads them back once the

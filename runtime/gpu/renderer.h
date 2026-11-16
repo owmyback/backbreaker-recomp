@@ -31,6 +31,10 @@ namespace gpu::render
     // command processor lets the CPU see its progress (a fence or other memory write, an
     // interrupt, the read pointer), this waits until the writebacks recorded so far have landed.
     void syncGuestMemory(const char* why = "renderer"); // `why`: for the BB_PERF line
+    // The command processor let the guest see how far the GPU is (a fence or other memory write, a
+    // scratch register, the read pointer, an interrupt): the guest may now rewrite what earlier
+    // draws read, so copies made before are not reused (#121). Any thread.
+    void guestSawProgress();
     void addCommandWaitMs(double ms);
     void submitBeforeWait();                // the CP is about to wait for the game: let the GPU start on what is recorded       // BB_PERF: time the CP spent polling in WAIT_REG_MEM
 
