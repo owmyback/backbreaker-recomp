@@ -53,6 +53,11 @@ namespace kernel
     // Windows FILETIME: 100 ns intervals since 1601-01-01. Used by KeQuerySystemTime, the
     // KeTimeStampBundle updater and absolute-timeout waits, so they all agree on "now".
     uint64_t systemTime();
+    // --fixed-seed (issue #71): systemTime() starts at the same date at every launch and the boot
+    // clock holds for its first second, so the C runtime's rand() gets the same seeds; the game's
+    // own generator gets one stream per call site (fixed_seed.cpp).
+    void setFixedSeed(bool on);
+    bool fixedSeed();
 
     // KeTimeStampBundle: guest address of the bundle (0 when the game does not import it) and the
     // host thread that keeps it current. Call startTimeStampThread() after patchImports().

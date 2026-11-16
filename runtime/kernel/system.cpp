@@ -58,6 +58,13 @@ uint64_t ppcQueryTimeBase()
     return uint64_t(((unsigned __int128)__rdtsc() * timeBaseFactor()) >> 32);
 }
 
+namespace
+{
+    bool g_fixedSeed = false;
+    const auto g_launch = std::chrono::steady_clock::now();
+    constexpr uint64_t kFixedBootHold100ns = 10'000'000; // 1 s
+}
+
 namespace kernel
 {
     // Windows FILETIME: 100 ns intervals since 1601-01-01. One definition, shared by
@@ -66,8 +73,19 @@ namespace kernel
     {
         using namespace std::chrono;
         constexpr uint64_t kEpochDelta = 116444736000000000ull;
+        if (g_fixedSeed)
+        {
+            // --fixed-seed: the same date at every launch, then running at the real rate (waits
+            // with absolute deadlines still expire). It starts half a second into a second, so
+            // the game's srand(time(NULL)) (82642F1C, about 70 ms in) sees the same second.
+            constexpr uint64_t kStart = 129224592005000000ull; // 2010-07-01 12:00:00.5 UTC
+            return kStart + duration_cast<nanoseconds>(steady_clock::now() - g_launch).count() / 100;
+        }
         return kEpochDelta + duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count() / 100;
     }
+
+    void setFixedSeed(bool on) { g_fixedSeed = on; }
+    bool fixedSeed() { return g_fixedSeed; }
 }
 
 GUEST_IMPORT(KeQueryPerformanceFrequency) { ctx.r3.u64 = kTimeBaseHz; }
@@ -99,6 +117,10 @@ namespace
         for (;;)
         {
             uint64_t since100ns = duration_cast<nanoseconds>(clock::now() - boot).count() / 100;
+            // --fixed-seed: the boot clock holds at 0 for the first second, then runs on from 0
+            // (no jump). The game seeds rand() a second time with GetTickCount() (TickCount below)
+            // about 80 ms in (srand call at 826944E0), so this gives every run the same seed.
+            if (g_fixedSeed) since100ns = since100ns > kFixedBootHold100ns ? since100ns - kFixedBootHold100ns : 0;
             write64(bundle + 0x00, since100ns);                        // u64 InterruptTime
             write64(bundle + 0x08, kernel::systemTime());              // u64 SystemTime (FILETIME)
             // TickCount last: a guest that reads the bundle without stopping the world never sees

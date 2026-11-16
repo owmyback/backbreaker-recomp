@@ -97,12 +97,15 @@ their guest address, and the presenter shows the image resolved to the front buf
   (letterboxed and at the window's size).
 - `--screenshot-at S[,S...]` takes seconds since launch instead, on the clock `--press` uses, and
   writes `screenshots/t_S.png` (as typed: `t_200.png`, `t_212.5.png`) at the first swap at or
-  after that time; the log line names the frame and the exact time. Neither form makes two runs
-  of the Exhibition route show the same scenes everywhere: the **coin toss is random** (from about
-  125 s, one run kicks off and the other receives), loading screens pick random art, and a slower
-  build (e.g. `BB_VK_VALIDATION=1`) boots and loads slower, so it reaches each menu later in both
-  seconds and frames. Before the coin toss, runs of the same build match with either form; avoid
-  times right at a scripted press (the frame before and after it differ).
+  after that time; the log line names the frame and the exact time. On their own, neither form
+  makes two runs of the Exhibition route show the same scenes everywhere: the **coin toss is
+  random** (from about 125 s, one run kicks off and the other receives), and so are the loading
+  screen's art and tip, the wind and the weather. With `--fixed-seed` (see "Scripted input") those
+  come out the same: in five runs the toss screen matched pixel for pixel and the kickoff had the
+  same kicking side, wind and returner. The play itself still differs in detail, since it depends
+  on frame timing. A slower build (e.g. `BB_VK_VALIDATION=1`) boots and loads slower, so it reaches
+  each menu later in both seconds and frames. Avoid times right at a scripted press (the frame
+  before and after it differ).
 - `--resolution-scale N` (1-4) renders at N times the game's resolution: 2 = 2560x1440,
   3 = 3840x2160. To keep a scale for every windowed run, put `resolution_scale=N` in
   `game/settings.ini` (#115); the flag overrides the file for one run and doesn't change it, and
@@ -479,6 +482,21 @@ screen to the main menu: `--press "a@20,a@26"`. Sticks: `ls_` or `rs_` plus `lef
 or `down`, as `stick@seconds[:duration]` - full deflection of that axis for the duration (150 ms
 by default), then released; reported as pad state only (no stick keystrokes). The kickoff of the
 Exhibition route: `rs_down@196:1.0,rs_up@197:0.3` pulls the right stick back and pushes it forward.
+
+`--fixed-seed` gives a run the same random numbers as every other run with the flag (#71), so a
+route's coin toss, wind, weather and loading screens come out the same. For test runs only.
+- Most of the game's randomness comes from one generator (multiply-with-carry, state at
+  `0x82CC5430`), which the game seeds from the wall clock and re-seeds when a match loads. A fixed
+  seed alone doesn't help: it is drawn about 10,000 times a second, much of it once per frame and
+  from up to five threads, so how many draws come before the toss depends on timing. Under the flag
+  every call site gets its own stream instead (`runtime/fixed_seed.cpp`), and the re-seed restarts
+  them all. A one-off pick such as the toss gets the first number of its own stream, however long
+  the menus took.
+- The C runtime's `rand()`, seeded with `time()` and `GetTickCount()` at startup, gets the same
+  seeds: the guest date starts at 2010-07-01 12:00:00.5 UTC, and the boot clock holds at 0 for its
+  first second.
+- Still different between runs: whatever depends on frame timing or on the frame a press lands on,
+  such as physics and how a play unfolds.
 
 ## GPU frame capture
 `./build/backbreaker --capture-frame 1200` (or a list: `--capture-frame 300,1200,2400`) records the

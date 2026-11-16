@@ -670,7 +670,8 @@ Performance (done):
 Correctness: the analyzer fixes (#52); crashes fixed: a reused TLS slot that handed back freed data
 on the second match load (#127), and the Training Camp passing drills, a race between the game's
 update and render threads over a play's player slots (#129). #50 (an assert after stick input) was
-closed as not reproducible. Open: the same randomness in every test run (#71).
+closed as not reproducible. Test runs: `--fixed-seed` gives every run the same random numbers, so
+the Exhibition route reaches the same coin toss, wind and kickoff (#71).
 
 ## Phase 10 - Packaging (started)
 

@@ -267,6 +267,8 @@ int main(int argc, char** argv)
         }
         else if (a == "--timeout" && i + 1 < argc)
             timeout = std::atoi(argv[++i]);
+        else if (a == "--fixed-seed")
+            kernel::setFixedSeed(true); // the same random numbers in every test run (issue #71)
         else if (a == "--headless")
             headless = true;
         else if (a == "--mute")
