@@ -74,12 +74,13 @@ namespace
         {
             PPCContext& c = *th->ctx;
             std::fprintf(stderr, "---- guest registers, thread %u ----\n", gt ? gt->id : 0);
-            PPCRegister* r[] = { &c.r3, &c.r4, &c.r5, &c.r6, &c.r7, &c.r8, &c.r9, &c.r10, &c.r11, &c.r12 };
-            for (int i = 0; i < 10; i++)
-                std::fprintf(stderr, "  r%-2d %08X%s", i + 3, r[i]->u32, i % 5 == 4 ? "\n" : "");
-            PPCRegister* nv[] = { &c.r24, &c.r25, &c.r26, &c.r27, &c.r28, &c.r29, &c.r30, &c.r31 };
-            for (int i = 0; i < 8; i++)
-                std::fprintf(stderr, "  r%-2d %08X%s", i + 24, nv[i]->u32, i % 4 == 3 ? "\n" : "");
+            PPCRegister* r[] = { &c.r0,  &c.r2,  &c.r3,  &c.r4,  &c.r5,  &c.r6,  &c.r7,  &c.r8,  &c.r9,  &c.r10,
+                                 &c.r11, &c.r12, &c.r14, &c.r15, &c.r16, &c.r17, &c.r18, &c.r19, &c.r20, &c.r21,
+                                 &c.r22, &c.r23, &c.r24, &c.r25, &c.r26, &c.r27, &c.r28, &c.r29, &c.r30, &c.r31 };
+            static const int num[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21,
+                                       22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
+            for (int i = 0; i < 30; i++)
+                std::fprintf(stderr, "  r%-2d %08X%s", num[i], r[i]->u32, i % 5 == 4 ? "\n" : "");
             std::fprintf(stderr, "  r1  %08X  r13 %08X  lr  %08X\n", c.r1.u32, c.r13.u32, uint32_t(c.lr));
         }
         kernel::printScopes(gt);

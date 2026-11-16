@@ -455,6 +455,15 @@ sub_82277110 while the byte 0x82C75097 is set. The code only ever clears that by
 points at it, so it looks unused, and it was 0 throughout the route and a play-test. Above 60
 fps would need a faster guest vblank (`runtime/gpu/`, 60 Hz) and a matching tick.
 
+## Fixes to the game's own code
+- A play's player slots (`runtime/play_lock.cpp`): a play builds its list of 11 player slots on
+  first use under the play lock (`sub_82323D28`), and the render thread does that when it looks a
+  play up to draw the route display. The drill set-up in `sub_8236E8D0` has the same build inlined
+  without the lock, so on a Training Camp retry both threads could build the same play: 22 slots,
+  and `sub_823DBCD0` crashed handing out the team's 11 players (a read at guest 0x0000FB00, most
+  passing-drill retries). That one build now takes the play lock too and checks the play's "built"
+  flag inside it.
+
 ## Controllers
 Controllers are read through SDL3 (users 0-3 = the first four controllers SDL lists; a
 DualSense's Cross/Circle/Square/Triangle are A/B/X/Y, Create/Options are Back/Start). The log
@@ -737,8 +746,8 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
   ends with the ratio of frames rendered, which is the frame-rate number a headless A/B run is after.
   Fixtures it is checked against: `tests/data/fps_report_sample*.log`.
 - Sampling a busy thread: `eu-stack -1 -p <tid>` (recompiled frames are named sub_XXXXXXXX)
-- Crash report: host backtrace, guest registers, recent profiler scopes and import calls of the
-  crashing thread. Indirect calls to addresses without a recompiled function are reported with
+- Crash report: host backtrace, all the guest registers, recent profiler scopes and import calls of
+  the crashing thread. Indirect calls to addresses without a recompiled function are reported with
   the target and caller.
 - `--timeout N`: after N seconds print every thread's recent scopes and calls, then exit with 124.
   `kill <pid>` (SIGTERM) and Ctrl+C (SIGINT) end a run the same way, headless or windowed, with
@@ -754,7 +763,7 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
   XMA "interrupt when done" and "stop when done" bits are ignored
 - WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
-  first load); resolves take their rectangle from the window scissor; resolves to formats other
+  first load); resolves to formats other
   than 8_8_8_8, 2_10_10_10 and D24S8 depth are not written back to guest memory (depth stencil is
   written as 0), nor are destinations resolved every frame; a resolve's own format conversion is
   skipped on the GPU side (textures sample the resolve image in the render target's format); 1D/3D
