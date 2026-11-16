@@ -93,6 +93,26 @@ int main()
         ok(!mem::watch::unchangedSince(s0, s1, stamp), "released range counts as written");
     }
 
+    // 4b. release() over runs (one mprotect per run, #119): a range with an unprotected hole in it,
+    // and protected pages on both sides that it must leave watched
+    {
+        uint32_t s0 = 0x310000, s1 = 0x320000; // 16 pages
+        mem::watch::protect(s0, s1);
+        std::memset(mem::physical(s0 + 0x5000), 1, 1); // page 5 faults and is writable again
+        uint64_t stamp = mem::watch::protect(s0, s0 + 0x2000); // pages 0-1 already protected: no-op
+        uint32_t protectedBefore = mem::watch::protectedPages();
+        mem::watch::release(s0 + 0x2000, s0 + 0xA000); // pages 2-9: runs 2-4 and 6-9, hole at 5
+        ok(mem::watch::protectedPages() == protectedBefore - 7, "release unprotects the 7 protected pages of the range");
+        uint64_t before = mem::watch::faults();
+        for (uint32_t p = 2; p < 10; p++) std::memset(mem::physical(s0 + p * 0x1000), 4, 0x1000);
+        ok(mem::watch::faults() == before, "released runs take no fault");
+        ok(mem::watch::unchangedSince(s0, s0 + 0x2000, stamp), "pages before the range stay watched");
+        ok(mem::watch::unchangedSince(s0 + 0xA000, s1, stamp), "pages after the range stay watched");
+        ok(!mem::watch::unchangedSince(s0 + 0x6000, s0 + 0x7000, stamp), "a released page counts as written");
+        std::memset(mem::physical(s0 + 0xA000), 5, 1);
+        ok(mem::watch::faults() == before + 1, "a page after the range still faults");
+    }
+
     // 5. readFile() into protected physical pages: the data arrives (pread would fail with EFAULT)
     {
         std::string pathStr = std::string(getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") + "/memory_watch_test_XXXXXX";

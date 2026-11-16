@@ -200,11 +200,26 @@ namespace mem
             return true;
         }
 
+        // A run of protected pages at a time: one mprotect per view for the run, not one per page
+        // (a 1024x1024 resolve written back over a watched image is 1,023 pages). Same order as
+        // unprotectPage: stamp, make writable, then clear the flags.
         void release(uint32_t start, uint32_t end)
         {
-            uint32_t last = std::min<uint32_t>((end + 0xFFF) >> 12, kPages);
-            for (uint32_t p = start >> 12; p < last; p++)
-                if (g_protected[p].load()) unprotectPage(p);
+            uint32_t p = start >> 12, last = std::min<uint32_t>((end + 0xFFF) >> 12, kPages);
+            while (p < last)
+            {
+                if (!g_protected[p].load()) { p++; continue; }
+                uint32_t run = p;
+                while (run < last && g_protected[run].load())
+                {
+                    g_stamp[run].store(g_counter.fetch_add(1) + 1);
+                    run++;
+                }
+                setProtection(p, run - p, PROT_READ | PROT_WRITE);
+                for (uint32_t q = p; q < run; q++)
+                    if (g_protected[q].exchange(0)) g_protectedCount.fetch_sub(1);
+                p = run;
+            }
         }
 
         bool onFault(const void* addr)

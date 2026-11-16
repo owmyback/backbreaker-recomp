@@ -45,14 +45,15 @@ namespace frame_rate
 // value, left as they are)
 PPC_FUNC(sub_8241A410)
 {
+    const uint32_t asked = ctx.r3.u32;
     const uint32_t interval = (ctx.r3.u32 >> 8) & 0xF;
     if (g_fps == 60 && interval == 2)
         ctx.r3.u32 = (ctx.r3.u32 & ~0xF00u) | 0x100u;
-    static bool logged = false;
-    if (!logged)
+    static uint32_t last = ~0u, changes = 0;
+    if (asked != last && changes < 64)
     {
-        logged = true;
-        info("[gpu] present interval %u (the game asks for %u)", (ctx.r3.u32 >> 8) & 0xF, interval);
+        last = asked, changes++;
+        info("[gpu] swap argument %08X: present interval %u (the game asks for %u)", asked, (ctx.r3.u32 >> 8) & 0xF, interval);
     }
     __imp__sub_8241A410(ctx, base);
 }

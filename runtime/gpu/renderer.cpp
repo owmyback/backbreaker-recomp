@@ -351,8 +351,8 @@ void main() {
             // writeback), to notice when the CPU has since put something else there (#63, #114): the
             // write-watch stamp (0 = not watched yet) and a sampled fingerprint for until then
             uint64_t memWatch = 0, memSig = 0, memCheckFrame = 0;
+            uint64_t memResolveFrame = 0; // its last resolve: watched only once that is a while ago
             bool memPending = false; // a writeback into it is still to land; note its memory after the sync
-            bool memSampled = false; // used as a texture: watched from each resolve on
             // Written between resolves this many times in a row; not watched until memUnwatchedUntil
             // (a frame), for memUnwatchFrames after each such streak (doubling)
             uint32_t memWrittenStreak = 0, memUnwatchFrames = 0;
@@ -1645,20 +1645,24 @@ void main()
         //
         // How "changed" is seen: the write watch (mem::watch, #73) on images used as textures. Their
         // pages are protected (after the writeback, which counts as a write), and a lookup asks
-        // whether any was written since: exact, and free until something writes. An image is
-        // watched from its first use as a texture and, after that, from each resolve into it.
-        // Before its first use, a fingerprint covers it: 256 bytes at the start of each of the first
-        // 16 pages, #65's whole check. That alone could miss a new image: the jersey font render
-        // and the controller picture are both mostly empty, and in some sessions the sampled spots
-        // were empty in both, so the font sheet stayed (#114). Watching every resolve instead made
-        // loading fault tens of thousands of times a second (most resolves are never textures).
+        // whether any was written since: exact, and free until something writes. Until then, a
+        // fingerprint covers it: 256 bytes at the start of each of the first 16 pages, #65's whole
+        // check. That alone could miss a new image: the jersey font render and the controller
+        // picture are both mostly empty, and in some sessions the sampled spots were empty in both,
+        // so the font sheet stayed (#114).
+        //
+        // Only stale images are watched: a lookup protects an image's pages once its last resolve is
+        // kStaleFrames ago. An image resolved (nearly) every frame is new each time, and watching
+        // it costs a write fault for every page the game writes there in between: a write fault
+        // costs the game's thread about 90 us (a signal and three mprotect calls), and watching
+        // every image used as a texture made 4,800 a second in a menu and dips to 40 fps in
+        // matches at 60 fps (#119). The jersey font sheet is rendered once, when the match loads.
         // An image whose memory the game writes between one resolve and the next, four times in a
-        // row (a 1024x1024 target resolved every frame over memory the CPU rewrites every frame:
-        // 61,000 faults a second), goes back to the fingerprint for 300 frames, then 600, and so
-        // on, as textures that keep changing do. The checks leave out a last page that another
-        // allocation may share.
+        // row, goes back to the fingerprint for 300 frames, then 600, and so on, as textures that
+        // keep changing do. The checks leave out a last page that another allocation may share.
         // BB_DEBUG_RESOLVE_CHECK=1 also hashes the whole range and logs where the checks are wrong.
         uint32_t formatBytes(VkFormat f);
+        constexpr uint64_t kStaleFrames = 30;
         const bool g_debugResolveCheck = getenv("BB_DEBUG_RESOLVE_CHECK") != nullptr;
 
         bool memRange(const Image& img, uint32_t& start, uint32_t& end)
@@ -1698,18 +1702,14 @@ void main()
             return true;
         }
 
-        // After a resolve into `img`, or once its writeback has landed: note its memory as of now.
-        // An image already used as a texture is watched from here on; one that has not been is
-        // watched from its first use (most resolves never are: watching them all made the game's
-        // writes over their memory fault tens of thousands of times a second while loading).
+        // After a resolve into `img`, or once its writeback has landed: note its memory as of now
+        // (the fingerprint; a lookup starts the watch once the image is stale)
         void baselineResolved(Image& img)
         {
             uint32_t start, end, ws, we;
             img.memCheckFrame = g_frameSerial;
             img.memWatch = 0;
             if (!memRange(img, start, end) || !watchRange(img, ws, we)) return;
-            if (img.memSampled && g_frameSerial >= img.memUnwatchedUntil)
-                img.memWatch = mem::watch::protect(ws, we); // before reading it
             img.memSig = memSignature(start, end);
             if (g_debugResolveCheck) img.memFull = hashBytes(mem::physical(ws), we - ws, 0x5EED);
         }
@@ -1765,7 +1765,6 @@ void main()
             auto it = g_resolved.find(base);
             if (it == g_resolved.end()) return it;
             Image& img = it->second;
-            img.memSampled = true;
             if (img.memPending || img.memCheckFrame == g_frameSerial) return it;
             img.memCheckFrame = g_frameSerial;
             uint32_t start, end, ws, we;
@@ -1776,12 +1775,12 @@ void main()
                 unchanged = mem::watch::unchangedSince(ws, we, img.memWatch);
             else
             {
-                // First use since the resolve: until now, the sampled fingerprint says. Unchanged:
-                // watch it from now on (protect, then read the fingerprint again, so no write slips
-                // in between). Changed: it is dropped, and its pages are left unprotected (a target
-                // the CPU overwrote would otherwise fault on every page, every frame it does so)
+                // Not watched yet: the sampled fingerprint says. Unchanged and stale: watch it from
+                // now on (protect, then read the fingerprint again, so no write slips in between).
+                // Changed: it is dropped, and its pages are left unprotected (a target the CPU
+                // overwrote would otherwise fault on every page, every frame it does so)
                 unchanged = memSignature(start, end) == img.memSig;
-                if (unchanged && g_frameSerial >= img.memUnwatchedUntil)
+                if (unchanged && g_frameSerial >= img.memUnwatchedUntil && g_frameSerial - img.memResolveFrame >= kStaleFrames)
                 {
                     uint64_t stamp = mem::watch::protect(ws, we);
                     unchanged = memSignature(start, end) == img.memSig;
@@ -3068,6 +3067,7 @@ void main()
         void markResolved(Image& img)
         {
             uint32_t start, end, ws, we;
+            img.memResolveFrame = g_frameSerial;
             if (!memRange(img, start, end)) return;
             // Written by the game since the last resolve (checked before this one's writeback lands,
             // which would count): four times in a row, and it is not watched for a while

@@ -381,7 +381,8 @@ now counts as what it took, up to the clamp.
 - *The present interval.* Before each swap, the command stream has the CPU call D3D's
   sub_8241A410 (through an interrupt) with an argument whose bits 8-11 say how many vblanks a
   frame stays up. The game asks for 2 (argument 0x264): 30 fps on the 60 Hz vblank. At 60 it gets
-  1.
+  1. The log shows each new argument the game passes (`[gpu] swap argument 00000264: present
+  interval 1 (the game asks for 2)`). Through the route and a match, it never changes.
 - *The gameplay tick.* The game object (constructed by sub_82274628) runs the simulation in fixed
   steps. Each frame adds the game clock's time to an accumulator (+168) and runs one step for each
   +172 in it, 1/30 s. At 60 frames a second, every step would be drawn twice. At 60 the step is
@@ -577,21 +578,22 @@ row (a movie frame, an image the CPU draws) is left unwatched for 300 frames and
 instead, so it does not fault on every write. `tests/memory_watch_test.cpp` checks all of this on
 the real memory layout, including the race between a fault and the renderer re-protecting a page.
 
-Resolve images use the same watch (#63, #114). A texture at a resolve destination samples the
-resolve image (render to texture), but the game can load something else into that memory later:
+Resolve images use the same watch (#63, #114, #119). A texture at a resolve destination samples
+the resolve image (render to texture), but the game can load something else into that memory later:
 in a match, the pause menu's Controls screen loads its controller picture where the team-coloured
-jersey font was rendered. After each resolve, or once its writeback has landed (landing counts as a
-write), the pages of an image used as a texture are protected, all but a last one that another
-allocation may share. A lookup that finds one of them written since drops the image, and the
-texture reads the guest's memory. An image is watched from its first use as a texture, and after
-that from each resolve into it. Until its first use, #65's sampled fingerprint covers it (256 bytes
-at the start of each of the first 16 pages). That fingerprint was the whole check before: the new
-picture could match it by chance, since both images are mostly empty, so the font sheet stayed in
-some sessions. Only images used as textures are watched. And like a texture that keeps changing, an
-image whose memory the game writes between one resolve and the next, four times in a row, goes
-back to the fingerprint for 300 frames, then 600, and so on. In the menus, two 1024x1024 targets are
-resolved every frame over memory the CPU rewrites every frame, which otherwise faults 61,000 times
-a second.
+jersey font was rendered. #65's check is a fingerprint, 256 bytes at the start of each of the first
+16 pages, taken after each resolve (or once its writeback has landed). The new picture could match it
+by chance, since both images are mostly empty, so the font sheet stayed in some sessions (#114). So
+a lookup also watches a *stale* image: once its last resolve is 30 frames ago, its pages are
+protected, all but a last one that another allocation may share. A later lookup that finds one of
+them written drops the image, and the texture reads the guest's memory. Images resolved (nearly)
+every frame are never watched: they are new each time, and a write fault costs the game's thread
+about 90 µs. Watching every image used as a texture (#117) took 4,800 faults a second in a menu and
+caused dips to 40 fps in matches at 60 fps (#119). The jersey font sheet is rendered once, when the
+match loads. Like a texture that keeps changing, an image whose memory the game writes between one
+resolve and the next, four times in a row, goes back to the fingerprint for 300 frames, then 600,
+and so on. `release()`, used when a writeback lands over watched pages, unprotects runs of pages
+with one `mprotect` per view instead of one per page.
 
 ## Shader disassembler
 `./build/xenos-disasm captures/shaders` (files or directories, searched recursively) prints a
