@@ -48,6 +48,15 @@ their guest address, and the presenter shows the image resolved to the front buf
   stored as 8_8_8_8. The game draws the same tiles as 2_10_10_10_FLOAT and as
   2_10_10_10_FLOAT_AS_16_16_16_16 several times a frame; with an image for each, every switch was an
   EDRAM transfer (#121: 1.5 ms of GPU time a frame in the rain at resolution scale 2).
+- A draw that writes every sample of a tile skips the transfer of that tile (#121). D3D clears a
+  target by drawing one rectangle into a 4x MSAA view of the same tiles at a quarter of the pixels,
+  with depth and stencil forced, so what the tiles held before the clear does not matter. The draw
+  qualifies when it is one screen-aligned rectangle (its covered pixels are known from the vertex
+  data), every sample passes (no depth or stencil test that can fail, alpha test, alpha to coverage
+  or kill), and for each target: all four color channels written with blending off, or depth
+  written with the test always passing and all 8 stencil bits replaced. Tiles only partly covered
+  are transferred as before. In the rain at scale 2 this skips about 300,000 of 1.1 million tiles a
+  second.
 - Resolves are also written to guest memory (#45), tiled and in the destination's format, by a
   compute shader. The CPU reads some of them: the game's "Stadium texture generator" thread
   renders the field lightmap and compresses the resolved picture to DXT1 itself, so without this

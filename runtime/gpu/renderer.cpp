@@ -130,7 +130,7 @@ namespace gpu::render
                            uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0, chunks = 0,
                                     idleSubmits = 0, asyncFences = 0, asyncWaits = 0, copyInsAroundPending = 0,
                                     hashSkips = 0, passes = 0, barriers = 0, gpuMarksDropped = 0,
-                                    transfers = 0, transferTiles = 0, exportBarriers = 0;
+                                    transfers = 0, transferTiles = 0, exportBarriers = 0, transferTilesSkipped = 0;
                            double hashMs = 0, waitMs = 0, cpWaitMs = 0;
                            std::vector<double> gpuMs;       // BB_GPU_TIME: GPU time by kind of work (see gpuMark)
                            std::vector<uint32_t> gpuSpans;  // how many stretches of each kind
@@ -366,6 +366,10 @@ void main() {
             uint32_t edramBase = 0, edramPitch = 0;
             bool edramDepth = false;
             uint32_t edramFormat = 0; // xenos::ColorRenderTargetFormat, or xenos::DepthRenderTargetFormat for depth
+            // EDRAM targets: it owned every tile of ownedRect (guest pixels) when tile ownership was at
+            // generation ownedGen (see g_ownerGen)
+            VkRect2D ownedRect{};
+            uint64_t ownedGen = 0;
         };
 
         Image createImage(VkImageType type, VkImageViewType viewType, VkFormat format, uint32_t w, uint32_t h, uint32_t depth,
@@ -1019,6 +1023,22 @@ void main() {
         // each sample goes through the bits EDRAM would hold.
 
         Image* g_owner[2048] = {};
+        // Counts changes of tile ownership to another image. A target that owned every tile of a
+        // rectangle at the current generation still does, so the next draw inside it needs neither
+        // a transfer check nor an ownership update: a pass draws thousands of times into the same
+        // targets, and walking their tiles for each draw was a tenth of the renderer thread (#121).
+        uint64_t g_ownerGen = 1;
+        bool ownsAll(const Image& t, VkRect2D r)
+        {
+            const VkRect2D& o = t.ownedRect;
+            return t.ownedGen == g_ownerGen && r.offset.x >= o.offset.x && r.offset.y >= o.offset.y &&
+                   r.offset.x + int64_t(r.extent.width) <= o.offset.x + int64_t(o.extent.width) &&
+                   r.offset.y + int64_t(r.extent.height) <= o.offset.y + int64_t(o.extent.height);
+        }
+        void setOwner(uint32_t tile, Image* t)
+        {
+            if (g_owner[tile] != t) { g_owner[tile] = t; g_ownerGen++; }
+        }
 
         struct EdramLayout { uint32_t sx, sy, tileSamplesX, tilesPerRow; };
         EdramLayout edramLayout(const Image& t)
@@ -1050,7 +1070,10 @@ void main() {
 
         void markWritten(Image* t, VkRect2D r)
         {
-            if (t && t->edram) forEachTile(*t, r, [&](uint32_t tile) { g_owner[tile] = t; });
+            if (!t || !t->edram || !r.extent.width || !r.extent.height || ownsAll(*t, r)) return;
+            forEachTile(*t, r, [&](uint32_t tile) { setOwner(tile, t); });
+            t->ownedRect = r;
+            t->ownedGen = g_ownerGen;
         }
 
         const char* kTransferVs = R"(#version 450
@@ -1455,14 +1478,32 @@ void main() {
             return { { x0, y0 }, { uint32_t(x1 - x0), uint32_t(y1 - y0) } };
         }
 
-        // Before target t is used inside guest rectangle r: bring in tiles another image wrote last
-        void syncTarget(Image* t, VkRect2D r)
+        // Before target t is used inside guest rectangle r: bring in tiles another image wrote last,
+        // except those entirely inside `overwritten`, which the draw about to use t writes every
+        // sample of (see overwriteRect)
+        void syncTarget(Image* t, VkRect2D r, VkRect2D overwritten = {})
         {
-            if (!t || !t->edram) return;
+            if (!t || !t->edram || ownsAll(*t, r)) return;
             std::map<Image*, std::array<uint32_t, 64>> masks;
+            bool allOwned = true; // by t once the transfers are done: then the next draws inside r skip all this
+            EdramLayout l = edramLayout(*t);
+            int32_t tw = int32_t(l.tileSamplesX / l.sx), th = int32_t(16 / l.sy); // tile size in pixels
             forEachTile(*t, r, [&](uint32_t tile) {
                 Image* o = g_owner[tile];
-                if (o && o != t) masks[o][tile >> 5] |= 1u << (tile & 31);
+                if (o == t) return;
+                if (!o) { allOwned = false; return; }
+                if (overwritten.extent.width)
+                {
+                    int32_t rel = int32_t(tile - t->edramBase), x = rel % int32_t(l.tilesPerRow) * tw, y = rel / int32_t(l.tilesPerRow) * th;
+                    if (x >= overwritten.offset.x && y >= overwritten.offset.y && x + tw <= overwritten.offset.x + int32_t(overwritten.extent.width) &&
+                        y + th <= overwritten.offset.y + int32_t(overwritten.extent.height))
+                    {
+                        g_perf.transferTilesSkipped++;
+                        allOwned = false;
+                        return;
+                    }
+                }
+                masks[o][tile >> 5] |= 1u << (tile & 31);
             });
             for (auto& [owner, mask] : masks)
             {
@@ -1479,7 +1520,12 @@ void main() {
                 }
                 transfer(*owner, *t, mask.data(), tilesRect(*t, mask.data()));
                 for (uint32_t tile = 0; tile < 2048; tile++)
-                    if ((mask[tile >> 5] >> (tile & 31)) & 1) g_owner[tile] = t;
+                    if ((mask[tile >> 5] >> (tile & 31)) & 1) setOwner(tile, t);
+            }
+            if (allOwned && r.extent.width && r.extent.height)
+            {
+                t->ownedRect = r;
+                t->ownedGen = g_ownerGen;
             }
         }
 
@@ -2782,7 +2828,10 @@ void main()
         // rectangle of the target's size, but with nothing else bounding it the draw would own every
         // EDRAM tile from its base, and transfer them all in first. As Xenia's DrawExtentEstimator
         // (execute_unclipped_draw_vs_on_cpu), with the position math of the translated shaders.
-        bool vertexBounds(const DrawState& s, const PositionFetch& p, VkRect2D& out)
+        // The draw's vertex positions in pixel space as the host draws it (window offset, Direct3D's
+        // pixel centers at .0), when the vertex shader passes them through from vertex data: their
+        // bounding box (x0, y0, x1, y1), and whether every vertex is one of its corners
+        bool vertexBox(const DrawState& s, const PositionFetch& p, float box[4], bool* allCorners = nullptr)
         {
             bool area = s.primitive == 4 || s.primitive == 5 || s.primitive == 6 || s.primitive == 8 || s.primitive == 13 || s.primitive == 14;
             if (!p.valid || !s.clipDisable || !area || s.indexSource != 2 || !s.indexCount || s.indexCount > 64) return false;
@@ -2792,7 +2841,7 @@ void main()
             uint32_t d0 = readRegister(kFetchConstants + p.slot * 2), d1 = readRegister(kFetchConstants + p.slot * 2 + 1);
             uint64_t baseDw = d0 >> 2, sizeDw = (d1 >> 2) & 0xFFFFFF;
             uint32_t endian = d1 & 3;
-            float x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
+            float x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY, xs[4]{}, ys[4]{};
             for (uint32_t i = 0; i < s.indexCount; i++)
             {
                 int64_t at = (int64_t(i) + s.indexOffset) * p.stride + p.offset;
@@ -2813,13 +2862,41 @@ void main()
                 x = x * s.vpScale[0] + s.vpOffset[0], y = y * s.vpScale[1] + s.vpOffset[1];
                 if (!std::isfinite(x) || !std::isfinite(y)) return false;
                 x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+                if (i < 4) xs[i] = x, ys[i] = y;
             }
-            // Pixel space as the host draws it (window offset, Direct3D's pixel centers at .0), one
-            // pixel of margin on every side
+            if (allCorners)
+            {
+                *allCorners = s.indexCount <= 4;
+                for (uint32_t i = 0; i < s.indexCount && i < 4; i++)
+                    if ((xs[i] != x0 && xs[i] != x1) || (ys[i] != y0 && ys[i] != y1)) *allCorners = false;
+            }
             float ox = s.vertexWindowOffset ? float(s.windowOffsetX) : 0.0f, oy = s.vertexWindowOffset ? float(s.windowOffsetY) : 0.0f;
             if (!s.pixelCenterHalf) ox += 0.5f, oy += 0.5f;
-            int32_t ix0 = int32_t(std::max(std::floor(x0 + ox) - 1.0f, 0.0f)), iy0 = int32_t(std::max(std::floor(y0 + oy) - 1.0f, 0.0f));
-            int32_t ix1 = int32_t(std::min(std::ceil(x1 + ox) + 1.0f, 8192.0f)), iy1 = int32_t(std::min(std::ceil(y1 + oy) + 1.0f, 8192.0f));
+            box[0] = x0 + ox, box[1] = y0 + oy, box[2] = x1 + ox, box[3] = y1 + oy;
+            return true;
+        }
+
+        // Pixels the draw may touch: its vertices' bounding box, one pixel of margin on every side
+        bool vertexBounds(const DrawState& s, const PositionFetch& p, VkRect2D& out)
+        {
+            float b[4];
+            if (!vertexBox(s, p, b)) return false;
+            int32_t ix0 = int32_t(std::max(std::floor(b[0]) - 1.0f, 0.0f)), iy0 = int32_t(std::max(std::floor(b[1]) - 1.0f, 0.0f));
+            int32_t ix1 = int32_t(std::min(std::ceil(b[2]) + 1.0f, 8192.0f)), iy1 = int32_t(std::min(std::ceil(b[3]) + 1.0f, 8192.0f));
+            if (ix1 <= ix0 || iy1 <= iy0) return false;
+            out = { { ix0, iy0 }, { uint32_t(ix1 - ix0), uint32_t(iy1 - iy0) } };
+            return true;
+        }
+
+        // Pixels a single screen-aligned rectangle (a rectangle list of one: three of its corners)
+        // covers with every sample: those entirely inside it
+        bool coveredRect(const DrawState& s, const PositionFetch& p, VkRect2D& out)
+        {
+            float b[4];
+            bool corners = false;
+            if (s.primitive != 8 || s.indexCount != 3 || !vertexBox(s, p, b, &corners) || !corners) return false;
+            int32_t ix0 = int32_t(std::max(std::ceil(b[0]), 0.0f)), iy0 = int32_t(std::max(std::ceil(b[1]), 0.0f));
+            int32_t ix1 = int32_t(std::min(std::floor(b[2]), 8192.0f)), iy1 = int32_t(std::min(std::floor(b[3]), 8192.0f));
             if (ix1 <= ix0 || iy1 <= iy0) return false;
             out = { { ix0, iy0 }, { uint32_t(ix1 - ix0), uint32_t(iy1 - iy0) } };
             return true;
@@ -3452,6 +3529,33 @@ void main()
             }
         }
 
+        // Which of the draw's targets it writes every sample of, whatever they held, wherever it
+        // covers (#121). D3D clears a target by drawing one rectangle into a 4x MSAA view of the
+        // same tiles at a quarter of the pixels, depth and stencil forced, and the next user of the
+        // tiles has them transferred over. The transfer *into* that view, of what the tiles held
+        // before the clear, was half of the EDRAM transfer time. A color target qualifies when every
+        // sample passes (no depth or stencil test that can fail, no alpha test, alpha to coverage or
+        // kill), all four channels are written and blending is off; the depth target when depth is
+        // written with the test always passing and stencil is replaced, all 8 bits.
+        bool overwriteRect(const DrawState& s, const Shader& vs, const Shader& ps, Image* const color[4], Image* depth, bool colorOut[4],
+                           bool& depthOut)
+        {
+            constexpr uint32_t kAlways = VK_COMPARE_OP_ALWAYS, kReplace = VK_STENCIL_OP_REPLACE;
+            if (s.primitive != 8 || s.indexCount != 3 || s.cullFront || s.cullBack || s.polyMode || ps.t.kills || s.alphaToMask ||
+                (s.alphaTest && s.alphaFunc != kAlways) || !vs.t.position.valid)
+                return false;
+            auto stencilReplaces = [&](const StencilFace& f) { return f.func == kAlways && f.zpass == kReplace && (f.writeMask & 0xFF) == 0xFF; };
+            bool stencilPasses = !s.stencil || (s.front.func == kAlways && (!s.stencilBackface || s.back.func == kAlways));
+            bool allPass = !depth || ((!s.depthTest || s.depthFunc == kAlways) && stencilPasses);
+            bool any = false;
+            for (int i = 0; i < 4; i++)
+                if (color[i] && allPass && (s.color[i].writeMask & 15) == 15 && !s.color[i].blend.enabled()) colorOut[i] = any = true;
+            if (depth && allPass && s.depthTest && s.depthWrite && s.depthFunc == kAlways && s.stencil && stencilReplaces(s.front) &&
+                (!s.stencilBackface || stencilReplaces(s.back)))
+                depthOut = any = true;
+            return any;
+        }
+
         // Guest indices for this draw, byte-swapped into the upload buffer (32-bit when expanded)
         struct IndexBuffer
         {
@@ -3798,7 +3902,14 @@ void main()
                 VkRect2D vertices;
                 if (vertexBounds(s, vs->t.position, vertices) && !intersect(edramRect, vertices, edramRect))
                     edramRect = { { 0, 0 }, { 0, 0 } }; // drawn outside the scissor: touches nothing
-                for (Image* t : { color[0], color[1], color[2], color[3], depth }) syncTarget(t, edramRect); // EDRAM aliasing
+                // EDRAM aliasing, except where this draw replaces every sample anyway
+                VkRect2D covered{};
+                bool colorOverwritten[4]{}, depthOverwritten = false;
+                if (overwriteRect(s, *vs, *ps, color, depth, colorOverwritten, depthOverwritten) && coveredRect(s, vs->t.position, covered) &&
+                    !intersect(covered, guestScissor, covered))
+                    covered = {};
+                for (int i = 0; i < 4; i++) syncTarget(color[i], edramRect, colorOverwritten[i] ? covered : VkRect2D{});
+                syncTarget(depth, edramRect, depthOverwritten ? covered : VkRect2D{});
             }
 
             g_exportBatching = memExport && g_exportBarrierPending && !exportsOverlapPending(exportRanges);
@@ -4176,9 +4287,10 @@ void main()
                             parts += b;
                         }
                         info("[perf]   GPU time: busy %.0f ms, between submits %.0f ms; %llu passes, %llu barriers (+%llu after memory export), "
-                             "%llu EDRAM transfers (%llu tiles)%s | %s",
+                             "%llu EDRAM transfers (%llu tiles, %llu more skipped: overwritten)%s | %s",
                              busy, p.gpuMs.size() > kGpuIdle ? p.gpuMs[kGpuIdle] : 0.0, (unsigned long long)p.passes, (unsigned long long)p.barriers,
                              (unsigned long long)p.exportBarriers, (unsigned long long)p.transfers, (unsigned long long)p.transferTiles,
+                             (unsigned long long)p.transferTilesSkipped,
                              p.gpuMarksDropped ? " (timestamps dropped: frame too long)" : "", parts.empty() ? "-" : parts.c_str());
                         if (!p.callsBy.empty())
                         {

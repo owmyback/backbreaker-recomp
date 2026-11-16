@@ -43,6 +43,7 @@ namespace gpu
         uint32_t textureSlots = 0;   // bit N set: uses texture fetch constant slot N
         uint32_t textureDims[32]{};  // per used slot: 0 1D, 1 2D, 2 3D, 3 cube
         bool writesDepth = false;
+        bool kills = false;          // pixel shaders: may discard (kill instructions)
         // Memory export (eA / eM0-4): the shader writes guest memory through set 0 binding 4.
         // memExportStreams: float constants used as stream constants (`mad eA, r#, const0100, c#`)
         bool memExport = false;

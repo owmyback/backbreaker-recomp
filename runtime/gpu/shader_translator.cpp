@@ -297,6 +297,7 @@ void xeMemExportFlush() {
                     {
                         static const char* cmp[4] = { "equal", "greaterThan", "greaterThanEqual", "notEqual" };
                         emit(std::string("if (any(") + cmp[vop - 24] + "(" + s1 + ", " + s2 + "))) discard;");
+                        out.kills = true;
                         e = "vec4(0.0)";
                         break;
                     }
@@ -386,10 +387,11 @@ void xeMemExportFlush() {
                     {
                         static const char* cmp[4] = { "==", ">", ">=", "!=" };
                         emit("if (" + x + " " + cmp[sop - 35] + " 0.0) discard;");
+                        out.kills = true;
                         e = "0.0";
                         break;
                     }
-                    case 39: emit("if (" + x + " == 1.0) discard;"); e = "0.0"; break;     // kills_one
+                    case 39: emit("if (" + x + " == 1.0) discard;"); e = "0.0"; out.kills = true; break; // kills_one
                     case 40: e = "sqrt(" + x + ")"; break;
                     case 42: case 43: e = "mul0(" + x + ", " + y + ")"; break; // mulsc
                     case 44: case 45: e = x + " + " + y; break;               // addsc
