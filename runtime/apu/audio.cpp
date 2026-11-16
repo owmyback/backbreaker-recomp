@@ -12,6 +12,7 @@
 // Signatures follow Xenia's xboxkrnl_audio.cc; the frame layout is in frame_convert.h.
 #include "apu.h"
 #include "frame_convert.h"
+#include "system_sound.h"
 #include "../kernel/import_support.h"
 #include "../kernel/objects.h"
 #include "../log.h"
@@ -22,9 +23,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace mem;
 
@@ -62,6 +65,77 @@ namespace
     std::mutex g_statsLock;
     float g_peak[apu::frame::kChannels] = {};
     double g_energy[apu::frame::kChannels] = {};
+
+    // ---- the runtime's own sounds (the unlock chime, #105), mixed over the game's ----
+    std::vector<float> g_chime;            // made once, before the game starts (initAudio)
+    std::atomic<int64_t> g_chimePos{-1};   // next sample to play, -1 = silent
+
+    // Adds the next 256 samples of the chime to FL/FR of the host buffers that this frame
+    // produces (channels = 2 or 6, interleaved). A restart from another thread wins over the
+    // advance (compare-exchange).
+    // A sound of the player's own replaces the chime: game/sounds/achievement.wav (any WAV SDL
+    // reads; gitignored with the rest of game/, never committed). Converted to 48 kHz mono float
+    // and scaled to the chime's peak, so it sits at the same level over the game. At most 10 s.
+    bool loadUserUnlockSound(const char* path)
+    {
+        SDL_AudioSpec spec{};
+        Uint8* data = nullptr;
+        Uint32 length = 0;
+        if (!SDL_LoadWAV(path, &spec, &data, &length))
+            return false; // no file (the usual case) or not a WAV SDL reads
+        const SDL_AudioSpec want{ SDL_AUDIO_F32, 1, int(kRate) };
+        Uint8* out = nullptr;
+        int outLength = 0;
+        bool ok = SDL_ConvertAudioSamples(&spec, data, int(length), &want, &out, &outLength);
+        SDL_free(data);
+        if (!ok)
+        {
+            warn("[apu] %s: could not convert it: %s", path, SDL_GetError());
+            return false;
+        }
+        size_t n = std::min<size_t>(size_t(outLength) / sizeof(float), size_t(kRate) * 10);
+        std::vector<float> sound(reinterpret_cast<float*>(out), reinterpret_cast<float*>(out) + n);
+        SDL_free(out);
+        float peak = 0;
+        for (float v : sound) peak = std::max(peak, std::fabs(v));
+        if (n == 0 || peak <= 0)
+        {
+            warn("[apu] %s is silent: keeping the built-in chime", path);
+            return false;
+        }
+        for (float& v : sound) v *= apu::sound::kChimePeak / peak;
+        g_chime = std::move(sound);
+        info("[apu] unlock sound: %s (%.2f s, %d Hz %d ch in the file)", path, double(n) / kRate, spec.freq, spec.channels);
+        return true;
+    }
+
+    // Adds the unlock sound to a frame and turns the game down under it (sound::duckGain), from
+    // its start until the ducking has come back up after it.
+    void mixChime(float* stereo, float* six)
+    {
+        int64_t pos = g_chimePos.load(std::memory_order_acquire);
+        if (pos < 0 || g_chime.empty()) return;
+        for (uint32_t i = 0; i < apu::frame::kSamples; i++)
+        {
+            size_t s = size_t(pos) + i;
+            float v = s < g_chime.size() ? g_chime[s] : 0.0f;
+            float g = apu::sound::duckGain(s, g_chime.size(), kRate);
+            if (stereo)
+            {
+                stereo[i * 2] = stereo[i * 2] * g + v;
+                stereo[i * 2 + 1] = stereo[i * 2 + 1] * g + v;
+            }
+            if (six)
+            {
+                for (uint32_t c = 0; c < apu::frame::kChannels; c++) six[i * apu::frame::kChannels + c] *= g;
+                six[i * apu::frame::kChannels + apu::frame::FL] += v;
+                six[i * apu::frame::kChannels + apu::frame::FR] += v;
+            }
+        }
+        const int64_t span = int64_t(g_chime.size() + apu::sound::duckTail(kRate));
+        int64_t next = pos + apu::frame::kSamples >= span ? -1 : pos + apu::frame::kSamples;
+        g_chimePos.compare_exchange_strong(pos, next);
+    }
 
     // ---- WAV dump: stereo 32-bit float, the stereo downmix of every submitted frame ----
     std::mutex g_dumpLock;
@@ -264,8 +338,26 @@ namespace apu
         g_dumpPath = dumpPath;
     }
 
+    void playUnlockSound()
+    {
+        g_chimePos.store(0, std::memory_order_release);
+        info("[apu] unlock sound");
+    }
+
     void initAudio()
     {
+        if (!loadUserUnlockSound("game/sounds/achievement.wav"))
+            g_chime = sound::unlockChime(kRate);
+        // Debug aid: BB_DEBUG_CHIME=<seconds> plays the unlock sound at that time (checks the mix
+        // in an --audio-dump without earning an achievement)
+        if (const char* at = std::getenv("BB_DEBUG_CHIME"))
+        {
+            double seconds = std::atof(at);
+            std::thread([seconds] {
+                std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+                apu::playUnlockSound();
+            }).detach();
+        }
         if (!g_dumpPath.empty())
         {
             g_dump = std::fopen(g_dumpPath.c_str(), "wb");
@@ -366,19 +458,19 @@ GUEST_IMPORT(XAudioSubmitRenderDriverFrame)
     g_submitted++;
     accumulate(frame);
     float stereo[apu::frame::kSamples * 2];
-    bool needStereo = g_dump || g_streamChannels == 2;
+    float six[apu::frame::kSamples * apu::frame::kChannels];
+    bool needStereo = g_dump || g_streamChannels == 2, needSix = g_stream && g_streamChannels == 6;
     if (needStereo)
         apu::frame::toStereo(frame, stereo);
+    if (needSix)
+        apu::frame::toInterleaved6(frame, six);
+    mixChime(needStereo ? stereo : nullptr, needSix ? six : nullptr);
     if (g_stream)
     {
         if (g_streamChannels == 2)
             SDL_PutAudioStreamData(g_stream, stereo, sizeof(stereo));
         else
-        {
-            float six[apu::frame::kSamples * apu::frame::kChannels];
-            apu::frame::toInterleaved6(frame, six);
             SDL_PutAudioStreamData(g_stream, six, sizeof(six));
-        }
     }
     if (g_dump)
         dumpFrame(stereo);

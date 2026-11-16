@@ -655,8 +655,10 @@ What the game provides (checked 2026-11-13):
 Status: parts 1 and 2 are done (#97, `1a59660`): the SPA reader (`runtime/kernel/spa.h`,
 tested), the unlock path with a per-machine store (`game/achievements/`), the enumerator, and
 `--achievements`. Confirmed in play: "First of Many" and "Quarter Pounder" unlocked, stored and
-listed. Parts 3-5 (#101): the overlay (`runtime/video/overlay.cpp`), the achievements list on F1 /
-Guide, and the unlock pop-up. See docs/runtime.md, "Achievements".
+listed. Parts 3-5 (#101, `83fce76`): the overlay (`runtime/video/overlay.cpp`), the achievements
+list on F1 / Guide, and the unlock pop-up, tested in the window. #105: simultaneous unlocks take
+turns in the pop-up, and each plays a synthesized unlock sound. See docs/runtime.md,
+"Achievements".
 
 Planned parts:
 1. Database reader: parse the XDBF resource (achievements, strings, images) from the loaded

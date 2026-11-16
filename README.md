@@ -95,6 +95,11 @@ table, UTF-8 to UTF-16, and blobs that are cut short or claim more than they hol
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/spa_test.cpp -o build/spa_test && build/spa_test
 
+The unlock sound (`runtime/apu/system_sound.h`, issue #105) is synthesized, so its length, peak,
+silent ends and note order are checked directly:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/system_sound_test.cpp -o build/system_sound_test && build/system_sound_test
+
 The PNG writer (`runtime/debug/png.cpp`, issue #76) is checked by writing images and reading them
 back: chunk framing and CRC-32, the IHDR fields, the IDAT zlib stream and its Adler-32, and every
 pixel. It links zlib to do the inflating (`zlib1g-dev` on Ubuntu, `zlib-devel` on Fedora), so it

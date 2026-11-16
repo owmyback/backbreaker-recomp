@@ -316,8 +316,24 @@ the game does not even import `XamShowAchievementsUI`. The runtime draws one ins
   Up/Down (d-pad, left stick or arrow keys) moves, LB/RB or PgUp/PgDn a page, Home/End; B, Back,
   Esc, F1 or Guide closes it. While it is open the game sees a neutral controller (scripted
   `--press` input still goes through).
-- An unlock shows an "Achievement unlocked" pop-up (icon, name, gamerscore) for 6 s, at the top of
-  the screen, or at the bottom of the list when the list is open.
+- An unlock shows an "Achievement unlocked" pop-up (icon, name, gamerscore) for 5 s, at the top of
+  the screen, or at the bottom of the list when the list is open, with the unlock sound. Several
+  unlocks at once take turns, and the pop-up says how many more are waiting (#105).
+- The unlock sound is the runtime's own (the console's belonged to the dashboard, not the game): a
+  short (0.45 s) bright "pip-pop" synthesized in `runtime/apu/system_sound.h`: a soft B5 pickup,
+  then an E6 tone that glides up into pitch over a quiet shimmer. It is in the spirit of the
+  console's sound (short, bright, rising) but its own notes and shape. Peak -4.4 dBFS,
+  mixed into the front channels of the game's audio output (device and `--audio-dump`).
+- The game is turned down 10 dB under the sound (ducking: down over 15 ms, back up over 0.3 s
+  after the sound ends, about 0.75 s in all). In play the game runs at about -18 dB RMS and
+  reaches -10 dB under a touchdown crowd, which buried the sound when it was simply added on top;
+  ducked, it sits 7-8 dB over the game and the mix stays under 0 dBFS.
+  `BB_DEBUG_CHIME=<seconds>` plays it at that time in any run, to check it in a dump.
+- A sound of your own replaces the chime: put it at `game/sounds/achievement.wav` (any WAV that
+  SDL reads; `ffmpeg -i <your file> game/sounds/achievement.wav` converts other formats). It is
+  converted to 48 kHz mono and scaled to the chime's peak, and cut at 10 s; the game is ducked under
+  it the same way. The log says which
+  sound is in use (`[apu] unlock sound: ...`). Like everything under `game/`, it is never committed.
 - F12 screenshots include what the overlay shows.
 - `--overlay-preview <file.png>[@WxH]` draws the list and a pop-up over a grey backdrop into a PNG
   (default 1920x1080) and exits: the drawing can be checked without a window or a GPU.

@@ -7,6 +7,7 @@
 // with format conversion). No extra submits, waits or allocations per present.
 #include "overlay.h"
 #include "vk_context.h"
+#include "../apu/apu.h"
 #include "../hid/hid.h"
 #include "../kernel/kernel.h"
 #include "../log.h"
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -27,7 +29,7 @@ namespace overlay
     namespace
     {
         using clock = std::chrono::steady_clock;
-        constexpr double kToastSeconds = 6.0;
+        constexpr double kToastSeconds = 5.0; // each pop-up; several unlocks at once take turns
         constexpr uint16_t kUp = 0x0001, kDown = 0x0002, kBack = 0x0020, kLb = 0x0100, kRb = 0x0200, kB = 0x2000, kGuide = 0x0400;
 
         // ---- what is shown ----
@@ -38,6 +40,7 @@ namespace overlay
         bool g_toast = false;
         clock::time_point g_toastUntil;
         kernel::AchievementView g_toastItem;
+        std::deque<kernel::AchievementView> g_toastQueue; // unlocks waiting for their pop-up
         bool g_dirty = true;
 
         // ---- CPU drawing ----
@@ -262,7 +265,9 @@ namespace overlay
             const int s = g_scale, small = std::max(1, s - 1);
             const float glyph = 8.0f * s;
             const float h = glyph * 4.2f, iconSize = h - glyph * 1.2f;
-            const std::string title = "ACHIEVEMENT UNLOCKED";
+            std::string title = "ACHIEVEMENT UNLOCKED";
+            if (!g_toastQueue.empty())
+                title += "   +" + std::to_string(g_toastQueue.size()) + " more";
             char line[160];
             std::snprintf(line, sizeof(line), "%s  -  %u G", ascii(g_toastItem.label).c_str(), g_toastItem.gamerscore);
             const float contentW = std::max(textWidth(title, small), textWidth(line, s));
@@ -315,24 +320,36 @@ namespace overlay
             SDL_FlushRenderer(g_sw);
         }
 
+        // New unlocks join the queue; the pop-up shows them one after another, each with the chime.
         void updateToast()
         {
             uint64_t n = kernel::achievementUnlockCount();
             if (n != g_seenUnlocks)
             {
+                std::vector<uint16_t> ids = kernel::unlockedSince(g_seenUnlocks);
                 g_seenUnlocks = n;
-                uint16_t id = kernel::lastUnlockedAchievement();
                 refreshList();
-                for (auto& a : g_list)
-                    if (a.id == id) g_toastItem = a;
-                g_toast = true;
-                g_toastUntil = clock::now() + std::chrono::milliseconds(int(kToastSeconds * 1000));
-                g_dirty = true;
+                for (uint16_t id : ids)
+                    for (auto& a : g_list)
+                        if (a.id == id) g_toastQueue.push_back(a);
+                g_dirty = true; // the list (if open) shows them as unlocked, the pop-up its "+N more"
             }
-            else if (g_toast && clock::now() >= g_toastUntil)
+            const auto now = clock::now();
+            if (g_toast && now >= g_toastUntil)
             {
                 g_toast = false;
                 g_dirty = true; // the list under it (if open) needs drawing again
+            }
+            if (!g_toast && !g_toastQueue.empty())
+            {
+                g_toastItem = g_toastQueue.front();
+                g_toastQueue.pop_front();
+                g_toast = true;
+                g_toastUntil = now + std::chrono::milliseconds(int(kToastSeconds * 1000));
+                g_dirty = true;
+                apu::playUnlockSound();
+                info("[overlay] pop-up: %s (%u G)%s", g_toastItem.label.c_str(), g_toastItem.gamerscore,
+                     g_toastQueue.empty() ? "" : (", " + std::to_string(g_toastQueue.size()) + " more waiting").c_str());
             }
         }
 
@@ -512,7 +529,9 @@ namespace overlay
         for (size_t i = 0; i < g_list.size(); i++)
             if (g_list[i].unlocked) { g_selected = int(i); break; }
         g_toast = !g_list.empty();
+        g_toastQueue.clear();
         if (g_toast) g_toastItem = g_list[size_t(g_selected)];
+        if (g_list.size() > 1) g_toastQueue.push_back(g_list[0]); // shows "+1 more"
         draw(width, height, true);
         bool ok = SDL_SavePNG(g_surface, path);
         if (!ok) warn("[overlay] could not write %s: %s", path, SDL_GetError());

@@ -22,4 +22,8 @@ namespace apu
     void configureAudio(bool device, const std::string& dumpPath);
     void initAudio();
     void printAudioSummary(); // exit report: frame counts, underruns, per-channel levels
+
+    // The runtime's unlock chime (#105), mixed over the game's audio from the next frame on; any
+    // thread. Restarts it if it is already playing.
+    void playUnlockSound();
 }

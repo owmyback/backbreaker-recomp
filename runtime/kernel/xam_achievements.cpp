@@ -53,7 +53,7 @@ namespace
     std::map<uint16_t, uint64_t> g_unlocked; // achievement id -> unlock time (unix seconds)
     const uint8_t* g_spaBlob = nullptr;      // the SPA in the loaded image (for its PNG icons)
     std::atomic<uint64_t> g_unlockCount{0};  // new unlocks this run (the overlay's pop-up polls it)
-    uint16_t g_lastUnlocked = 0;
+    std::vector<uint16_t> g_unlockOrder;     // their ids, in the order they came (g_lock)
 
     fs::path storePath()
     {
@@ -155,7 +155,7 @@ namespace
         if (g_unlocked.count(uint16_t(id)))
             return; // already earned; the game reports some again
         g_unlocked[uint16_t(id)] = uint64_t(std::time(nullptr));
-        g_lastUnlocked = uint16_t(id);
+        g_unlockOrder.push_back(uint16_t(id));
         g_unlockCount.fetch_add(1, std::memory_order_release);
         saveStore();
         info("[xam] achievement unlocked: %s (%u G)", a->label.c_str(), a->gamerscore);
@@ -251,10 +251,11 @@ namespace kernel
 
     uint64_t achievementUnlockCount() { return g_unlockCount.load(std::memory_order_acquire); }
 
-    uint16_t lastUnlockedAchievement()
+    std::vector<uint16_t> unlockedSince(uint64_t index)
     {
         std::lock_guard guard(g_lock);
-        return g_lastUnlocked;
+        if (index >= g_unlockOrder.size()) return {};
+        return std::vector<uint16_t>(g_unlockOrder.begin() + std::ptrdiff_t(index), g_unlockOrder.end());
     }
 
     // --achievements: the list with what is earned, on stdout (the game has no screen for it;

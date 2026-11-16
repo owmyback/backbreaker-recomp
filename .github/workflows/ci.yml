@@ -81,6 +81,12 @@ jobs:
       - name: Run SPA parser test
         run: ./build/spa_test
 
+      - name: Build unlock sound test (header-only)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/system_sound_test.cpp -o build/system_sound_test
+
+      - name: Run unlock sound test
+        run: ./build/system_sound_test
+
       - name: Build XMA context test (header-only, synthetic packets, no decoder)
         run: clang++ -std=c++20 -Wall -Wextra -O2 tests/xma_context_test.cpp -o build/xma_context_test
 

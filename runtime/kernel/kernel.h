@@ -33,8 +33,8 @@ namespace kernel
         uint32_t imageSize = 0;
     };
     std::vector<AchievementView> achievementList();
-    uint64_t achievementUnlockCount();  // new unlocks so far this run (cheap: an atomic)
-    uint16_t lastUnlockedAchievement(); // id of the most recent one
+    uint64_t achievementUnlockCount();                 // new unlocks so far this run (cheap: an atomic)
+    std::vector<uint16_t> unlockedSince(uint64_t index); // ids of this run's unlocks from that index on, in order
     const std::string& savesRoot();
     // Runtime mounts, used by XAM content packages: device path prefix such as
     // "\Device\Content\1" -> host directory, and symbolic links such as "save:" -> device path.
