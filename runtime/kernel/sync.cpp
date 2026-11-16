@@ -55,11 +55,22 @@ GUEST_IMPORT(KeTlsAlloc)
     ctx.r3.u64 = 0xFFFFFFFF;
 }
 
+// Frees the slot and zeroes it in every thread, as Windows' TlsFree does (and Xenia's
+// KernelState::FreeTLS): KeTlsAlloc hands the same index out again, and code takes 0 to mean "not
+// set up on this thread yet". The game frees four slots when it leaves a match and allocates them
+// again at the next match load; with the old values still there, the main thread got the first
+// match's freed profiler data back (sub_8246D088 creates it only when the slot reads 0) and
+// crashed on its empty entry list.
 GUEST_IMPORT(KeTlsFree)
 {
-    std::lock_guard guard(g_tlsLock);
-    if (ctx.r3.u32 < 64)
-        g_tlsUsed &= ~(1ull << ctx.r3.u32);
+    std::lock_guard guard(g_tlsLock); // held until the slot is clear: no KeTlsAlloc takes it before
+    uint32_t i = ctx.r3.u32;
+    if (i < 64)
+    {
+        for (kernel::GuestThread* t : kernel::allThreads())
+            write32(t->tlsSlots + i * 4, 0);
+        g_tlsUsed &= ~(1ull << i);
+    }
     ctx.r3.u64 = 1;
 }
 
