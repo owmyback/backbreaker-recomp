@@ -55,7 +55,7 @@ namespace gpu::render
     namespace
     {
         constexpr uint32_t kAluConstants = 0x4000, kFetchConstants = 0x4800, kBoolConstants = 0x4900, kLoopConstants = 0x4908;
-        constexpr uint32_t RB_COPY_CONTROL = 0x2318, RB_COPY_DEST_BASE = 0x2319, RB_COPY_DEST_PITCH = 0x231A;
+        constexpr uint32_t RB_COPY_CONTROL = 0x2318, RB_COPY_DEST_BASE = 0x2319, RB_COPY_DEST_PITCH = 0x231A, RB_COPY_DEST_INFO = 0x231B;
         constexpr uint32_t RB_DEPTH_CLEAR = 0x231D, RB_COLOR_CLEAR = 0x231E, RB_COLOR_CLEAR_LO = 0x231F, RB_BLEND_RED = 0x2105;
         constexpr uint32_t kFramesInFlight = 2;
         constexpr VkDeviceSize kUploadSize = 96ull << 20; // per frame in flight
@@ -371,6 +371,9 @@ void main() {
             // Resolve destinations: where pixel (0, 0) lives in guest memory, and the pitch and height
             // RB_COPY_DEST_PITCH gave it (the bounds of the writeback to guest memory)
             uint32_t guestBase = 0, guestPitch = 0, guestHeight = 0;
+            // Resolve destinations: bytes per pixel in guest memory, by the destination format (a resolve
+            // converts as it copies: 2 for the crowd's 1_5_5_5 impostor atlas drawn as 8_8_8_8, #55)
+            uint32_t guestBytes = 0;
             // Resolve destinations: what their guest memory was as of the last resolve (and
             // writeback), to notice when the CPU has since put something else there (#63, #114): the
             // write-watch stamp (0 = not watched yet) and a sampled fingerprint for until then
@@ -2009,7 +2012,7 @@ void main()
         bool memRange(const Image& img, uint32_t& start, uint32_t& end)
         {
             if (!img.guestPitch) return false;
-            uint32_t bpp = formatBytes(img.format);
+            uint32_t bpp = img.guestBytes ? img.guestBytes : formatBytes(img.format);
             uint32_t w = std::min(img.width / g_scale, img.guestPitch);
             uint32_t h = img.guestHeight ? std::min(img.height / g_scale, img.guestHeight) : img.height / g_scale;
             if (!bpp || !w || !h) return false;
@@ -2984,7 +2987,8 @@ void main()
 
         // Destination image for a resolve to `destBase`: replaced when the size or format changes
         // (the old one is retired, the presenter may still show it)
-        Image& resolveDestination(uint32_t destBase, uint32_t destPitch, uint32_t destHeight, uint32_t dw, uint32_t dh, VkFormat format)
+        Image& resolveDestination(uint32_t destBase, uint32_t destPitch, uint32_t destHeight, uint32_t dw, uint32_t dh, VkFormat format,
+                                  uint32_t guestBytes)
         {
             auto it = g_resolved.find(destBase);
             if (it != g_resolved.end() && (it->second.width != dw * g_scale || it->second.height != dh * g_scale || it->second.format != format))
@@ -3003,7 +3007,16 @@ void main()
             it->second.guestBase = destBase;
             it->second.guestPitch = destPitch;
             it->second.guestHeight = destHeight;
+            it->second.guestBytes = guestBytes;
             return it->second;
+        }
+
+        // Bytes per pixel of this resolve's destination in guest memory, by its format
+        // (RB_COPY_DEST_INFO), which can be smaller than the EDRAM source's
+        uint32_t resolveDestBytes(VkFormat source)
+        {
+            TextureFormat t = textureFormat((readRegister(RB_COPY_DEST_INFO) >> 7) & 0x3F);
+            return t.blockW == 1 && t.blockH == 1 && t.bytes ? t.bytes : formatBytes(source);
         }
 
         uint32_t formatBytes(VkFormat f)
@@ -3025,17 +3038,20 @@ void main()
         // tile's place inside the same tiled texture. If `destBase` lies inside an existing resolve
         // destination of the same pitch and format, return that image and the tile's position in it:
         // the 32-aligned (x, y) whose tiled offset (Xenia's Tiled2D) is the address difference and
-        // which keeps the `extent` inside the image.
-        Image* resolveInto(uint32_t destBase, uint32_t destPitch, VkFormat format, VkExtent2D extent, VkOffset2D& offset)
+        // which keeps the `extent` inside the image. The offset is in the destination's guest layout,
+        // `bytes` per pixel: the crowd's impostor atlas (#55) is drawn as 8_8_8_8 a row of fans at a
+        // time and resolved as 1_5_5_5, each row 256 KB on, i.e. 128 rows of 2-byte pixels further
+        // down; counted in the image's 4-byte pixels that was 64 rows, and every row of fans landed
+        // on the lower half (the legs) of the one before.
+        Image* resolveInto(uint32_t destBase, uint32_t destPitch, VkFormat format, uint32_t bytes, VkExtent2D extent, VkOffset2D& offset)
         {
-            uint32_t bytes = formatBytes(format);
             if (!bytes || !destPitch) return nullptr;
             auto it = g_resolved.lower_bound(destBase);
             for (int n = 0; n < 4 && it != g_resolved.begin(); n++)
             {
                 --it;
                 Image& img = it->second;
-                if (img.format != format || img.resolvePitch != destPitch) continue;
+                if (img.format != format || img.resolvePitch != destPitch || (img.guestBytes && img.guestBytes != bytes)) continue;
                 uint32_t delta = destBase - it->first, w = img.width / g_scale, h = img.height / g_scale;
                 for (uint32_t y = 0; y + extent.height <= h; y += 32)
                     for (uint32_t x = 0; x + extent.width <= w; x += 32)
@@ -3235,7 +3251,6 @@ void main()
     guest.words[(pc.base + tiledOffset(p.x, p.y, pc.pitch)) >> 2] = swapEndian(word, pc.flags & 3u);
 }
 )";
-        constexpr uint32_t RB_COPY_DEST_INFO = 0x231B;
         enum WritebackKind : uint32_t { kWrite8888 = 0, kWrite2101010 = 1, kWriteDepth24 = 2 };
         VkDescriptorSetLayout g_writebackSetLayout = VK_NULL_HANDLE;
         VkPipelineLayout g_writebackLayout = VK_NULL_HANDLE;
@@ -3519,8 +3534,9 @@ void main()
                 {
                     syncTarget(depth, rect); // EDRAM aliasing: latest contents of these tiles
                     VkOffset2D tile{};
-                    Image* into = resolveInto(destBase, destPitch, VK_FORMAT_R32_SFLOAT, rect.extent, tile);
-                    Image& dest = into ? *into : resolveDestination(destBase, destPitch, destHeight, dw, dh, VK_FORMAT_R32_SFLOAT);
+                    uint32_t destBytes = resolveDestBytes(VK_FORMAT_R32_SFLOAT);
+                    Image* into = resolveInto(destBase, destPitch, VK_FORMAT_R32_SFLOAT, destBytes, rect.extent, tile);
+                    Image& dest = into ? *into : resolveDestination(destBase, destPitch, destHeight, dw, dh, VK_FORMAT_R32_SFLOAT, destBytes);
                     resolveDepth(*depth, hostRect, dest,
                                  { hostRect.offset.x + tile.x * int32_t(g_scale), hostRect.offset.y + tile.y * int32_t(g_scale) });
                     writeBack(dest, { { rect.offset.x + tile.x, rect.offset.y + tile.y }, rect.extent },
@@ -3534,8 +3550,9 @@ void main()
                 // Destination image for this guest address (same format as the source), or the image a
                 // tile of it belongs to (predicated tiling)
                 VkOffset2D tile{};
-                Image* into = resolveInto(destBase, destPitch, color->format, rect.extent, tile);
-                Image& dest = into ? *into : resolveDestination(destBase, destPitch, destHeight, dw, dh, color->format);
+                uint32_t destBytes = resolveDestBytes(color->format);
+                Image* into = resolveInto(destBase, destPitch, color->format, destBytes, rect.extent, tile);
+                Image& dest = into ? *into : resolveDestination(destBase, destPitch, destHeight, dw, dh, color->format, destBytes);
                 dest.swapRB = (readRegister(0x231B) >> 24) & 1; // RB_COPY_DEST_INFO copy_dest_swap
                 endPass();
                 VkCommandBuffer c = cmd();

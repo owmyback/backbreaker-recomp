@@ -108,7 +108,9 @@ namespace gpu
                 }
             }
             // Scalar half
-            bool scalarUsed = smask || exp || a.scalarOp() == 50 || (a.scalarOp() >= 27 && a.scalarOp() <= 39);
+            // Every scalar op but retain_prev updates ps, which a later *_prev op reads, and maxas/maxasf
+            // set a0 and setp/kill ops the predicate or the pixel: shown even when they write no register
+            bool scalarUsed = smask || exp || a.scalarOp() != 50;
             if (scalarUsed && a.scalarOp() != 50) // retain_prev with nothing written is a no-op
             {
                 if (!out.empty()) out += "  +  ";

@@ -68,6 +68,13 @@ their guest address, and the presenter shows the image resolved to the front buf
   write pending are copied every time. In the heaviest rain frames this reuses 84% of the index
   bytes and 62% of the vertex bytes and takes the command processor thread's work from 11.4 to
   8.5 ms a frame.
+- A resolve whose destination lies inside an earlier resolve's (predicated tiling, or a texture
+  atlas filled a strip at a time) goes into that image, at the place its address has in the
+  destination's tiled layout. That layout is in the *destination* format's pixel size, which a
+  resolve can change: the crowd's impostor atlas (#55) is 64 fans drawn as 8_8_8_8 a row at a time
+  and resolved as 1_5_5_5, each row 256 KB further on. Counted in 4-byte pixels that was 64 rows
+  instead of 128, so every row of fans landed on the legs of the row before and the stands showed
+  torsos beside their legs and fans sunk to the shoulders.
 - Resolves are also written to guest memory (#45), tiled and in the destination's format, by a
   compute shader. The CPU reads some of them: the game's "Stadium texture generator" thread
   renders the field lightmap and compresses the resolved picture to DXT1 itself, so without this
@@ -434,7 +441,8 @@ Settings -> Game Controller -> pointer navigation, or the stick also moves the m
 ## Scripted input
 `--press "start@12,a@20,down@24.5"` presses each button that many seconds after launch (held
 150 ms), reported as pad state and as keystrokes, added to any real controller on user 0.
-Buttons: a b x y start back up down left right lb rb ls rs. Example that gets past the title
+Buttons: a b x y start back up down left right lb rb lt rt ls rs (`lt`/`rt` pull the trigger fully
+for the hold). Example that gets past the title
 screen to the main menu: `--press "a@20,a@26"`. Sticks: `ls_` or `rs_` plus `left`, `right`, `up`
 or `down`, as `stick@seconds[:duration]` - full deflection of that axis for the duration (150 ms
 by default), then released; reported as pad state only (no stick keystrokes). The kickoff of the

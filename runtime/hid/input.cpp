@@ -30,13 +30,14 @@ namespace
     std::atomic<uint32_t> g_packet{0};
 
     // ---- Scripted presses ----
-    struct Button { const char* name; uint16_t mask; uint16_t vk; };
+    struct Button { const char* name; uint16_t mask; uint16_t vk; uint8_t trigger = 0; }; // trigger: 1 left, 2 right (pulled fully)
     // XINPUT_GAMEPAD_* masks and VK_PAD_* virtual keys
     constexpr Button kButtons[] = {
         { "up", 0x0001, 0x5810 }, { "down", 0x0002, 0x5811 }, { "left", 0x0004, 0x5812 }, { "right", 0x0008, 0x5813 },
         { "start", 0x0010, 0x5814 }, { "back", 0x0020, 0x5815 }, { "ls", 0x0040, 0x5816 }, { "rs", 0x0080, 0x5817 },
         { "lb", 0x0100, 0x5805 }, { "rb", 0x0200, 0x5804 },
         { "a", 0x1000, 0x5800 }, { "b", 0x2000, 0x5801 }, { "x", 0x4000, 0x5802 }, { "y", 0x8000, 0x5803 },
+        { "lt", 0, 0x5806, 1 }, { "rt", 0, 0x5807, 2 },
     };
     constexpr double kHoldSeconds = 0.15;
     constexpr uint16_t XINPUT_KEYSTROKE_KEYDOWN = 0x0001, XINPUT_KEYSTROKE_KEYUP = 0x0002;
@@ -101,7 +102,11 @@ namespace
         std::lock_guard guard(g_scriptLock);
         for (auto& press : g_presses)
             if (t >= press.at && t < press.at + kHoldSeconds)
+            {
                 p.buttons |= press.button->mask; // scripted presses add to the real pad
+                if (press.button->trigger == 1) p.lt = 255;
+                if (press.button->trigger == 2) p.rt = 255;
+            }
         for (auto& h : g_stickHolds)
             if (t >= h.at && t < h.at + h.duration)
             {
@@ -198,7 +203,7 @@ namespace hid
             if (!button)
             {
                 warn("--press: bad item \"%s\" (use button@seconds or stick@seconds[:duration]; buttons: a b x y start "
-                     "back up down left right lb rb ls rs; sticks: ls_/rs_ + left right up down)", item.c_str());
+                     "back up down left right lb rb lt rt ls rs; sticks: ls_/rs_ + left right up down)", item.c_str());
                 return false;
             }
             double t = std::atof(item.c_str() + at + 1);
