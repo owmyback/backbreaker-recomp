@@ -10,8 +10,11 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-15 (phase 12, online multiplayer, added as the last phase, with its
-research in `docs/multiplayer.md`). Before that, 2026-11-14 (#3 closed; phase 4: window polish #9, validation clean #11 and the
+Last updated: 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
+hold 60 fps at resolution scale 2 (#121); the Training Camp and second-match crashes are fixed (#129,
+#127); phase 4: the crowd (#55), anisotropic filtering by default (#126) and matches rendered at a
+native 1280x720 (#128); phase 11 done). Before that, 2026-11-15 (phase 12, online multiplayer, added
+as the last phase, with its research in `docs/multiplayer.md`). Before that, 2026-11-14 (#3 closed; phase 4: window polish #9, validation clean #11 and the
 screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff;
 EDRAM transfers between formats #36: the match's tile blocks are gone; clear rectangles bounded by
 their vertices #37; resolves written back to guest memory #45: the grass renders; mip levels #46)
@@ -34,13 +37,14 @@ is not seen at the current frame rate, see phase 9). The game's mixed audio goes
 playback device (#90), and XMA is decoded (#93) when the decoder is built
 (`scripts/build_xma_decoder.sh`), so the game's music and sounds play.
 
-**Current state of the picture (2026-11-14):** the field renders (grass, yard lines, end-zone
-logo, player shadows) since resolves are written back to guest memory (#45). Before that it was
-black: the game generates the field's texture on the GPU and compresses it on the CPU. Textures
-have their mip levels (#46), so distant grass and crowd no longer shimmer. Replays show a fine
-grid pattern (#44). Live play reaches the game's 30 fps cap headless (30.1 in the last 60 s of
-the route, with the local agent's model unloaded), since unchanged textures are no longer
-re-uploaded every frame.
+**Current state of the picture (2026-11-16):** matches run at 60 fps, the default for windowed
+play (#89), and hold it at resolution scale 2 on an RX 9070 XT (2560x1440), rain at night included
+(#121: 59.9 fps over a play-tested match, lowest second 56). The match renders at a native 1280x720
+instead of the game's 1152x640 stretched to 1280x720 (#128), so at scale 2 the picture is exactly
+2560x1440. Textures get 16x anisotropic filtering (#126), so the field stays sharp toward the
+horizon. The crowd is whole (#55), replays no longer show a grid (#44), and the player highlight
+and the decal passes (kick meter, zones, routes) render (#60, #54). Training Camp drills and a
+second match in one session no longer crash (#129, #127).
 
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
@@ -51,7 +55,10 @@ failed virtual reservation now returns `STATUS_NO_MEMORY` (the heap halves the r
 retries) instead of aborting; `KeSetAffinityThread` (CPU number in the PCR); and
 `InterlockedPopEntrySList`/`InterlockedFlushSList`, which were unimplemented: PhysX keeps its
 per-thread contexts in such a list, so every simulation step allocated a new one (128 KB + 64 KB
-caches) until the heap ran out a minute into the match.
+caches) until the heap ran out a minute into the match; `KeTlsFree`, which left the freed slot's
+value in every thread, so a reused slot handed back freed data (#127); and a race in the game
+itself between its update and render threads over a play's player slots, which the console's
+timing hid (#129).
 
 ## Phase overview
 
@@ -61,14 +68,14 @@ caches) until the heap ran out a minute into the match.
 | 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
 | 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
 | 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-14 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels) | `258ec24`, `7bf4023`, `9ac4cb9` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-19 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels, player highlight, decal passes, the crowd, anisotropic filtering, native 1280x720 matches) | `258ec24`, `7bf4023`, `9ac4cb9`, `733e432`, `0ed897c` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | **Done** (output to SDL3, #90; XMA decoding, #93; confirmed by ear 2026-11-15) | #92, #95 |
 | 7 | Movies (WMV / XMV playback) | Planned | - |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
-| 9 | Gameplay correctness and performance | Planned | - |
+| 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `100ec86` |
-| 11 | Achievements (unlocks, pop-ups, achievements screen) | **In progress** (database, unlocks, store: #97 done; overlay list and pop-up: #101) | `1a59660` |
+| 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
@@ -78,8 +85,8 @@ Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" an
 
 | Goal | Where | Notes |
 |------|-------|-------|
-| Higher internal resolution (1440p, 4K) | Phase 4 | The renderer can render at any internal resolution while the game is still told 1280x720. Needs consistent scaling of EDRAM resolves/copies and of resolution-dependent effects (blur, bloom, shadows, post-processing). 2D UI scales as-is. Ultrawide (beyond 16:9) would also need camera/layout patches. |
-| Higher frame rate (60+ fps) | Phase 9 | 60 fps is the default for windowed play (#89; `docs/runtime.md`, "Frame rate"). The cap was D3D's present interval (2 vblanks a frame) and a fixed 1/30 s gameplay tick; both are set for 60, and PhysX steps 1/60 s either way. Play speed was wrong before because the guest clock ran at the host TSC rate, which overflowed the game's 32-bit timer frequency. Above 60 would need a faster guest vblank and a matching tick. Play-testing so far: a match at the right speed; anything that runs too fast or slow only at 60 is a follow-up. |
+| Higher internal resolution (1440p, 4K) | Phase 4 | Done for 16:9: `resolution_scale` 1-4 in `game/settings.ini` (#115) or `--resolution-scale` renders at that multiple while the game is still told 1280x720, and matches render at a native 1280x720 instead of a stretched 1152x640 (#128), so scale 2 is exactly 2560x1440. The game sizes its post-processing buffers from that view (640x360, 320x180). 2D UI scales as-is. Ultrawide (beyond 16:9) would need camera/layout patches. |
+| Higher frame rate (60+ fps) | Phase 9 | 60 fps is the default for windowed play (#89; `docs/runtime.md`, "Frame rate"). The cap was D3D's present interval (2 vblanks a frame) and a fixed 1/30 s gameplay tick; both are set for 60, and PhysX steps 1/60 s either way. Play speed was wrong before because the guest clock ran at the host TSC rate, which overflowed the game's 32-bit timer frequency. Above 60 would need a faster guest vblank and a matching tick. Play-testing so far: a match at the right speed; anything that runs too fast or slow only at 60 is a follow-up. Heavy scenes (rain at night, 2,000+ draws a frame) hold 60 at resolution scale 2 (#121). |
 
 ---
 
@@ -506,20 +513,42 @@ LessEqual or Equal without writing depth gets a depth bias toward the camera: ha
 slope plus 16 units, which matters only where the two depths tie. In a headless kick-aim run (151
 frames) the meter's arc was steady; without the change the same stretch flickered every few frames.
 
+**Step 17 - Resolve images the guest overwrites (#114, #119).** A resolve image used as a texture
+is now dropped when the CPU writes its memory, seen through the page write watch (#117: the
+Controls screen sometimes showed the font sheet, #114); watching only images that went stale keeps
+60 fps (#120).
+
+**Step 18 - The crowd (#55).** The fans in the stands are billboards sampling an impostor atlas the
+game renders every frame: 64 skinned fans in 128x128 tiles, a row of 8 at a time, each row resolved
+as 1_5_5_5 into the same 1024x1024 texture 256 KB further on. A resolve into an earlier one's image
+was placed by the EDRAM source's pixel size instead of the destination's, so every row landed on
+the legs of the row before: torsos beside their legs, fans sunk to the shoulders. Resolve images now
+record their guest bytes per pixel (#125, `733e432`).
+
+**Step 19 - Sharpness: anisotropic filtering and native 1280x720 matches (#126, #128).** The game
+asks for anisotropic filtering on few textures, so the field blurred toward the horizon:
+`anisotropy=16` is now the default in `game/settings.ini` (`c034aa7`). And the game drew the match at
+1152x640 and stretched it to 1280x720; its render view is now created at 1280x720, and the game
+re-tiles the scene and sizes its post-processing from it (`0ed897c`). That exposed the resolve
+rectangle: it was the scissor (whole EDRAM tile rows), so a 320x180 destination got 320x184 and its
+texture sampled four rows of stale EDRAM into the bloom; resolves now copy the rectangle their
+vertices span, within the scissor and the declared destination.
+
 Remaining steps:
 1. 3D (volume) textures, texture signedness (signed formats are read unsigned).
 2. Resolves: written back to guest memory since step 13, except 16-bit, 16_16, 64-bit, float and
    D24FS8 destinations and destinations resolved every frame (lazy writeback would cover those).
-   Still to do: the resolve rectangle from the vertex data, and resolve clears in the target's own
-   format (#43; the clear color is always read as 8_8_8_8, the clear depth as D24S8).
+   The resolve rectangle (step 19) and resolve clears in the target's own format (#43) are done.
 3. Internal resolution scaling: done for render targets, viewports, scissors, resolves and
-   clears (`--resolution-scale N`, step 6). Still to check once 3D scenes render: effects that
-   depend on pixel size (blur, bloom, shadow maps, half-pixel offsets in post-processing), and
-   scaling resolves back down when they are written to guest memory.
+   clears (`resolution_scale` / `--resolution-scale`, step 6, #115). Matches are play-tested at
+   scale 2 (bloom, depth of field and replays look right); shadow maps and half-pixel offsets in
+   post-processing were not checked one by one. Still open: scaling resolves back down when they
+   are written to guest memory.
 4. Shader translation: remaining control flow and features as gameplay shaders need them;
    point sprites; pixel shader param_gen.
-5. Performance: finer barriers. Textures are hashed every frame they're used (step 14) instead of
-   re-uploaded; write-watching would avoid even reading them.
+5. Performance: done in phase 9 (the texture write watch #103, batched memory-export barriers and
+   the GPU time per kind of work #122, skipped EDRAM transfers #123, reused index and vertex copies
+   #124).
 This is the largest phase (weeks to months).
 
 ## Phase 5 - Controller input (done)
@@ -595,7 +624,7 @@ decodes them and draws the YUV planes on the GPU (motion-compensation shaders), 
 appear once the renderer handles those draws. This phase covers what remains: movie audio, timing,
 and any decoding the player expects hardware for.
 
-## Phase 8 - Saves and profile (planned)
+## Phase 8 - Saves and profile (saves done)
 
 XamContent* (save devices, content creation/enumeration) mapped to a host directory; persist
 profile settings; device selector UI answered automatically.
@@ -618,12 +647,30 @@ returns the console's defaults for a fresh offline profile, as Xenia does (sourc
 values 0 or empty, controller vibration on, the default gamer picture key), and logs which
 settings were asked for by name. The Options > Controls and Game screens look the same as before.
 
-## Phase 9 - Gameplay correctness and performance (planned)
+## Phase 9 - Gameplay correctness and performance (in progress)
 
 Play-test menus and matches; watch Euphoria/Morpheme physics for floating-point differences;
 profile hot paths; consider XenonRecomp's optimization flags once behavior is correct.
 High-frame-rate support (see Goals): 60 fps since #89 (the present interval and the gameplay tick,
 after fixing the guest clock); see `docs/runtime.md`, "Frame rate".
+
+Performance (done):
+- Frame-rate dips (#73, closed): the side-select freeze was shader compiles (a disk shader cache,
+  #77); memory-export draws no longer wait for the GPU (#88); recorded work is submitted early (#94);
+  GPU fences are written when the GPU gets there instead of stopping the command processor (#96);
+  a fifth less renderer work per draw (#99); textures are known unchanged without reading them, a
+  page write watch (#103).
+- Heavy scenes at 60 fps and resolution scale 2 (#121, closed): rain at night ran 46-49 fps at
+  2,000+ draws a frame. GPU time by kind of work (`BB_GPU_TIME`) showed three costs: render targets
+  keyed by storage format, multipass export draws not rasterized, memory-export barriers batched
+  (#122); EDRAM transfers skipped for tiles a clear overwrites (#123); and on the command processor
+  thread, which decides whether a frame makes the vblank (`BB_CP_TIME`), index and vertex copies
+  reused within a frame (#124). Window play-test: 59.9 fps, lowest second 56.
+
+Correctness: the analyzer fixes (#52); crashes fixed: a reused TLS slot that handed back freed data
+on the second match load (#127), and the Training Camp passing drills, a race between the game's
+update and render threads over a play's player slots (#129). #50 (an assert after stick input) was
+closed as not reproducible. Open: the same randomness in every test run (#71).
 
 ## Phase 10 - Packaging (started)
 
@@ -640,7 +687,7 @@ Still open in this phase: optional integration with a launcher such as recomplau
 whatever a release build needs (install prefix, the game files next to the binary instead of
 `game:\` pointing into the checkout).
 
-## Phase 11 - Achievements (started)
+## Phase 11 - Achievements (done)
 
 Goal: the game's Xbox 360 achievements work again - unlocks are recorded, an "Achievement
 unlocked" pop-up appears in game, and an achievements screen lists them all.
@@ -661,7 +708,7 @@ tested), the unlock path with a per-machine store (`game/achievements/`), the en
 listed. Parts 3-5 (#101, `83fce76`): the overlay (`runtime/video/overlay.cpp`), the achievements
 list on F1 / Guide, and the unlock pop-up, tested in the window. #105: simultaneous unlocks take
 turns in the pop-up, and each plays a synthesized unlock sound. See docs/runtime.md,
-"Achievements".
+"Achievements". All five parts below are done.
 
 Planned parts:
 1. Database reader: parse the XDBF resource (achievements, strings, images) from the loaded

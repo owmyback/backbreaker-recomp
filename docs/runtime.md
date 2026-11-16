@@ -244,7 +244,7 @@ with the same line: 0 errors, and only the loader's own note left.
   - `memory_imports.cpp`, `sync.cpp`, `strings.cpp`, `system.cpp`, `xex.cpp`, `variables.cpp`
 - `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py)
 
-## Status (2026-11-12)
+## Status (2026-11-12, headless phase 3; the current state is in docs/ROADMAP.md)
 Phase 3 (headless subsystems, see docs/ROADMAP.md) works end to end: the game boots, initializes graphics, audio, voice
 (XHV2), comms and input, plays the 505 and NaturalMotion logo movies at ~30 fps, loads its sound
 banks (~3 s), then runs its front end at a steady 30 fps (~65 draws per frame, likely the game's
