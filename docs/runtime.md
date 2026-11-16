@@ -490,6 +490,11 @@ A0/C0/E0000000 views.
   frames (default 30) wherever they went, one line per destination, largest first (top 16), since
   the CPU may copy or compress a resolve into the watched range: the field lightmap in issue #45 was
   resolved to 08B14000 and compressed to 05DC5000.
+- `BB_DEBUG_RESOLVE_CHECK=1` checks the resolve-image check (below) against a hash of the image's
+  whole memory, every time one is looked up. It logs each case once per address: a change that the
+  sampled fingerprint alone would have missed (#114), a write that left the bytes the same (the
+  image is dropped anyway), or a change that was missed and the image kept (a bug). Slow: it hashes
+  every resolve image the game samples, every frame.
 
 ## GPU fences
 The game learns how far the GPU has got from fences: `EVENT_WRITE_SHD` packets that write a value
@@ -532,6 +537,22 @@ protected page would fail with EFAULT instead of faulting. A texture that change
 row (a movie frame, an image the CPU draws) is left unwatched for 300 frames and hashed every frame
 instead, so it does not fault on every write. `tests/memory_watch_test.cpp` checks all of this on
 the real memory layout, including the race between a fault and the renderer re-protecting a page.
+
+Resolve images use the same watch (#63, #114). A texture at a resolve destination samples the
+resolve image (render to texture), but the game can load something else into that memory later:
+in a match, the pause menu's Controls screen loads its controller picture where the team-coloured
+jersey font was rendered. After each resolve, or once its writeback has landed (landing counts as a
+write), the pages of an image used as a texture are protected, all but a last one that another
+allocation may share. A lookup that finds one of them written since drops the image, and the
+texture reads the guest's memory. An image is watched from its first use as a texture, and after
+that from each resolve into it. Until its first use, #65's sampled fingerprint covers it (256 bytes
+at the start of each of the first 16 pages). That fingerprint was the whole check before: the new
+picture could match it by chance, since both images are mostly empty, so the font sheet stayed in
+some sessions. Only images used as textures are watched. And like a texture that keeps changing, an
+image whose memory the game writes between one resolve and the next, four times in a row, goes
+back to the fingerprint for 300 frames, then 600, and so on. In the menus, two 1024x1024 targets are
+resolved every frame over memory the CPU rewrites every frame, which otherwise faults 61,000 times
+a second.
 
 ## Shader disassembler
 `./build/xenos-disasm captures/shaders` (files or directories, searched recursively) prints a

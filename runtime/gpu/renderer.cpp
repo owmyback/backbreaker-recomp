@@ -347,10 +347,17 @@ void main() {
             // Resolve destinations: where pixel (0, 0) lives in guest memory, and the pitch and height
             // RB_COPY_DEST_PITCH gave it (the bounds of the writeback to guest memory)
             uint32_t guestBase = 0, guestPitch = 0, guestHeight = 0;
-            // Resolve destinations: a fingerprint of their guest memory as of the last resolve (and
-            // writeback), to notice when the CPU has since put something else there (issue #63)
-            uint64_t memSig = 0, memSigFrame = 0;
-            bool memSigPending = false; // a writeback into it is still to land; fingerprint after the sync
+            // Resolve destinations: what their guest memory was as of the last resolve (and
+            // writeback), to notice when the CPU has since put something else there (#63, #114): the
+            // write-watch stamp (0 = not watched yet) and a sampled fingerprint for until then
+            uint64_t memWatch = 0, memSig = 0, memCheckFrame = 0;
+            bool memPending = false; // a writeback into it is still to land; note its memory after the sync
+            bool memSampled = false; // used as a texture: watched from each resolve on
+            // Written between resolves this many times in a row; not watched until memUnwatchedUntil
+            // (a frame), for memUnwatchFrames after each such streak (doubling)
+            uint32_t memWrittenStreak = 0, memUnwatchFrames = 0;
+            uint64_t memUnwatchedUntil = 0;
+            uint64_t memFull = 0;    // BB_DEBUG_RESOLVE_CHECK only: a hash of all of it
             uint32_t edramBase = 0, edramPitch = 0;
             bool edramDepth = false;
             uint32_t edramFormat = 0; // xenos::ColorRenderTargetFormat, or xenos::DepthRenderTargetFormat for depth
@@ -1632,12 +1639,27 @@ void main()
         // guest can free that memory and load something else there: in a match, the team-colored
         // jersey font sheet is rendered to an address that the in-game Controls screen later loads
         // its controller picture into, and the picture showed the font sheet (issue #63). So each
-        // resolve image keeps a fingerprint of its guest memory as of its last resolve (after its
-        // writeback lands, if one is pending), and a texture lookup that finds the memory changed
-        // since drops the image and reads the guest's data instead. The fingerprint is 256 bytes at
-        // the start of each of the first 16 pages, leaving out a last page another allocation may
-        // share: cheap, and any texture load over it changes it.
+        // resolve image notes its guest memory as of its last resolve (after its writeback lands,
+        // if one is pending), and a texture lookup that finds the memory changed since drops the
+        // image and reads the guest's data instead.
+        //
+        // How "changed" is seen: the write watch (mem::watch, #73) on images used as textures. Their
+        // pages are protected (after the writeback, which counts as a write), and a lookup asks
+        // whether any was written since: exact, and free until something writes. An image is
+        // watched from its first use as a texture and, after that, from each resolve into it.
+        // Before its first use, a fingerprint covers it: 256 bytes at the start of each of the first
+        // 16 pages, #65's whole check. That alone could miss a new image: the jersey font render
+        // and the controller picture are both mostly empty, and in some sessions the sampled spots
+        // were empty in both, so the font sheet stayed (#114). Watching every resolve instead made
+        // loading fault tens of thousands of times a second (most resolves are never textures).
+        // An image whose memory the game writes between one resolve and the next, four times in a
+        // row (a 1024x1024 target resolved every frame over memory the CPU rewrites every frame:
+        // 61,000 faults a second), goes back to the fingerprint for 300 frames, then 600, and so
+        // on, as textures that keep changing do. The checks leave out a last page that another
+        // allocation may share.
+        // BB_DEBUG_RESOLVE_CHECK=1 also hashes the whole range and logs where the checks are wrong.
         uint32_t formatBytes(VkFormat f);
+        const bool g_debugResolveCheck = getenv("BB_DEBUG_RESOLVE_CHECK") != nullptr;
 
         bool memRange(const Image& img, uint32_t& start, uint32_t& end)
         {
@@ -1666,6 +1688,59 @@ void main()
             return h;
         }
 
+        // The pages a resolve image's check watches: its memory, less a last page that another
+        // allocation may share (a write there says nothing about the image)
+        bool watchRange(const Image& img, uint32_t& start, uint32_t& end)
+        {
+            if (!memRange(img, start, end)) return false;
+            uint32_t lastPage = (end - 1) & ~0xFFFu;
+            if (lastPage > start) end = lastPage;
+            return true;
+        }
+
+        // After a resolve into `img`, or once its writeback has landed: note its memory as of now.
+        // An image already used as a texture is watched from here on; one that has not been is
+        // watched from its first use (most resolves never are: watching them all made the game's
+        // writes over their memory fault tens of thousands of times a second while loading).
+        void baselineResolved(Image& img)
+        {
+            uint32_t start, end, ws, we;
+            img.memCheckFrame = g_frameSerial;
+            img.memWatch = 0;
+            if (!memRange(img, start, end) || !watchRange(img, ws, we)) return;
+            if (img.memSampled && g_frameSerial >= img.memUnwatchedUntil)
+                img.memWatch = mem::watch::protect(ws, we); // before reading it
+            img.memSig = memSignature(start, end);
+            if (g_debugResolveCheck) img.memFull = hashBytes(mem::physical(ws), we - ws, 0x5EED);
+        }
+
+        // BB_DEBUG_RESOLVE_CHECK: what #65's fingerprint and a full hash say against the watch
+        void debugResolveCheck(uint32_t base, const Image& img, uint32_t start, uint32_t end, bool unchanged, bool watched)
+        {
+            uint32_t s, e;
+            memRange(img, s, e);
+            const bool sigSame = memSignature(s, e) == img.memSig;
+            const bool fullSame = hashBytes(mem::physical(start), end - start, 0x5EED) == img.memFull;
+            int kind = -1;
+            if (unchanged && !fullSame) kind = 2;
+            else if (sigSame && !fullSame) kind = 0;
+            else if (!unchanged && fullSame) kind = 1;
+            if (kind < 0) return;
+            static const char* what[] = {
+                "changed: #65's fingerprint alone would have missed it, the watch saw it",
+                "written, but its bytes are the same (dropped anyway)",
+                "CHANGED AND KEPT: the check missed it",
+            };
+            static uint64_t counts[3];
+            static std::set<std::pair<uint32_t, int>> logged;
+            counts[kind]++;
+            if (logged.insert({ base, kind }).second)
+                info("[render] resolve check: %08X (%ux%u, %u bytes, %s) %s; so far %llu / %llu / %llu",
+                     base, img.width / g_scale, img.height / g_scale, end - start,
+                     watched ? "watched" : "by the fingerprint", what[kind],
+                     (unsigned long long)counts[0], (unsigned long long)counts[1], (unsigned long long)counts[2]);
+        }
+
         void retireResolved(std::map<uint32_t, Image>::iterator it)
         {
             g_retired.push_back(it->second);
@@ -1690,10 +1765,31 @@ void main()
             auto it = g_resolved.find(base);
             if (it == g_resolved.end()) return it;
             Image& img = it->second;
-            if (img.memSigPending || img.memSigFrame == g_frameSerial) return it;
-            img.memSigFrame = g_frameSerial;
-            uint32_t start, end;
-            if (!memRange(img, start, end) || memSignature(start, end) == img.memSig) return it;
+            img.memSampled = true;
+            if (img.memPending || img.memCheckFrame == g_frameSerial) return it;
+            img.memCheckFrame = g_frameSerial;
+            uint32_t start, end, ws, we;
+            if (!memRange(img, start, end) || !watchRange(img, ws, we)) return it;
+            bool unchanged;
+            const bool watched = img.memWatch != 0;
+            if (watched)
+                unchanged = mem::watch::unchangedSince(ws, we, img.memWatch);
+            else
+            {
+                // First use since the resolve: until now, the sampled fingerprint says. Unchanged:
+                // watch it from now on (protect, then read the fingerprint again, so no write slips
+                // in between). Changed: it is dropped, and its pages are left unprotected (a target
+                // the CPU overwrote would otherwise fault on every page, every frame it does so)
+                unchanged = memSignature(start, end) == img.memSig;
+                if (unchanged && g_frameSerial >= img.memUnwatchedUntil)
+                {
+                    uint64_t stamp = mem::watch::protect(ws, we);
+                    unchanged = memSignature(start, end) == img.memSig;
+                    if (unchanged) img.memWatch = stamp;
+                }
+            }
+            if (g_debugResolveCheck) debugResolveCheck(base, img, ws, we, unchanged, watched);
+            if (unchanged) return it;
             static std::set<uint32_t> logged;
             if (logged.insert(base).second)
                 info("[render] resolve %08X was overwritten by the guest since: sampling its memory instead", base);
@@ -2789,16 +2885,11 @@ void main()
             }
             g_pendingWrites.resize(kept);
             if (kept) return;
-            for (auto& [base, img] : g_resolved) // their writebacks have landed: fingerprint them now
-                if (img.memSigPending)
+            for (auto& [base, img] : g_resolved) // their writebacks have landed: note their memory now
+                if (img.memPending)
                 {
-                    uint32_t start, end;
-                    img.memSigPending = false;
-                    if (memRange(img, start, end))
-                    {
-                        img.memSig = memSignature(start, end);
-                        img.memSigFrame = g_frameSerial;
-                    }
+                    img.memPending = false;
+                    baselineResolved(img);
                 }
         }
 
@@ -2972,18 +3063,27 @@ void main()
             }
         }
 
-        // After a resolve into `img`: fingerprint its guest memory now, or after the sync if a
+        // After a resolve into `img`: note its guest memory now, or after the sync if a
         // writeback into it is still to land (see "stale resolve images")
         void markResolved(Image& img)
         {
-            uint32_t start, end;
+            uint32_t start, end, ws, we;
             if (!memRange(img, start, end)) return;
-            img.memSigPending = pendingOverlap(start, end);
-            if (!img.memSigPending)
+            // Written by the game since the last resolve (checked before this one's writeback lands,
+            // which would count): four times in a row, and it is not watched for a while
+            if (img.memWatch && watchRange(img, ws, we))
             {
-                img.memSig = memSignature(start, end);
-                img.memSigFrame = g_frameSerial;
+                if (mem::watch::unchangedSince(ws, we, img.memWatch))
+                    img.memWrittenStreak = 0;
+                else if (++img.memWrittenStreak >= 4)
+                {
+                    img.memUnwatchFrames = std::min<uint32_t>(img.memUnwatchFrames ? img.memUnwatchFrames * 2 : 300, 300 * 64);
+                    img.memUnwatchedUntil = g_frameSerial + img.memUnwatchFrames;
+                    img.memWrittenStreak = 0;
+                }
             }
+            img.memPending = pendingOverlap(start, end);
+            if (!img.memPending) baselineResolved(img);
         }
 
         void resolve(const DrawState& s)
