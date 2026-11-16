@@ -43,6 +43,11 @@ the build.
 window, `runtime/video/vk_context.cpp`): shaders are translated (see below) and compiled with
 shaderc on first use, EDRAM render targets are Vulkan images, resolves copy into images keyed by
 their guest address, and the presenter shows the image resolved to the front buffer.
+- A render target is one image per EDRAM base, pitch, MSAA mode and *storage* format (Xenia's
+  GetStorageFormat): the `AS_` color formats only change what a resolve writes, and 8_8_8_8_GAMMA is
+  stored as 8_8_8_8. The game draws the same tiles as 2_10_10_10_FLOAT and as
+  2_10_10_10_FLOAT_AS_16_16_16_16 several times a frame; with an image for each, every switch was an
+  EDRAM transfer (#121: 1.5 ms of GPU time a frame in the rain at resolution scale 2).
 - Resolves are also written to guest memory (#45), tiled and in the destination's format, by a
   compute shader. The CPU reads some of them: the game's "Stadium texture generator" thread
   renders the field lightmap and compresses the resolved picture to DXT1 itself, so without this
@@ -562,6 +567,23 @@ GPU vertex copies and draws recorded again after a sync, and the write watch: te
 answered without reading, write faults and pages watched. Pair it with `tools/fps_report.py` on the
 same log for the fps side.
 
+`BB_GPU_TIME=1` (with `BB_PERF=1`) adds where the GPU's time went (issue #121). The renderer writes
+a Vulkan timestamp each time the kind of work it records changes, and reads them back once the
+frame's GPU work is done. The time from one timestamp to the next is charged to the kind of work
+that started at the first, so one more line a second gives:
+- busy time;
+- "between submits": time the GPU spent between two command buffers, idle or running the
+  presenter's work;
+- passes, full barriers and EDRAM transfers (and their tiles);
+- milliseconds and stretches per kind: draws by pass (named by their attachments: format/guest
+  format, pitch, MSAA, base tile), EDRAM transfers, resolve copies, MSAA resolves, depth
+  resolves, writebacks, resolve clears, texture uploads, depth packing, vertex copies.
+
+Every layout change is a full barrier, so the GPU runs these kinds one after another and the split
+is close to what each costs. `BB_GPU_TIME=2` splits EDRAM transfers by source and destination
+target, and `BB_GPU_TIME=3` also splits draws by pixel shader, blending and primitive type. Both
+add a `calls by kind` line with how many of each there were, with their tiles or indices.
+
 ## Texture write watch
 Finding out whether a texture changed used to mean reading all of its bytes every frame it was
 used: 1.3 GB a second in a match, about a third of the renderer's time (issue #73). Now, before the
@@ -625,7 +647,14 @@ RADV refuses the runtime's shared-memory mapping, so a 512 MB host-visible stagi
 same addresses is used and the stream ranges (from the `mad eA, r#, const0100, c#` stream
 constants) are copied in when the draw is recorded and out when they are synced. An export draw
 does not wait for the GPU (issue #73: the match records about 130 of them per frame, and a submit
-and wait for each one was most of the renderer's GPU waiting). Its ranges are pending like resolve
+and wait for each one was most of the renderer's GPU waiting). Nor does the GPU wait between them
+(#121): export draws that write separate ranges follow each other without a barrier, and one
+barrier goes in before anything else is recorded, before an export draw that writes bytes a
+pending one wrote, and before the command buffer ends (the host reads the ranges after that). A
+barrier after each one cost 3.5 ms of GPU time a frame at resolution scale 2. A vertex shader in
+export mode 7 (multipass) is not rasterized at all, as in Xenia, whatever render targets are
+bound: the game's skinning draws are such point lists, and they used to be drawn into a 1280-wide
+color target, with the EDRAM transfers that came with it. Its ranges are pending like resolve
 writebacks: they reach guest memory before any fence after them does (see "GPU fences"). A later draw that fetches vertices from a pending range gets them copied GPU to
 GPU from that buffer, and a draw whose textures or indices come from one syncs first and is
 recorded again. `BB_EXPORT_WAIT=1` brings back the wait after every export draw, for comparisons.

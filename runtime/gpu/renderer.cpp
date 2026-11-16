@@ -129,8 +129,13 @@ namespace gpu::render
         struct PerfStats { uint64_t draws = 0, hashBytes = 0, uploads = 0, uploadBytes = 0, resolves = 0, writebacks = 0, flushes = 0;
                            uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0, chunks = 0,
                                     idleSubmits = 0, asyncFences = 0, asyncWaits = 0, copyInsAroundPending = 0,
-                                    hashSkips = 0;
+                                    hashSkips = 0, passes = 0, barriers = 0, gpuMarksDropped = 0,
+                                    transfers = 0, transferTiles = 0, exportBarriers = 0;
                            double hashMs = 0, waitMs = 0, cpWaitMs = 0;
+                           std::vector<double> gpuMs;       // BB_GPU_TIME: GPU time by kind of work (see gpuMark)
+                           std::vector<uint32_t> gpuSpans;  // how many stretches of each kind
+                           struct Calls { uint32_t calls = 0; uint64_t amount = 0; const char* unit = ""; };
+                           std::map<uint16_t, Calls> callsBy; // BB_GPU_TIME=2: transfers (tiles), =3: also draws (indices)
                            std::map<std::string, uint64_t> syncsBy;          // syncs that had pending writes, by trigger
                            struct Up { uint32_t format = 0, width = 0, height = 0; uint64_t count = 0, bytes = 0, fresh = 0; };
                            std::map<uint32_t, Up> uploadsBy; };              // texture uploads by guest base address
@@ -413,6 +418,7 @@ void main() {
         void transition(VkCommandBuffer cmd, Image& img, VkImageLayout to)
         {
             if (img.layout == to) return;
+            g_perf.barriers++;
             VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
             b.oldLayout = img.layout;
             b.newLayout = to;
@@ -487,21 +493,141 @@ void main() {
             VkDeviceSize used = 0;
             VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
             VkDescriptorSet buffers = VK_NULL_HANDLE; // set 0 over `upload`; constants by dynamic offset
+            // BB_GPU_TIME: the timestamps this frame context's command buffers write (see gpuMark)
+            VkQueryPool queries = VK_NULL_HANDLE;
+            std::vector<uint16_t> queryKinds; // the kind of work that starts at each timestamp
+            uint32_t queriesUsed = 0;
+            bool queriesNeedReset = true;
         };
         Frame g_frames[kFramesInFlight];
         uint32_t g_frameIndex = 0;
         uint64_t g_frameSerial = 1; // once-per-frame texture uploads
         Frame& frame() { return g_frames[g_frameIndex]; }
 
+        // ---------------------------------------------------------------- GPU time (#121)
+        //
+        // BB_GPU_TIME=1 (with BB_PERF=1, which prints it): the renderer writes a GPU timestamp each
+        // time the kind of work it records changes - draws (one kind per set of attachments), EDRAM
+        // transfers, resolve copies, writebacks, clears, uploads - and at the end and start of each
+        // command buffer. The time from one timestamp to the next goes to the kind of work that
+        // started at the first. Every layout change in this renderer is a full barrier
+        // (transition()), so the GPU runs these stretches one after another and the split is close
+        // to what each kind costs. "between submits" is time the GPU spent between two command
+        // buffers: idle, or running the presenter's work.
+        enum GpuKind : uint16_t { kGpuOther, kGpuIdle, kGpuTransfer, kGpuResolveCopy, kGpuResolveMsaa, kGpuResolveDepth, kGpuWriteback,
+                                  kGpuClear, kGpuUpload, kGpuDepthPack, kGpuVertexCopy, kGpuTargetInit, kGpuReadback, kGpuFixedKinds };
+        const char* const kGpuKindNames[kGpuFixedKinds] = { "other",         "between submits", "EDRAM transfer", "resolve copy",
+                                                            "resolve MSAA",  "resolve depth",   "writeback",      "resolve clear",
+                                                            "texture upload", "depth pack",     "vertex copy",    "new target",
+                                                            "readback" };
+        constexpr uint32_t kMaxQueries = 32768; // per frame context
+        bool g_gpuTime = false;
+        bool g_gpuTimeDetail = false;              // BB_GPU_TIME=2: EDRAM transfers by source and destination
+        bool g_gpuTimeDraws = false;               // BB_GPU_TIME=3: also draws by pass, pixel shader and blending
+        double g_tickMs = 0;                       // timestamp period
+        std::vector<std::string> g_gpuKindNames;   // kGpuKindNames, then one per draw pass shape
+        uint16_t g_kindNow = UINT16_MAX;           // what the command buffer being recorded is doing
+        uint64_t g_lastStamp = 0;                  // the latest timestamp collected
+
+        void gpuMark(uint16_t kind)
+        {
+            if (!g_gpuTime || kind == g_kindNow) return;
+            Frame& f = frame();
+            if (!f.recording) return;
+            if (f.queriesUsed >= kMaxQueries) { g_perf.gpuMarksDropped++; return; }
+            vkCmdWriteTimestamp(f.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, f.queries, f.queriesUsed);
+            f.queryKinds[f.queriesUsed++] = kind;
+            g_kindNow = kind;
+        }
+
+        // A frame context's GPU work has all finished: add up its timestamps
+        void collectGpuTime(Frame& f)
+        {
+            if (!g_gpuTime || !f.queriesUsed) return;
+            uint32_t n = f.queriesUsed;
+            std::vector<uint64_t> ts(n);
+            VkResult r = vkGetQueryPoolResults(D, f.queries, 0, n, n * sizeof(uint64_t), ts.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            f.queriesUsed = 0;
+            f.queriesNeedReset = true;
+            if (r != VK_SUCCESS) return;
+            PerfStats& p = g_perf;
+            if (p.gpuMs.size() < g_gpuKindNames.size())
+            {
+                p.gpuMs.resize(g_gpuKindNames.size());
+                p.gpuSpans.resize(g_gpuKindNames.size());
+            }
+            // From the previous frame context's last timestamp (flushAndWait can collect a context
+            // out of order: then this is not counted)
+            if (g_lastStamp && ts[0] > g_lastStamp) p.gpuMs[kGpuIdle] += (ts[0] - g_lastStamp) * g_tickMs;
+            for (uint32_t i = 1; i < n; i++)
+                if (ts[i] >= ts[i - 1])
+                {
+                    p.gpuMs[f.queryKinds[i - 1]] += (ts[i] - ts[i - 1]) * g_tickMs;
+                    p.gpuSpans[f.queryKinds[i - 1]]++;
+                }
+            g_lastStamp = std::max(g_lastStamp, ts[n - 1]);
+        }
+
+        // Memory export draws write guest memory from the shader. Their writes have to be visible to
+        // what reads that memory after them: a GPU vertex copy out of it, the host once the GPU is
+        // done (pending writes), an export draw writing the same bytes. One barrier after each one
+        // made the GPU drain 130 times a frame between the game's skinning draws of a few hundred
+        // points each (#121: 3.5 ms of GPU time a frame). Now export draws that write separate
+        // ranges follow each other with no barrier, and one goes in before anything else is recorded
+        // (cmd()) and before a command buffer ends.
+        bool g_exportBarrierPending = false;
+        bool g_exportBatching = false; // recording an export draw that may follow the pending ones without a barrier
+        std::vector<std::pair<uint32_t, uint32_t>> g_unbarrieredExports; // [start, end) written since the last barrier
+
+        void exportBarrier(VkCommandBuffer c)
+        {
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            g_exportBarrierPending = false;
+            g_unbarrieredExports.clear();
+            g_perf.exportBarriers++;
+        }
+
+        // An export draw writing these ranges may skip the barrier unless it writes bytes a pending one did
+        bool exportsOverlapPending(const std::vector<std::pair<uint32_t, uint32_t>>& ranges)
+        {
+            for (auto [start, bytes] : ranges)
+                for (auto [s0, s1] : g_unbarrieredExports)
+                    if (start < s1 && s0 < start + bytes) return true;
+            return false;
+        }
+
+        // Before vkEndCommandBuffer: what follows, until the next command buffer starts, is "between
+        // submits"; and the host reads pending export writes once the GPU is done
+        void gpuMarkEnd()
+        {
+            if (g_exportBarrierPending) exportBarrier(frame().cmd);
+            gpuMark(kGpuIdle);
+        }
+
         VkCommandBuffer cmd()
         {
             Frame& f = frame();
+            if (g_exportBarrierPending && !g_exportBatching && f.recording) exportBarrier(f.cmd); // no pass is active after an export draw
             if (!f.recording)
             {
                 VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
                 bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 VK_CHECK(vkBeginCommandBuffer(f.cmd, &bi));
                 f.recording = true;
+                if (g_gpuTime)
+                {
+                    if (f.queriesNeedReset)
+                    {
+                        vkCmdResetQueryPool(f.cmd, f.queries, 0, kMaxQueries);
+                        f.queriesNeedReset = false;
+                    }
+                    g_kindNow = UINT16_MAX;
+                    gpuMark(kGpuOther);
+                }
             }
             return f.cmd;
         }
@@ -518,6 +644,7 @@ void main() {
             endPass();
             Frame& f = frame();
             if (!f.recording) return;
+            gpuMarkEnd();
             VK_CHECK(vkEndCommandBuffer(f.cmd));
             f.recording = false;
             if (f.chunksInFlight == f.chunkFences.size())
@@ -563,6 +690,7 @@ void main() {
         // Everything the frame recorded has executed: start it over at its first command buffer
         void restartFrame(Frame& f)
         {
+            collectGpuTime(f);
             VK_CHECK(vkResetCommandPool(D, f.pool, 0));
             f.cmdBuffersUsed = 1;
             f.cmd = f.cmdBuffers[0];
@@ -594,6 +722,7 @@ void main() {
             bool active = false;
             uint32_t colorCount = 0; // color slots this pass actually carries (see colorSlots)
             VkExtent2D extent{};
+            uint16_t kind = kGpuOther; // BB_GPU_TIME: its attachments' kind (passKind)
         } g_pass;
 
         void endPass()
@@ -638,11 +767,86 @@ void main() {
             return m;
         }
 
+        const char* formatName(VkFormat f)
+        {
+            switch (f)
+            {
+            case VK_FORMAT_R8G8B8A8_UNORM: return "8888";
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return "2_10_10_10";
+            case VK_FORMAT_R16G16B16A16_SFLOAT: return "16x4f";
+            case VK_FORMAT_R16G16_SNORM: return "16x2";
+            case VK_FORMAT_R16G16B16A16_SNORM: return "16x4";
+            case VK_FORMAT_R16G16_SFLOAT: return "16x2f";
+            case VK_FORMAT_R32_SFLOAT: return "32f";
+            case VK_FORMAT_R32G32_SFLOAT: return "32x2f";
+            case kDepthFormat: return "depth";
+            default: return "?";
+            }
+        }
+
+        // An EDRAM target as the GPU time kinds name it: format, pitch, MSAA, base tile
+        std::string targetName(const Image& t)
+        {
+            char b[96];
+            snprintf(b, sizeof b, "%s/%u p%u%s t%u", formatName(t.format), t.edramFormat, t.edramPitch,
+                     t.samples > 1 ? (t.samples > 2 ? " 4x" : " 2x") : "", t.edramBase);
+            return b;
+        }
+
+        // BB_GPU_TIME: one kind of work per set of pass attachments, named after them
+        uint16_t passKind(Image* const color[4], Image* depth)
+        {
+            static std::map<std::array<VkImage, 5>, uint16_t> kinds;
+            std::array<VkImage, 5> key{};
+            for (int i = 0; i < 4; i++) key[i] = color[i] ? color[i]->image : VK_NULL_HANDLE;
+            key[4] = depth ? depth->image : VK_NULL_HANDLE;
+            auto [it, fresh] = kinds.try_emplace(key, uint16_t(0));
+            if (!fresh) return it->second;
+            std::string name = "draw";
+            for (Image* t : { color[0], color[1], color[2], color[3], depth })
+                if (t) name += (name.size() > 4 ? " + " : " ") + targetName(*t);
+            if (name.size() == 4) name += " (no attachments: memory export)";
+            it->second = uint16_t(g_gpuKindNames.size());
+            g_gpuKindNames.push_back(name);
+            return it->second;
+        }
+
+        // BB_GPU_TIME=3: draws by pass, pixel shader, blending and primitive type
+        uint16_t drawTimeKind(uint16_t pass, uint64_t ps, const DrawState& s)
+        {
+            bool blend = s.color[0].blend.enabled();
+            static std::map<std::tuple<uint16_t, uint64_t, bool, uint32_t>, uint16_t> kinds;
+            auto [it, fresh] = kinds.try_emplace({ pass, ps, blend, s.primitive }, uint16_t(0));
+            if (!fresh) return it->second;
+            char b[96];
+            snprintf(b, sizeof b, " | ps_%016llx%s prim %u", (unsigned long long)ps, blend ? " blend" : "", s.primitive);
+            it->second = uint16_t(g_gpuKindNames.size());
+            g_gpuKindNames.push_back(g_gpuKindNames[pass] + b);
+            return it->second;
+        }
+
+        // BB_GPU_TIME: EDRAM transfers by source and destination target
+        uint16_t transferTimeKind(const Image& src, const Image& dst)
+        {
+            static std::map<std::pair<VkImage, VkImage>, uint16_t> kinds;
+            auto [it, fresh] = kinds.try_emplace({ src.image, dst.image }, uint16_t(0));
+            if (!fresh) return it->second;
+            it->second = uint16_t(g_gpuKindNames.size());
+            g_gpuKindNames.push_back("EDRAM transfer " + targetName(src) + " -> " + targetName(dst));
+            return it->second;
+        }
+
         void beginPass(Image* const color[4], Image* depth)
         {
-            if (g_pass.active && std::equal(color, color + 4, g_pass.color) && depth == g_pass.depth) return;
+            if (g_pass.active && std::equal(color, color + 4, g_pass.color) && depth == g_pass.depth)
+            {
+                gpuMark(g_pass.kind); // after a clear recorded into the same pass
+                return;
+            }
             endPass();
             VkCommandBuffer c = cmd();
+            g_perf.passes++;
+            if (g_gpuTime) gpuMark(g_pass.kind = passKind(color, depth));
             VkRenderingAttachmentInfo ca[4]{};
             uint32_t w = UINT32_MAX, h = UINT32_MAX;
             for (int i = 0; i < 4; i++)
@@ -695,6 +899,7 @@ void main() {
             Frame& f = frame();
             if (f.recording)
             {
+                gpuMarkEnd();
                 VK_CHECK(vkEndCommandBuffer(f.cmd));
                 f.recording = false;
                 queueSubmit(f.cmd, f.fence);
@@ -740,14 +945,24 @@ void main() {
             }
         }
 
-        Image* findTarget(const TargetKey& k)
+        // The format a color target's samples are stored in (Xenia's GetStorageFormat): the AS_
+        // formats differ from their base formats only in what a resolve writes, and
+        // 8_8_8_8_GAMMA is 8_8_8_8 here (gamma approximated as linear). The game draws the same
+        // EDRAM tiles as both 2_10_10_10_FLOAT and 2_10_10_10_FLOAT_AS_16_16_16_16 several times a
+        // frame; one image for both saves a transfer each way (#121: 1.5 ms of GPU time a frame in
+        // the rain at resolution scale 2).
+        uint32_t storageFormat(uint32_t f) { return f == 1 ? 0 : f == 10 ? 2 : f == 12 ? 3 : f; }
+
+        Image* findTarget(TargetKey k)
         {
+            if (!k.depth) k.format = storageFormat(k.format);
             auto it = g_targets.find(k);
             return it == g_targets.end() ? nullptr : &it->second;
         }
 
-        Image* target(const TargetKey& k)
+        Image* target(TargetKey k)
         {
+            if (!k.depth) k.format = storageFormat(k.format);
             if (Image* t = findTarget(k)) return t;
             VkFormat format = k.depth ? kDepthFormat : colorTargetFormat(k.format);
             if (format == VK_FORMAT_UNDEFINED)
@@ -775,6 +990,7 @@ void main() {
             // EDRAM starts with undefined contents; clear for reproducible output
             endPass();
             VkCommandBuffer c = cmd();
+            gpuMark(kGpuTargetInit);
             transition(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             VkImageSubresourceRange range{ img.aspect, 0, 1, 0, 1 };
             if (k.depth)
@@ -1149,6 +1365,7 @@ void main() {
             VkPipeline pl = transferPipeline(src, dst);
             endPass();
             VkCommandBuffer c = cmd();
+            gpuMark(g_gpuTimeDetail ? transferTimeKind(src, dst) : kGpuTransfer);
             VkImageLayout srcLayout = srcDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             VkImageLayout dstLayout = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             transition(c, src, srcLayout);
@@ -1249,6 +1466,17 @@ void main() {
             });
             for (auto& [owner, mask] : masks)
             {
+                uint32_t n = 0;
+                for (uint32_t w = 0; w < 64; w++) n += std::popcount(mask[w]);
+                g_perf.transfers++;
+                g_perf.transferTiles += n;
+                if (g_gpuTimeDetail)
+                {
+                    PerfStats::Calls& tc = g_perf.callsBy[transferTimeKind(*owner, *t)];
+                    tc.calls++;
+                    tc.amount += n;
+                    tc.unit = "tiles";
+                }
                 transfer(*owner, *t, mask.data(), tilesRect(*t, mask.data()));
                 for (uint32_t tile = 0; tile < 2048; tile++)
                     if ((mask[tile >> 5] >> (tile & 31)) & 1) g_owner[tile] = t;
@@ -1609,6 +1837,7 @@ void main()
             {
                 endPass();
                 VkCommandBuffer c = cmd();
+                gpuMark(kGpuDepthPack);
                 transition(c, dest, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 transition(c, st->second, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 transition(c, pd.img, VK_IMAGE_LAYOUT_GENERAL);
@@ -1887,6 +2116,7 @@ void main()
                     {
                         endPass();
                         VkCommandBuffer c = cmd();
+                        gpuMark(kGpuUpload);
                         transition(c, t.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                         for (uint32_t f = 0; f < 6; f++)
                         {
@@ -2048,6 +2278,7 @@ void main()
                 }
                 endPass();
                 VkCommandBuffer c = cmd();
+                gpuMark(kGpuUpload);
                 transition(c, t.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 vkCmdCopyBufferToImage(c, frame().upload, t.img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, uint32_t(copies.size()), copies.data());
                 transition(c, t.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -2374,6 +2605,7 @@ void main()
             if (!f.recording && !f.chunksInFlight) return;
             if (f.recording)
             {
+                gpuMarkEnd();
                 VK_CHECK(vkEndCommandBuffer(f.cmd));
                 f.recording = false;
                 queueSubmit(f.cmd, f.fence);
@@ -2446,8 +2678,34 @@ void main()
             pli.pPushConstantRanges = &pcr;
             VK_CHECK(vkCreatePipelineLayout(D, &pli, nullptr, &g_layout));
 
+            if (getenv("BB_GPU_TIME"))
+            {
+                uint32_t n = 0;
+                vkGetPhysicalDeviceQueueFamilyProperties(C->gpu, &n, nullptr);
+                std::vector<VkQueueFamilyProperties> qf(n);
+                vkGetPhysicalDeviceQueueFamilyProperties(C->gpu, &n, qf.data());
+                if (C->queueFamily < n && qf[C->queueFamily].timestampValidBits && C->props.limits.timestampPeriod > 0)
+                {
+                    g_gpuTime = true;
+                    g_gpuTimeDetail = getenv("BB_GPU_TIME")[0] >= '2';
+                    g_gpuTimeDraws = getenv("BB_GPU_TIME")[0] >= '3';
+                    g_tickMs = C->props.limits.timestampPeriod / 1e6;
+                    g_gpuKindNames.assign(kGpuKindNames, kGpuKindNames + kGpuFixedKinds);
+                    info("[render] BB_GPU_TIME: GPU timestamps by kind of work (%.1f ns ticks), in the [perf] lines", C->props.limits.timestampPeriod);
+                }
+                else
+                    warn("[render] BB_GPU_TIME: this queue has no timestamps");
+            }
             for (Frame& f : g_frames)
             {
+                if (g_gpuTime)
+                {
+                    VkQueryPoolCreateInfo qci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+                    qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                    qci.queryCount = kMaxQueries;
+                    VK_CHECK(vkCreateQueryPool(D, &qci, nullptr, &f.queries));
+                    f.queryKinds.resize(kMaxQueries);
+                }
                 VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
                 pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
                 pci.queueFamilyIndex = C->queueFamily;
@@ -2680,6 +2938,7 @@ void main()
             }
             endPass();
             VkCommandBuffer c = cmd();
+            gpuMark(kGpuResolveDepth);
             Image* from = &src;
             if (src.samples > 1)
             {
@@ -3012,6 +3271,7 @@ void main()
             }
             endPass();
             VkCommandBuffer c = cmd();
+            gpuMark(kGpuWriteback);
             VkImageLayout was = img.layout;
             transition(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, g_writebackPipeline);
@@ -3134,6 +3394,7 @@ void main()
                 dest.swapRB = (readRegister(0x231B) >> 24) & 1; // RB_COPY_DEST_INFO copy_dest_swap
                 endPass();
                 VkCommandBuffer c = cmd();
+                gpuMark(color->samples > 1 ? kGpuResolveMsaa : kGpuResolveCopy);
                 transition(c, *color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
                 transition(c, dest, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 VkImageSubresourceLayers layers{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -3162,6 +3423,7 @@ void main()
                 syncPartialTiles(color, rect);
                 Image* targets[4] = { color, nullptr, nullptr, nullptr };
                 beginPass(targets, nullptr);
+                gpuMark(kGpuClear);
                 VkClearAttachment a{ VK_IMAGE_ASPECT_COLOR_BIT, 0, {} };
                 clear::color(s.color[source].format, clear::colorBits(readRegister(RB_COLOR_CLEAR), readRegister(RB_COLOR_CLEAR_LO)),
                              a.clearValue.color.float32);
@@ -3175,6 +3437,7 @@ void main()
                 syncPartialTiles(depth, rect);
                 Image* none[4] = {};
                 beginPass(none, depth);
+                gpuMark(kGpuClear);
                 uint32_t v = readRegister(RB_DEPTH_CLEAR);
                 VkClearAttachment a{ VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, {} };
                 a.clearValue.depthStencil = { clear::depth(s.depthFormat, v), clear::stencil(v) };
@@ -3370,15 +3633,21 @@ void main()
             Shader* ps = currentShader(1);
             if (!vs || !ps) return true;
 
-            // Render targets this draw writes
+            // Render targets this draw writes. With vertex shader export mode 7 (multipass) the
+            // shader only writes memory and nothing is rasterized (Xenia's
+            // IsRasterizationPotentiallyDone), whatever targets are bound: the game's GPU skinning
+            // draws 115,000 such points a frame with a color target set (#121), which cost 3.5 ms of
+            // GPU time a frame at resolution scale 2 and EDRAM transfers into and out of that target.
+            constexpr uint32_t kExportModeMultipass = 7;
+            bool rasterized = s.vsExportMode != kExportModeMultipass;
             Image* color[4]{};
             VkFormat formats[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
-            if (s.edramMode == 4)
+            if (s.edramMode == 4 && rasterized)
                 for (int i = 0; i < 4; i++)
                     if (s.color[i].writeMask && ((ps->t.colorOutputs >> i) & 1) &&
                         (color[i] = target({ s.color[i].edramBase, s.surfacePitch, s.msaaSamples, s.color[i].format, false })))
                         formats[i] = color[i]->format;
-            Image* depth = (s.depthTest || s.stencil) ? target({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true }) : nullptr;
+            Image* depth = rasterized && (s.depthTest || s.stencil) ? target({ s.depthBase, s.surfacePitch, s.msaaSamples, 0, true }) : nullptr;
             if (depth) depth->edramFormat = s.depthFormat; // D24S8 or D24FS8: how its samples map to EDRAM bits
             // Memory export: the shader writes guest memory (GPU skinning, particles...). Without
             // render targets it is a "compute" draw with rasterization discarded.
@@ -3499,6 +3768,7 @@ void main()
             {
                 endPass();
                 VkCommandBuffer cb = cmd();
+                gpuMark(kGpuVertexCopy);
                 vkCmdCopyBuffer(cb, g_guestMem, f.upload, uint32_t(gpuVertexCopies.size()), gpuVertexCopies.data());
                 VkMemoryBarrier vb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
                 vb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -3531,7 +3801,17 @@ void main()
                 for (Image* t : { color[0], color[1], color[2], color[3], depth }) syncTarget(t, edramRect); // EDRAM aliasing
             }
 
+            g_exportBatching = memExport && g_exportBarrierPending && !exportsOverlapPending(exportRanges);
             beginPass(color, depth);
+            if (g_gpuTimeDraws)
+            {
+                uint16_t k = drawTimeKind(g_pass.kind, g_current[1], s);
+                gpuMark(k);
+                PerfStats::Calls& dc = g_perf.callsBy[k];
+                dc.calls++;
+                dc.amount += s.indexCount;
+                dc.unit = "indices";
+            }
             VkRect2D scissor = noTargets ? VkRect2D{ { 0, 0 }, { 1, 1 } } : scaled(guestScissor);
             VkCommandBuffer c = f.cmd;
             VkPipeline pl = pipeline({ &s, vs, ps, topology, rectangles, { formats[0], formats[1], formats[2], formats[3] }, depth != nullptr,
@@ -3624,11 +3904,9 @@ void main()
                 // them out when the guest can look (fences, interrupts, memory writes), later draws
                 // fetch vertices from them GPU to GPU, and textures or indices from them sync first.
                 endPass();
-                VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-                mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
-                vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                     VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+                g_exportBatching = false;
+                g_exportBarrierPending = true; // recorded before whatever comes next, unless that is another export draw
+                for (auto [start, bytes] : exportRanges) g_unbarrieredExports.push_back({ start, start + bytes });
                 g_perf.exportDraws++;
                 static const bool waitPerExport = getenv("BB_EXPORT_WAIT") != nullptr; // the old way, for A/B runs
                 if (waitPerExport)
@@ -3720,6 +3998,7 @@ void main()
             VK_CHECK(vkBindBufferMemory(D, buffer, memory, 0));
             endPass();
             VkCommandBuffer c = cmd();
+            gpuMark(kGpuReadback);
             transition(c, r, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             VkBufferImageCopy copy{};
             copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -3877,6 +4156,41 @@ void main()
                          (unsigned long long)p.copyInsAroundPending, (unsigned long long)p.hashSkips,
                          (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages());
                     faultsLast = mem::watch::faults();
+                    if (g_gpuTime)
+                    {
+                        // GPU time collected this second (from frames up to two swaps back)
+                        double busy = 0;
+                        std::vector<uint32_t> order;
+                        for (uint32_t k = 0; k < p.gpuMs.size(); k++)
+                        {
+                            if (k != kGpuIdle) busy += p.gpuMs[k];
+                            if (p.gpuMs[k] > 0 && k != kGpuIdle) order.push_back(k);
+                        }
+                        std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return p.gpuMs[a] > p.gpuMs[b]; });
+                        std::string parts;
+                        char b[256];
+                        for (size_t i = 0; i < order.size() && (i < 14 || (g_gpuTimeDetail && p.gpuMs[order[i]] >= 0.05)); i++)
+                        {
+                            snprintf(b, sizeof b, "%s%s %.1f ms (%u)", i ? ", " : "", g_gpuKindNames[order[i]].c_str(), p.gpuMs[order[i]],
+                                     p.gpuSpans[order[i]]);
+                            parts += b;
+                        }
+                        info("[perf]   GPU time: busy %.0f ms, between submits %.0f ms; %llu passes, %llu barriers (+%llu after memory export), "
+                             "%llu EDRAM transfers (%llu tiles)%s | %s",
+                             busy, p.gpuMs.size() > kGpuIdle ? p.gpuMs[kGpuIdle] : 0.0, (unsigned long long)p.passes, (unsigned long long)p.barriers,
+                             (unsigned long long)p.exportBarriers, (unsigned long long)p.transfers, (unsigned long long)p.transferTiles,
+                             p.gpuMarksDropped ? " (timestamps dropped: frame too long)" : "", parts.empty() ? "-" : parts.c_str());
+                        if (!p.callsBy.empty())
+                        {
+                            std::vector<std::pair<uint16_t, PerfStats::Calls>> calls(p.callsBy.begin(), p.callsBy.end());
+                            std::sort(calls.begin(), calls.end(), [](auto& a, auto& b) { return a.second.calls > b.second.calls; });
+                            std::string list;
+                            for (auto& [k, v] : calls)
+                                list += (list.empty() ? "" : ", ") + g_gpuKindNames[k] + " x" + std::to_string(v.calls) + " (" +
+                                        std::to_string(v.amount) + " " + v.unit + ")";
+                            info("[perf]   calls by kind: %s", list.c_str());
+                        }
+                    }
                     if (!p.syncsBy.empty() || !p.uploadsBy.empty())
                     {
                         std::string why, ups;
@@ -3945,6 +4259,7 @@ void main()
             VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &shotMemory));
             VK_CHECK(vkBindBufferMemory(D, shot, shotMemory, 0));
             VkCommandBuffer c = cmd();
+            gpuMark(kGpuReadback);
             transition(c, *front, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             VkBufferImageCopy copy{};
             copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
