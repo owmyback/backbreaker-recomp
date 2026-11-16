@@ -50,6 +50,17 @@ namespace settings
                     warn("%s: resolution_scale=%s is not 1-4 - using %ld", path.c_str(), text.c_str(), scale);
                 s.resolutionScale = uint32_t(scale);
             }
+            else if (key == "anisotropy")
+            {
+                std::string text = trim(eq + 1);
+                char* end = nullptr;
+                long n = std::strtol(text.c_str(), &end, 10);
+                bool number = !text.empty() && *end == 0;
+                long level = number ? std::clamp(n, 1L, 16L) : long(Settings{}.anisotropy);
+                if (!number || level != n)
+                    warn("%s: anisotropy=%s is not 1-16 - using %ld", path.c_str(), text.c_str(), level);
+                s.anisotropy = uint32_t(level);
+            }
             else if (key == "fps")
             {
                 std::string text = trim(eq + 1);
@@ -71,8 +82,8 @@ namespace settings
             warn("cannot write %s: %s", path.c_str(), std::strerror(errno));
             return false;
         }
-        std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\nresolution_scale=%u\nfps=%u\n",
-                     s.width, s.height, s.x, s.y, int(s.fullscreen), s.resolutionScale, s.fps);
+        std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\nresolution_scale=%u\nfps=%u\nanisotropy=%u\n",
+                     s.width, s.height, s.x, s.y, int(s.fullscreen), s.resolutionScale, s.fps, s.anisotropy);
         std::fclose(f);
         return true;
     }

@@ -9,6 +9,7 @@
 //   - hand-edited lines: spaces around the key and value, CRLF line ends, only the one key
 //   - resolution_scale out of range or not a number: the nearest valid value (or 1)
 //   - fps: 30 or 60, anything else the default (60)
+//   - anisotropy: 1-16, default 16; out of range the nearest, not a number the default
 //   - a file that can't be written: save returns false
 //
 // No game files. Build and run: README "Tests" / .github/workflows/ci.yml
@@ -42,6 +43,7 @@ static std::string write(const char* name, const char* text)
 
 static uint32_t scaleOf(const char* name, const char* text) { return settings::load(write(name, text)).resolutionScale; }
 static uint32_t fpsOf(const char* name, const char* text) { return settings::load(write(name, text)).fps; }
+static uint32_t anisoOf(const char* name, const char* text) { return settings::load(write(name, text)).anisotropy; }
 
 int main()
 {
@@ -55,6 +57,7 @@ int main()
         ok(!s.hasPosition && !s.fullscreen, "no file: no position, windowed");
         ok(s.resolutionScale == 1, "no file: scale 1");
         ok(s.fps == 60, "no file: 60 fps");
+        ok(s.anisotropy == 16, "no file: anisotropy 16");
     }
     {
         // exactly what the presenter wrote before #115
@@ -67,7 +70,7 @@ int main()
     {
         settings::Settings a;
         a.width = 1920; a.height = 1080; a.x = 40; a.y = 30; a.hasPosition = true;
-        a.fullscreen = true; a.resolutionScale = 3; a.fps = 30;
+        a.fullscreen = true; a.resolutionScale = 3; a.fps = 30; a.anisotropy = 4;
         std::string path = g_dir + "/roundtrip.ini";
         ok(settings::save(a, path), "save succeeds");
         settings::Settings b = settings::load(path);
@@ -75,6 +78,7 @@ int main()
         ok(b.fullscreen, "round trip: fullscreen");
         ok(b.resolutionScale == 3, "round trip: resolution_scale kept");
         ok(b.fps == 30, "round trip: fps kept");
+        ok(b.anisotropy == 4, "round trip: anisotropy kept");
         // and again: a second close of the window writes the same file
         ok(settings::save(b, path) && settings::load(path).resolutionScale == 3, "second save keeps the scale");
         ok(settings::load(path).fps == 30, "second save keeps fps");
@@ -109,6 +113,17 @@ int main()
     ok(fpsOf("fpsempty.ini", "fps=\n") == 60, "empty fps -> 60");
     ok(fpsOf("fpslast.ini", "fps=60\nfps=30\n") == 30, "fps: the last line wins");
     ok(fpsOf("fpsother.ini", "max_fps=30\nfps_cap=30\n") == 60, "similar keys are not fps");
+
+    {
+        // the user's file before the anisotropy key: 16, the rest kept
+        settings::Settings s = settings::load(write("preaniso.ini", "width=2560\nheight=1362\nresolution_scale=2\nfps=60\n"));
+        ok(s.anisotropy == 16 && s.resolutionScale == 2, "file without anisotropy: 16, the rest kept");
+    }
+    ok(anisoOf("aniso1.ini", "anisotropy=1\n") == 1, "anisotropy=1 (off)");
+    ok(anisoOf("aniso8.ini", " anisotropy = 8 \r\n") == 8, "anisotropy with spaces and CRLF");
+    ok(anisoOf("aniso32.ini", "anisotropy=32\n") == 16, "anisotropy=32 -> 16");
+    ok(anisoOf("aniso0.ini", "anisotropy=0\n") == 1, "anisotropy=0 -> 1");
+    ok(anisoOf("anisoword.ini", "anisotropy=max\n") == 16, "not a number -> 16");
 
     ok(!settings::save(settings::Settings{}, g_dir + "/no/such/dir/settings.ini"), "unwritable path: save fails");
 

@@ -66,7 +66,7 @@ namespace gpu::render
         // Internal resolution scale: render targets and everything drawn into them are this many
         // times larger than the guest's (the game still sees 1280x720)
         uint32_t g_scale = 1;
-        uint32_t g_forcedAniso = 0; // --anisotropy
+        uint32_t g_forcedAniso = 0; // --anisotropy or settings.ini's anisotropy
         VkRect2D scaled(VkRect2D r)
         {
             return { { r.offset.x * int32_t(g_scale), r.offset.y * int32_t(g_scale) }, { r.extent.width * g_scale, r.extent.height * g_scale } };
@@ -1769,7 +1769,7 @@ void main() {
             // --anisotropy: at least that much where the texture is minified linearly through mips
             // (not base-map textures: the UI)
             if (g_forcedAniso > 1 && si.minFilter == VK_FILTER_LINEAR && mip != 2) wanted = std::max(wanted, float(g_forcedAniso));
-            if (g_forcedAniso > 1 && !C->samplerAnisotropy) warnOnce("--anisotropy ignored: the GPU has no samplerAnisotropy");
+            if (g_forcedAniso > 1 && !C->samplerAnisotropy) warnOnce("anisotropic filtering ignored: the GPU has no samplerAnisotropy");
             if (wanted > 1.0f && C->samplerAnisotropy)
             {
                 si.anisotropyEnable = VK_TRUE;

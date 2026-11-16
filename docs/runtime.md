@@ -110,10 +110,18 @@ their guest address, and the presenter shows the image resolved to the front buf
   7,268 frames, scale 2 with `--anisotropy 16` 7,251 and 7,261, scale 3 with `--anisotropy 16`
   7,248 and 7,241 - all at the 30 fps cap. The renderer's cost is per draw on the CPU, not per
   pixel, so resolution only starts to matter once a GPU is the limit.
-- `--anisotropy N` (2-16) gives every texture the game minifies with linear filtering and mips at
-  least N:1 anisotropic filtering (16 is the usual choice). The game asks for it on only a few
-  textures, so the field blurs toward the horizon without it. UI textures (base level only) are
-  left alone. Needs the GPU's `samplerAnisotropy`, and the log says if it's missing.
+- Anisotropic filtering: every texture the game minifies with linear filtering and mips gets at
+  least N:1 anisotropic filtering. The game asks for it on only a few textures, so without it the
+  field blurs toward the horizon, worst from the low kickoff camera. Windowed runs use
+  `anisotropy=N` in `game/settings.ini` (1-16, default 16: no measurable cost, #82); `--anisotropy N`
+  overrides it for one run, and headless runs stay at 1 (the game's own) unless they pass the flag.
+  The log says which (`[gpu] anisotropic filtering 16x (game/settings.ini)`). UI textures (base
+  level only) are left alone. Needs the GPU's `samplerAnisotropy`, and the log says if it's missing.
+  Two other things soften the 3D picture and are not filtering: the game renders the match at
+  1152x640 and stretches it to 1280x720 (draw `post_process` 12e50a79, at every resolution scale),
+  and a window shorter than the scaled frame gets it shrunk to fit (2560x1440 into a maximized
+  2560x1362 window is 0.95x); fullscreen (F11) shows the frame 1:1. Depth of field and motion blur
+  (`bb_post_process`) are off for still pictures such as the kick aim: checked with `BB_DEBUG_EXPR`.
 - Compiled shaders are cached on disk: `$XDG_CACHE_HOME/backbreaker-recomp/spirv/` (else
   `~/.cache/...`), one SPIR-V file per shader, keyed by a hash of its GLSL and compile options, so a
   changed translation simply gets a new file. Compiling with shaderc was nearly all of a new shader's

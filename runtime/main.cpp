@@ -249,6 +249,7 @@ int main(int argc, char** argv)
     bool headless = false, fullscreen = false, mute = false, audio = false, listAchievements = false;
     int scaleArg = -1; // --resolution-scale; without it, windowed runs use game/settings.ini's (#115)
     int fpsArg = -1;   // --fps, the same way (#89)
+    int anisoArg = -1; // --anisotropy, the same way
     std::string overlayPreview;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
@@ -293,7 +294,7 @@ int main(int argc, char** argv)
             }
         }
         else if (a == "--anisotropy" && i + 1 < argc)
-            gpu::render::setAnisotropy(uint32_t(std::atoi(argv[++i])));
+            anisoArg = std::atoi(argv[++i]);
         else if (a == "--no-shader-cache")
             gpu::render::setShaderCache(false);
         else if (a == "--screenshot" && i + 1 < argc)
@@ -342,6 +343,10 @@ int main(int argc, char** argv)
     const uint32_t fps = fpsArg >= 0 ? uint32_t(fpsArg) : headless ? 30u : file.fps;
     frame_rate::set(fps);
     info("%u fps (%s)", fps, fpsArg >= 0 ? "--fps" : headless ? "headless" : settings::kPath);
+    const uint32_t aniso = anisoArg >= 0 ? uint32_t(std::clamp(anisoArg, 1, 16)) : headless ? 1u : file.anisotropy;
+    gpu::render::setAnisotropy(aniso);
+    if (aniso > 1)
+        info("[gpu] anisotropic filtering %ux (%s)", aniso, anisoArg >= 0 ? "--anisotropy" : settings::kPath);
     mem::init();
     loadImage(image);
     buildFunctionTable();

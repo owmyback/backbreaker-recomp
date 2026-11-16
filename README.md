@@ -149,7 +149,7 @@ Run it from the repo root too - the game files are found by paths relative to it
 
     ./build/backbreaker                          # windowed, at the game's own 1280x720
     ./build/backbreaker --resolution-scale 2     # 3D at 2560x1440 - sharper, costs frame rate
-    ./build/backbreaker --anisotropy 16          # keeps the field sharp toward the horizon
+    ./build/backbreaker --anisotropy 1           # the game's own texture filtering (the default is 16)
 
 To keep a resolution scale without typing the flag, add a line to `game/settings.ini` (create
 the file if it isn't there yet; the window writes the rest when it closes):
@@ -162,6 +162,10 @@ The game runs at 60 frames a second, twice the console's 30. For the console's r
 to `game/settings.ini` the same way, or pass `--fps 30` for one run (`--fps 60` likewise).
 Headless runs use 30 unless given `--fps`. What 60 changes in the game, and how:
 `docs/runtime.md`, "Frame rate" ([issue #89](https://github.com/owmyback/backbreaker-recomp/issues/89)).
+
+Textures get 16x anisotropic filtering, which keeps the field sharp toward the horizon (the game
+asks for it on only a few textures). `anisotropy=N` in `game/settings.ini` (1-16; 1 is the game's
+own) or `--anisotropy N` for one run changes it; headless runs use 1 unless given the flag.
 
 Both flags only change 3D scenes (`--resolution-scale` goes to 4, `--anisotropy` to 16); what each
 does to the picture - and what it leaves alone, like the 1280x720 attract movie and UI textures -
@@ -176,7 +180,7 @@ In the window:
 - **F12** - save the picture you see as `screenshots/<date-time>.png`
 - **F10** - GPU frame capture (draws, shaders, render targets) of the next frame to `captures/frame_N/`
 - **F11** or **Alt+Enter** - borderless fullscreen; window size, position and fullscreen state are
-  remembered in `game/settings.ini`, next to the `resolution_scale` and `fps` above
+  remembered in `game/settings.ini`, next to the `resolution_scale`, `fps` and `anisotropy` above
 
 Everything else - headless runs, screenshots by frame number or by second, scripted input,
 controllers, the renderer's debug aids - is in [`docs/runtime.md`](docs/runtime.md).
