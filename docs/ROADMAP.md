@@ -10,7 +10,8 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-14 (#3 closed; phase 4: window polish #9, validation clean #11 and the
+Last updated: 2026-11-15 (phase 12, online multiplayer, added as the last phase, with its
+research in `docs/multiplayer.md`). Before that, 2026-11-14 (#3 closed; phase 4: window polish #9, validation clean #11 and the
 screenshot key #10 done; setup script, phase 10 started; an Exhibition match loads and plays the kickoff;
 EDRAM transfers between formats #36: the match's tile blocks are gone; clear rectangles bounded by
 their vertices #37; resolves written back to guest memory #45: the grass renders; mip levels #46)
@@ -68,6 +69,7 @@ caches) until the heap ran out a minute into the match.
 | 9 | Gameplay correctness and performance | Planned | - |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | **In progress** (database, unlocks, store: #97 done; overlay list and pop-up: #101) | `1a59660` |
+| 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
 "Phase 2 (Vulkan renderer)". The numbering above replaces that.
@@ -679,6 +681,48 @@ screen is an overlay instead (as the console's Guide was).
 Depends on: phase 5 (a button to open the screen), phase 8 (profiles and where unlocks are
 stored). Parts 1 and 2 can start earlier and are good separable issues.
 
+## Phase 12 - Online multiplayer (planned, last)
+
+Goal: play Backbreaker's own online modes against other people running the recomp, with a way to
+find players who are hosting. This phase comes last, after the game is complete offline. The full
+research (feasibility, options, threat model, sources) is in
+[`docs/multiplayer.md`](multiplayer.md).
+
+What the game provides (checked 2026-11-15): online Exhibition and Tackle Alley as player and
+ranked matches, a pregame lobby, invites, voice chat and leaderboards, all on NaturalMotion's
+`NmgComms` layer over XSession, XNet QoS and sockets. It already has a **Hosted Games** list, so
+the game browser can be the game's own menu, fed by our server. There is no system link, so LAN
+tunneling (XLink Kai) can't work. Instead, the runtime has to stand in for the Xbox LIVE side.
+One host runs the session, and the in-match message names (`kGameMessage_Sync_*`, remote
+controllers) suggest the host simulates the match and sends its state. If that holds, two
+separately compiled builds can play together, because they don't need to agree bit for bit as a
+lockstep game would. Confirming it is the first research item.
+
+Planned parts:
+1. Research: confirm the netcode model (#108), list the online calls the menus make (#109), verify
+   local two-controller play and document streamed play (Steam Remote Play Together, Parsec),
+   which works with no network code (#110).
+2. Security prerequisites, before any networking lands. Offline the guest is trusted; online, a
+   peer's packets reach the game's parsers. Found so far: the indirect-call table (host function
+   pointers) is writable from guest code (#111), `..` in guest paths escapes the mount root
+   (#112), and imports trust guest lengths (#113). Plus a sandbox for the game process.
+3. LAN proof: real sockets, XNADDR mapping, XSession calls answered by a local session service,
+   online sign-in. Goal: two instances reach a pregame lobby and kick off.
+4. Internet play: a self-hostable session service (registration, search, hole punching,
+   per-session encryption keys), the Hosted Games table filled from it, and a version check on join.
+5. Relay for unreachable hosts and for players who don't want to share their IP, voice,
+   invites, and an external game browser (launcher or web) that joins through the game's own
+   invite flow.
+6. Maybe: stats and leaderboards, labelled unverified (anyone can claim any XUID, and the host
+   controls the match).
+
+Depends on: phases 4 and 9 (menus and matches render reliably at full speed; a slow host slows
+everyone), 8 (profile and gamertag), 10 (if the browser lives in the launcher) and 11 (the overlay
+for gamer cards, the keyboard and friends).
+
+Open issues: #108-#113, all labelled `after the game is done`: none of them starts before the
+game is complete offline. The later parts (3-6 and the sandbox) get issues when the research is in.
+
 ---
 
 ## Known shortcuts and technical debt
@@ -693,12 +737,18 @@ stored). Parts 1 and 2 can start earlier and are good separable issues.
 - Renderer shortcuts: see phase 4 steps 5-13 and the remaining steps (some resolves not written
   to memory, per-frame texture re-uploads).
 - Virtual memory grows ~1 MB per 20 s in the front end (not investigated).
+- The runtime trusts the guest. The indirect-call table is writable from guest memory, `..` in a
+  guest path climbs out of the mount root, and imports don't bound guest lengths. That's fine
+  while the guest is only ever the game; it must change before phase 12 (#111, #112, #113;
+  `docs/multiplayer.md`, "Security").
 
 ## Open questions
 
 - What caps the title loop at 30 fps (attract video rate, vblank interval, or game logic)?
 - Which save/content calls the game makes after enumeration (expected: XamContentCreateEx).
 - XMA2 decoder source for phase 6 (RPM Fusion FFmpeg vs. vendored decoder).
+- Is online play host-authoritative or lockstep (phase 12)? It decides whether two separately
+  compiled builds can play each other.
 - High-level (hook Direct3D calls) vs. low-level (emulate Xenos PM4, like Xenia) rendering:
   the current command processor follows the low-level route, which needs no knowledge of the
   game's statically linked D3D library.
