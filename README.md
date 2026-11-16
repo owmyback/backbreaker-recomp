@@ -158,11 +158,16 @@ the file if it isn't there yet; the window writes the rest when it closes):
 
 `--resolution-scale` still overrides it for one run, and headless runs ignore it.
 
+The game runs at 60 frames a second, twice the console's 30. For the console's rate, add `fps=30`
+to `game/settings.ini` the same way, or pass `--fps 30` for one run (`--fps 60` likewise).
+Headless runs use 30 unless given `--fps`. What 60 changes in the game, and how:
+`docs/runtime.md`, "Frame rate" ([issue #89](https://github.com/owmyback/backbreaker-recomp/issues/89)).
+
 Both flags only change 3D scenes (`--resolution-scale` goes to 4, `--anisotropy` to 16); what each
 does to the picture - and what it leaves alone, like the 1280x720 attract movie and UI textures -
 is in `docs/runtime.md`. On a Radeon RX 9070 XT neither costs measurable frame rate: headless over
 the Exhibition route, scale 1, scale 2 with `--anisotropy 16` and 4K (scale 3) with
-`--anisotropy 16` all hold the game's 30 fps cap, within 0.4% of each other in frames rendered
+`--anisotropy 16` all hold the console's 30 fps, within 0.4% of each other in frames rendered
 ([issue #82](https://github.com/owmyback/backbreaker-recomp/issues/82)). A weaker GPU will show a
 difference sooner: the runtime prints an `[gpu] N fps` line once a second, so try the flag and
 watch that number.
@@ -171,7 +176,7 @@ In the window:
 - **F12** - save the picture you see as `screenshots/<date-time>.png`
 - **F10** - GPU frame capture (draws, shaders, render targets) of the next frame to `captures/frame_N/`
 - **F11** or **Alt+Enter** - borderless fullscreen; window size, position and fullscreen state are
-  remembered in `game/settings.ini`, next to the `resolution_scale` above
+  remembered in `game/settings.ini`, next to the `resolution_scale` and `fps` above
 
 Everything else - headless runs, screenshots by frame number or by second, scripted input,
 controllers, the renderer's debug aids - is in [`docs/runtime.md`](docs/runtime.md).

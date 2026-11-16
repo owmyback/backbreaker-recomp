@@ -1,4 +1,4 @@
-// game/settings.ini (issues #9, #115): see settings.h.
+// game/settings.ini (issues #9, #115, #89): see settings.h.
 #include "settings.h"
 #include "log.h"
 
@@ -50,6 +50,13 @@ namespace settings
                     warn("%s: resolution_scale=%s is not 1-4 - using %ld", path.c_str(), text.c_str(), scale);
                 s.resolutionScale = uint32_t(scale);
             }
+            else if (key == "fps")
+            {
+                std::string text = trim(eq + 1);
+                s.fps = text == "30" ? 30 : text == "60" ? 60 : Settings{}.fps;
+                if (text != "30" && text != "60")
+                    warn("%s: fps=%s is not 30 or 60 - using %u", path.c_str(), text.c_str(), s.fps);
+            }
         }
         std::fclose(f);
         if (s.width <= 0 || s.height <= 0) { s.width = 1280; s.height = 720; }
@@ -64,8 +71,8 @@ namespace settings
             warn("cannot write %s: %s", path.c_str(), std::strerror(errno));
             return false;
         }
-        std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\nresolution_scale=%u\n",
-                     s.width, s.height, s.x, s.y, int(s.fullscreen), s.resolutionScale);
+        std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\nresolution_scale=%u\nfps=%u\n",
+                     s.width, s.height, s.x, s.y, int(s.fullscreen), s.resolutionScale, s.fps);
         std::fclose(f);
         return true;
     }

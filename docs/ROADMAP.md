@@ -79,7 +79,7 @@ Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" an
 | Goal | Where | Notes |
 |------|-------|-------|
 | Higher internal resolution (1440p, 4K) | Phase 4 | The renderer can render at any internal resolution while the game is still told 1280x720. Needs consistent scaling of EDRAM resolves/copies and of resolution-dependent effects (blur, bloom, shadows, post-processing). 2D UI scales as-is. Ultrawide (beyond 16:9) would also need camera/layout patches. |
-| Higher frame rate (60+ fps) | Phase 9 | The title loop runs at 30 fps; the source of the cap is not confirmed yet (attract video rate, vblank interval, or game logic). Uncapping is easy; the risk is game logic and Euphoria physics assuming a 30 Hz step. Fix by patching timing code (function overrides / mid-asm hooks; profiler-scope names help find it) or by a fixed 30 Hz simulation with interpolated rendering. Must be verified by play-testing. |
+| Higher frame rate (60+ fps) | Phase 9 | 60 fps is the default for windowed play (#89; `docs/runtime.md`, "Frame rate"). The cap was D3D's present interval (2 vblanks a frame) and a fixed 1/30 s gameplay tick; both are set for 60, and PhysX steps 1/60 s either way. Play speed was wrong before because the guest clock ran at the host TSC rate, which overflowed the game's 32-bit timer frequency. Above 60 would need a faster guest vblank and a matching tick. Play-testing so far: a match at the right speed; anything that runs too fast or slow only at 60 is a follow-up. |
 
 ---
 
@@ -622,8 +622,8 @@ settings were asked for by name. The Options > Controls and Game screens look th
 
 Play-test menus and matches; watch Euphoria/Morpheme physics for floating-point differences;
 profile hot paths; consider XenonRecomp's optimization flags once behavior is correct.
-High-frame-rate support (see Goals): find what caps the game at 30 fps, check whether game logic
-and physics use real elapsed time, then patch timing or interpolate.
+High-frame-rate support (see Goals): 60 fps since #89 (the present interval and the gameplay tick,
+after fixing the guest clock); see `docs/runtime.md`, "Frame rate".
 
 ## Phase 10 - Packaging (started)
 
@@ -745,7 +745,6 @@ game is complete offline. The later parts (3-6 and the sandbox) get issues when 
 
 ## Open questions
 
-- What caps the title loop at 30 fps (attract video rate, vblank interval, or game logic)?
 - Which save/content calls the game makes after enumeration (expected: XamContentCreateEx).
 - XMA2 decoder source for phase 6 (RPM Fusion FFmpeg vs. vendored decoder).
 - Is online play host-authoritative or lockstep (phase 12)? It decides whether two separately

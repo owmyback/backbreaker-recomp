@@ -16,6 +16,7 @@
 #include "build_id.h"
 #include "log.h"
 #include "memory.h"
+#include "frame_rate.h"
 #include "settings.h"
 
 #include <algorithm>
@@ -247,6 +248,7 @@ int main(int argc, char** argv)
     int timeout = 0;
     bool headless = false, fullscreen = false, mute = false, audio = false, listAchievements = false;
     int scaleArg = -1; // --resolution-scale; without it, windowed runs use game/settings.ini's (#115)
+    int fpsArg = -1;   // --fps, the same way (#89)
     std::string overlayPreview;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
@@ -281,6 +283,15 @@ int main(int argc, char** argv)
             gpu::render::disable();
         else if (a == "--resolution-scale" && i + 1 < argc)
             scaleArg = std::atoi(argv[++i]);
+        else if (a == "--fps" && i + 1 < argc)
+        {
+            fpsArg = std::atoi(argv[++i]);
+            if (fpsArg != 30 && fpsArg != 60)
+            {
+                std::fprintf(stderr, "--fps %s: 30 or 60\n", argv[i]);
+                return 2;
+            }
+        }
         else if (a == "--anisotropy" && i + 1 < argc)
             gpu::render::setAnisotropy(uint32_t(std::atoi(argv[++i])));
         else if (a == "--no-shader-cache")
@@ -318,15 +329,19 @@ int main(int argc, char** argv)
     installHandlers();
     info("built from %s", build_id::line()); // first line of every log says what made it (#75)
 
-    // Render scale of the 3D scenes. The flag wins for this run and leaves the file alone. Headless
-    // runs (test routes, scripted screenshots) don't read the file, so what they produce doesn't
-    // depend on the player's setting.
+    // Render scale of the 3D scenes and the frame rate. A flag wins for this run and leaves the file
+    // alone. Headless runs (test routes, scripted screenshots) don't read the file, so what they
+    // produce doesn't depend on the player's settings: scale 1 and the console's 30 fps.
+    const settings::Settings file = headless ? settings::Settings{} : settings::load();
     uint32_t scale = scaleArg >= 0 ? uint32_t(std::clamp(scaleArg, 1, 4))
                    : headless      ? 1u
-                                   : settings::load().resolutionScale;
+                                   : file.resolutionScale;
     gpu::render::setResolutionScale(scale);
     if (scale != 1)
         info("[gpu] resolution scale %u (%s)", scale, scaleArg >= 0 ? "--resolution-scale" : settings::kPath);
+    const uint32_t fps = fpsArg >= 0 ? uint32_t(fpsArg) : headless ? 30u : file.fps;
+    frame_rate::set(fps);
+    info("%u fps (%s)", fps, fpsArg >= 0 ? "--fps" : headless ? "headless" : settings::kPath);
     mem::init();
     loadImage(image);
     buildFunctionTable();

@@ -266,6 +266,9 @@ step_xenonrecomp() {
 
 recompile() { # one XenonRecomp pass over the image with the config in config/
     mkdir -p ppc build
+    # Output files from an earlier run that this one doesn't write would still be built (CMake
+    # globs ppc/*.cpp), carrying old copies of functions
+    rm -f ppc/ppc_recomp.*.cpp
     say "recompiling the executable to ppc/ (a few minutes)"
     run_quiet "$XENON_BIN" config/backbreaker.toml "$XENON/XenonUtils/ppc_context.h" \
         | tee build/recompile.log

@@ -360,6 +360,45 @@ The other XGI messages the game sends: `XUserSetContext` (0x000B0006) and `XUser
 which is refused as "not signed in to LIVE" (0x80151802, as Xenia). Any other `XMsgStartIORequest`
 is reported as done, and every message is logged once.
 
+## Frame rate
+Windowed runs default to 60 frames a second, twice the console's 30 (#89). `fps=30` in
+`game/settings.ini` or `--fps 30` gives the console's rate. Headless runs use 30 unless they are
+given `--fps`, so test routes and their frame-numbered screenshots stay as they were. The log says
+which applies: `[rt] 60 fps (game/settings.ini)`.
+
+**The guest clock.** The game times its frames with `mftb` (the PowerPC time base) and the
+performance frequency (`KeQueryPerformanceFrequency`). XenonRecomp emits `mftb` as the host TSC,
+and the runtime used to report the TSC rate as the frequency. Backbreaker's frame timer
+(sub_82649BE0, its struct at 0x82CD0138) keeps only the low 32 bits of that frequency. A 4.7 GHz
+TSC leaves 405 MHz, so every frame measured 11.6 times too long. The game clock (0x82C7B9D0)
+clamps a frame to 1/30 s, so every frame counted as exactly 1/30 s. That was right at 30 fps and
+twice the speed at 60, whatever the frame actually took. Now the instruction patch emits `mftb` as
+a call to the runtime's `ppcQueryTimeBase()` (`runtime/kernel/system.cpp`), a 50 MHz count, the
+console's rate, scaled from the TSC. `KeQueryPerformanceFrequency` says 50 MHz too. A slow frame
+now counts as what it took, up to the clamp.
+
+**What makes it 30, and what 60 changes** (`runtime/frame_rate.cpp`):
+- *The present interval.* Before each swap, the command stream has the CPU call D3D's
+  sub_8241A410 (through an interrupt) with an argument whose bits 8-11 say how many vblanks a
+  frame stays up. The game asks for 2 (argument 0x264): 30 fps on the 60 Hz vblank. At 60 it gets
+  1.
+- *The gameplay tick.* The game object (constructed by sub_82274628) runs the simulation in fixed
+  steps. Each frame adds the game clock's time to an accumulator (+168) and runs one step for each
+  +172 in it, 1/30 s. At 60 frames a second, every step would be drawn twice. At 60 the step is
+  1/60 s. PhysX is set to take 1/60 s substeps (`NxScene::setTiming`, maximum 6), so it now does
+  one per step instead of two.
+
+Measured over the Exhibition route at 60: 60 PhysX steps a second of 1/60 s each, adding up to
+1.000 s of game time per second, as at 30. A frame that runs late (the game clock's time above
+1/60 s) gets two steps, so a dip below 60 fps keeps the game's speed. Below 30 fps the clamp
+slows the game, as on the console.
+
+Not covered yet: code with its own idea of 30 Hz. The constant 1/30 (0x8200E744) is used in
+about 50 functions, mostly as a clamp on a frame's time. One forces 1/30 into an update in
+sub_82277110 while the byte 0x82C75097 is set. The code only ever clears that byte and nothing
+points at it, so it looks unused, and it was 0 throughout the route and a play-test. Above 60
+fps would need a faster guest vblank (`runtime/gpu/`, 60 Hz) and a matching tick.
+
 ## Controllers
 Controllers are read through SDL3 (users 0-3 = the first four controllers SDL lists; a
 DualSense's Cross/Circle/Square/Triangle are A/B/X/Y, Create/Options are Back/Start). The log

@@ -33,7 +33,7 @@ index 34add40..6483a40 100644
                          {
                              blocks.emplace_back(lBase, 0);
 diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
-index fa91527..7151c5f 100644
+index fa91527..b10489f 100644
 --- a/XenonRecomp/recompiler.cpp
 +++ b/XenonRecomp/recompiler.cpp
 @@ -177,12 +177,20 @@ void Recompiler::Analyse()
@@ -180,7 +180,17 @@ index fa91527..7151c5f 100644
      case PPC_INST_LVEWX:
      case PPC_INST_LVEWX128:
      case PPC_INST_LVX:
-@@ -1877,6 +1919,8 @@ bool Recompiler::Recompile(
+@@ -1260,7 +1302,8 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_MFTB:
+-        println("\t{}.u64 = __rdtsc();", r(insn.operands[0]));
++        // The runtime provides the time base (its rate is the performance frequency it reports)
++        println("\t{}.u64 = ppcQueryTimeBase();", r(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_MR:
+@@ -1877,6 +1920,8 @@ bool Recompiler::Recompile(
  
      case PPC_INST_VCMPGTUH:
          println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
@@ -189,7 +199,7 @@ index fa91527..7151c5f 100644
          break;
  
      case PPC_INST_VEXPTEFP:
-@@ -2263,6 +2307,301 @@ bool Recompiler::Recompile(
+@@ -2263,6 +2308,301 @@ bool Recompiler::Recompile(
          println("\t{}.u64 = {}.u64 ^ {};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2] << 16);
          break;
  
@@ -491,7 +501,7 @@ index fa91527..7151c5f 100644
      default:
          return false;
      }
-@@ -2438,10 +2777,36 @@ bool Recompiler::Recompile(const Function& fn)
+@@ -2438,10 +2778,36 @@ bool Recompiler::Recompile(const Function& fn)
          ++data;
      }
  
@@ -532,3 +542,16 @@ index fa91527..7151c5f 100644
  
      println("}}\n");
  
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 31a86cd..434470c 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -700,4 +700,8 @@ inline uint64_t __rdtsc()
+ #   error "Missing implementation for __rdtsc()"
+ #endif
+ 
++// mftb: the guest time base, provided by the runtime. The console's runs at 50 MHz and game
++// code can count on the rate fitting in 32 bits, which a host TSC above 4.29 GHz does not.
++uint64_t ppcQueryTimeBase();
++
+ #endif

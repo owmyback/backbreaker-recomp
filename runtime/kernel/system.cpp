@@ -13,7 +13,7 @@ using namespace mem;
 
 namespace
 {
-    // Recompiled `mftb` reads the host TSC, so report the host TSC rate as the timebase.
+    // The host TSC rate, measured once (the guest time base below is derived from it).
     uint64_t measureTscFrequency()
     {
         using clock = std::chrono::steady_clock;
@@ -34,6 +34,28 @@ namespace
         }();
         return f;
     }
+
+    // The guest time base (mftb) and performance frequency run at the console's 50 MHz, not at the
+    // host TSC rate. Game code keeps only the low 32 bits of the frequency: Backbreaker's frame
+    // timer does (sub_82649BE0), so on a TSC above 4.29 GHz it measured every frame too long (11.6
+    // times on a 4.7 GHz TSC), its game clock clamped each frame to 1/30 s, and play ran at the
+    // frame rate instead of the clock: twice the speed at 60 fps (#89; docs/runtime.md, "Frame
+    // rate"). 50 MHz fits, and code that assumes the console's rate gets it.
+    constexpr uint64_t kTimeBaseHz = 50'000'000;
+
+    // TSC ticks to time base ticks: a 32.32 fixed-point factor, set once
+    uint64_t timeBaseFactor()
+    {
+        static const uint64_t factor = uint64_t(((unsigned __int128)kTimeBaseHz << 32) / tscFrequency());
+        return factor;
+    }
+}
+
+// Recompiled `mftb` (declared in ppc_context.h; see patches/xenonrecomp-backbreaker-instructions.patch).
+// The count starts where the host TSC does, at host boot, so it is never near zero.
+uint64_t ppcQueryTimeBase()
+{
+    return uint64_t(((unsigned __int128)__rdtsc() * timeBaseFactor()) >> 32);
 }
 
 namespace kernel
@@ -48,7 +70,7 @@ namespace kernel
     }
 }
 
-GUEST_IMPORT(KeQueryPerformanceFrequency) { ctx.r3.u64 = tscFrequency(); }
+GUEST_IMPORT(KeQueryPerformanceFrequency) { ctx.r3.u64 = kTimeBaseHz; }
 GUEST_IMPORT(KeQuerySystemTime) { if (ctx.r3.u32) write64(ctx.r3.u32, kernel::systemTime()); }
 
 // NTSTATUS KeDelayExecutionThread(u32 WaitMode, BOOL Alertable, i64* Interval)  (negative = relative, 100 ns)
