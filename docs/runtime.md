@@ -65,8 +65,38 @@ relinks in about a second. It is the prototype of the installer's build step (#1
 no game content.
 
 ### Installer tools (#138)
-`build/backbreaker-installer` (`installer/`) does the game-file steps without Python or OpenSSL,
-for the installer, which can't count on either on a player's machine:
+`backbreaker-installer` (`installer/`) takes a player from their own disc image to a built game
+with nothing from the host but glibc, a Vulkan driver and the kernel: no Python, OpenSSL or compiler.
+
+    backbreaker-installer install <image> [--prefix <dir>] [--jobs <n>] [--progress]
+    backbreaker-installer play [--prefix <dir>] [-- <game options>]
+    backbreaker-installer rebuild [--prefix <dir>]
+
+`install` checks the image (below), copies the game's files, runs XenonRecomp, compiles `ppc/` and
+links the game, into `~/.local/share/backbreaker-recomp/install` by default (`$XDG_DATA_HOME`; the
+player's saves and settings stay where the installed layout puts them, "Where files live"). That
+folder has the checkout's layout, which XenonRecomp's config expects: `config/`, `game/disc`,
+`game/extracted`, `ppc/` (only its headers once compiled: XenonRecomp makes the sources again in
+seconds), `obj/` and `bin/backbreaker`. `play` builds whatever changed and starts the game with
+`--data-dir <prefix>/game`: a new runtime kit relinks in about a second, and `ppc/` is compiled again
+only when XenonRecomp, the config, the kit's compile arguments or the executable changed
+(`obj/build.stamp`). Parallel compiles: the CPU threads, or fewer when free memory is short (1 GB a
+job; the biggest file peaks at about 720 MB). `ppc/` is compiled with the kit's arguments plus
+`-g0`: crash backtraces use the exported symbol names, not debug info, and without it the biggest
+file takes 11 s instead of 13 s. A second installer started on the same folder while one is working
+stops with a message (`<prefix>/.lock`).
+
+Everything it builds with comes from its bundle, `build-installer/AppDir/usr/lib/backbreaker-installer`
+(`installer/build.h` has the layout), made in the portable build container by
+`packaging/installer/build_installer.sh`: the runtime kit (`BB_PORTABLE`), XenonRecomp with
+`patches/`, `config/`, clang and lld 23 with the libraries they load, and a sysroot of Ubuntu 22.04's
+glibc, libstdc++ and Vulkan loader packages, so the game it builds needs glibc 2.35, as the portable
+build does. `MANIFEST.txt` lists every package and version in it. The bundle is about 420 MB, and the
+AppImage, `build-installer/Backbreaker-Installer-x86_64.AppImage`, about 110 MB; it holds no game
+content. `packaging/portable/test_distros.sh --installer <AppImage> --image <your image>` installs and
+runs the game with it in each distribution's container, none of which has a compiler.
+
+The single steps are commands too:
 
     backbreaker-installer check <image>                 is it Backbreaker, the release supported?
     backbreaker-installer game-files <image> <game dir> [--progress]   disc/ + extracted/default.{xex,pe}
@@ -86,6 +116,8 @@ refuses, each with its own message and exit code:
 - 5: another game (its title ID; Backbreaker's is `464F07DA`);
 - 6: damaged: a file or folder runs past the end of the image (a cut-short copy), or `default.xex`
   isn't a known release (`kKnownReleases` in `installer/game_check.cpp`: its SHA-256).
+- 7: (`play`, `rebuild`) the game isn't installed in that folder; 8: the build failed (the message
+  ends with the compiler's or linker's last lines; the whole log is in `<prefix>/obj/`).
 
 It doesn't read the rest of the disc, so damage elsewhere goes unnoticed until the file is used.
 Messages never contain the image's path. `--progress` prints `progress <0-1> <step>` lines, the form

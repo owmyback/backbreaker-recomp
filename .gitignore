@@ -22,4 +22,5 @@ __pycache__/
 captures/
 screenshots/
 build-portable/
+build-installer/
 dist/

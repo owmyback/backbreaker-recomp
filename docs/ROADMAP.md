@@ -15,7 +15,8 @@ a quarter on the PC, #146, and thread timing reports the long frames that remain
 achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
 a game-fps readout and a log file, #148; the installer, #138, started: RecompLauncher will be its front end,
 and the runtime builds as a library without game files, the "runtime kit" a player's machine links
-the game against; the extraction tools and the image check in C++). Before that,
+the game against; the extraction tools and the image check in C++; the installer builds the game
+from the player's image with its own clang and sysroot, in each distribution's container). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -85,7 +86,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138 started: RecompLauncher as the front end, the runtime kit) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -803,9 +804,18 @@ The parts, in order:
    cut-short or damaged copy and an unknown release each get their own message and exit code) and does
    what `tools/xdvdfs.py`, `xex_decrypt.py`, `gen_imports.py` and `title_icon.py` do, byte for byte,
    with no Python or OpenSSL (docs/runtime.md, "Installer tools").
-3. A bundled clang, lld and Ubuntu 22.04 sysroot (about 330 MB unpacked, of which the LLVM part
-   compresses to 86 MB; measured in the build container), the headless install into `~/.local/share/backbreaker-recomp/`,
-   parallel jobs chosen by free memory, and `test_distros.sh` running it in each distribution.
+3. **The headless install** (done): `backbreaker-installer install <image>` checks the image, copies
+   the game's files, runs XenonRecomp (2.4 s) and compiles and links the game with its bundled clang
+   and lld against an Ubuntu 22.04 sysroot, into `~/.local/share/backbreaker-recomp/install`; `play`
+   relinks after a runtime update (0.4 s) and starts the game. The installer AppImage
+   (`packaging/installer/build_installer.sh`) is 109 MB, 416 MB unpacked, with no game content.
+   From the ISO to a built game: 32 s on the maintainer's desktop (16 jobs; jobs are chosen by CPU
+   threads and free memory at 1 GB each). In containers of Ubuntu 22.04 and 24.04, Debian 12 and 13,
+   Fedora and Arch, none with a compiler, it installed from the image in 32 s each and the game
+   reached the Exhibition kickoff (the title screen on lavapipe for Ubuntu 22.04 and Debian 12)
+   (`packaging/portable/test_distros.sh --installer`).
+   Still open from part 6: the time on a Steam Deck, and what compiling `ppc/` at `-O1` instead of
+   `-O2` costs in frame rate (it compiles 9-28% faster per file, on three files measured).
 4. The `recomplauncher.json`, first tried on the Deck with a stand-in builder.
 5. Add to Steam, a menu entry and GitHub releases. Publishing waits for the licence decision and for
    the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++

@@ -3,6 +3,13 @@
 # loader and Mesa, to check it starts and renders there. Needs podman; game content stays local.
 #
 #   packaging/portable/test_distros.sh [dist/Backbreaker-x86_64.AppImage] [distro ...]
+#   packaging/portable/test_distros.sh --installer <Backbreaker-Installer-x86_64.AppImage> --image <your disc image> [distro ...]
+#
+# With --installer (#138), each distribution installs the game from the image with the installer
+# (packaging/installer/build_installer.sh) - its bundled clang, no compiler in the container - and then
+# runs the same checks through `backbreaker-installer play`. The image is mounted read-only under a
+# neutral name; its path is never printed. Results go to dist/installer-test/<distro>/ (install.log
+# too). BB_TEST_JOBS=<n> sets the installer's parallel compiles (default: by CPU threads and memory).
 #
 # Distros: ubuntu22 ubuntu24 debian12 debian13 fedora arch (default: all). Each runs the AppImage
 # headless (extract-and-run: no FUSE in a container) with its player files in a temporary home,
@@ -15,11 +22,21 @@
 set -euo pipefail
 
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-APP=$(readlink -f "${1:-$REPO/dist/Backbreaker-x86_64.AppImage}")
-shift || true
+INSTALLER="" IMAGE=""
+if [ "${1:-}" = --installer ]; then
+    [ $# -ge 4 ] && [ "$3" = --image ] || { echo "usage: $0 --installer <AppImage> --image <disc image> [distro ...]" >&2; exit 2; }
+    INSTALLER=$(readlink -f "$2"); IMAGE=$(readlink -f "$4"); shift 4
+    [ -f "$INSTALLER" ] || { echo "no installer at $INSTALLER" >&2; exit 1; }
+    [ -r "$IMAGE" ] || { echo "the disc image isn't readable (its path is never printed)" >&2; exit 1; }
+    APP=$INSTALLER
+    OUT=$REPO/dist/installer-test
+else
+    APP=$(readlink -f "${1:-$REPO/dist/Backbreaker-x86_64.AppImage}")
+    shift || true
+    OUT=$REPO/dist/distro-test
+fi
 DISTROS=("$@")
 [ ${#DISTROS[@]} -gt 0 ] || DISTROS=(ubuntu22 ubuntu24 debian12 debian13 fedora arch)
-OUT=$REPO/dist/distro-test
 [ -f "$APP" ] || { echo "no AppImage at $APP" >&2; exit 1; }
 
 image_of() {
@@ -58,17 +75,31 @@ for d in "${DISTROS[@]}"; do
         dev=()
         env=(-e BB_TEST_LAVAPIPE=1)
     fi
-    echo "[$d] running ($tier tier)"
+    echo "[$d] running ($tier tier${INSTALLER:+, installing from the image first})"
+    # The game: the AppImage itself, or the installer's `play` after an install from the image
+    start='exec /app/Backbreaker.AppImage "$@"'
+    mounts=(-v "$APP:/app/Backbreaker.AppImage:ro")
+    if [ -n "$INSTALLER" ]; then
+        mounts+=(-v "$IMAGE:/image:ro")
+        env+=(-e "BB_TEST_JOBS=${BB_TEST_JOBS:-}")
+        start='cd "$TMPDIR" && /app/Backbreaker.AppImage --appimage-extract >/dev/null || exit 90
+               begin=$(date +%s)
+               squashfs-root/AppRun install /image ${BB_TEST_JOBS:+--jobs "$BB_TEST_JOBS"} > /home/test/install.log 2>&1 ||
+                   { rc=$?; echo "[test] install failed with exit $rc"; exit $rc; }
+               echo "[test] installed in $(( $(date +%s) - begin )) s"
+               exec squashfs-root/AppRun play -- "$@"'
+    fi
     set +e
     podman run --rm --userns=keep-id --security-opt label=disable "${dev[@]}" "${env[@]}" \
         -e HOME=/home/test -e APPIMAGE_EXTRACT_AND_RUN=1 -e TMPDIR=/home/test/tmp \
-        -v "$home:/home/test" -v "$APP:/app/Backbreaker.AppImage:ro" -w /home/test "$tag" \
+        -v "$home:/home/test" "${mounts[@]}" -w /home/test "$tag" \
         sh -c 'mkdir -p "$TMPDIR"
                if [ -n "${BB_TEST_LAVAPIPE:-}" ]; then # lvp_icd.x86_64.json or lvp_icd.json, by distribution
                    VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1); export VK_DRIVER_FILES VK_ICD_FILENAMES=$VK_DRIVER_FILES
                fi
-               exec /app/Backbreaker.AppImage "$@"' sh "${args[@]}" > "$OUT/$d/run.log" 2>&1
+               '"$start" sh "${args[@]}" > "$OUT/$d/run.log" 2>&1
     rc=$?
+    [ -f "$home/install.log" ] && mv "$home/install.log" "$OUT/$d/install.log"
     mv "$home/.local/share/backbreaker-recomp/screenshots" "$OUT/$d/screenshots" 2>/dev/null
     glibc=$(podman run --rm "$tag" sh -c 'ldd --version 2>&1 | head -1' | grep -oE '[0-9]+\.[0-9]+$')
     device=$(grep -m1 -o '\[vulkan\] device: .*' "$OUT/$d/run.log" | cut -c18-)
@@ -77,5 +108,6 @@ for d in "${DISTROS[@]}"; do
     crash=$(grep -c 'Segmentation fault\|SIGILL\|fatal\|error while loading shared' "$OUT/$d/run.log")
     set -e
     # exit 124 is --timeout's: the run lasted its full time
-    echo "[$d] exit $rc, glibc $glibc, $device, $shots screenshots, $crash crash lines"
+    installed=$(grep -m1 -oE 'installed in [0-9]+ s|install failed with exit [0-9]+' "$OUT/$d/run.log")
+    echo "[$d] exit $rc, glibc $glibc, ${installed:+$installed, }$device, $shots screenshots, $crash crash lines"
 done
