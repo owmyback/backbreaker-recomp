@@ -151,6 +151,9 @@ jobs:
       - name: Run installer test
         run: ./build/installer_test
 
+      - name: Check RecompLauncher's manifest parses (#138; its schema check is in the PR that added it)
+        run: python3 -I -m json.tool packaging/installer/recomplauncher.json >/dev/null
+
       - name: Build backbreaker-installer (#138; its install step needs the bundle, not built here)
         run: |
           clang++ -std=c++20 -Wall -Wextra -O2 -I third_party/XenonRecomp/XenonUtils installer/*.cpp \

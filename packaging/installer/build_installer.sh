@@ -156,6 +156,8 @@ DESK
 printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x04\x00\x09\xfb\x03\xfd\xe3U\xf2\x9c\x00\x00\x00\x00IEND\xaeB`\x82' \
     >"$APPDIR/backbreaker-installer.png"
 ln -s backbreaker-installer.png "$APPDIR/.DirIcon"
+# RecompLauncher reads /recomplauncher.json from the AppImage itself (#138, part 4)
+install -m 644 packaging/installer/recomplauncher.json "$APPDIR/recomplauncher.json"
 mksquashfs "$APPDIR" $OUT/.fs.squashfs -root-owned -noappend -comp zstd -Xcompression-level 15 -quiet >/dev/null
 cat /usr/local/share/appimage-runtime-x86_64 $OUT/.fs.squashfs >$OUT/Backbreaker-Installer-x86_64.AppImage
 chmod 755 $OUT/Backbreaker-Installer-x86_64.AppImage

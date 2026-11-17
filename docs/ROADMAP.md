@@ -16,7 +16,8 @@ achievements list opens there from R4 mapped to F1, #145; slow moments on the De
 a game-fps readout and a log file, #148; the installer, #138, started: RecompLauncher will be its front end,
 and the runtime builds as a library without game files, the "runtime kit" a player's machine links
 the game against; the extraction tools and the image check in C++; the installer builds the game
-from the player's image with its own clang and sysroot, in each distribution's container). Before that,
+from the player's image with its own clang and sysroot, in each distribution's container; the
+manifest that lets RecompLauncher set the game up and start it). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -820,7 +821,12 @@ The parts, in order:
    `-O1`; both pairs agree). The Deck is short of CPU in matches already (#146). To redo if
    XenonRecomp's register options are turned on in `config/backbreaker.toml` (written up on #146):
    every `ppc/` file changes with them. Still open from part 6: the time on a Steam Deck.
-4. The `recomplauncher.json`, first tried on the Deck with a stand-in builder.
+4. **RecompLauncher's `recomplauncher.json`** (written, not yet tried in the launcher itself): in the
+   installer AppImage, valid against the launcher's schema. RecompLauncher's own steps, run by hand
+   from the manifest (a folder with a space, as its "Recomp Library" has) build the game in 33 s and
+   start it, full screen in Big Picture mode (docs/runtime.md, "Installer tools"). Next: the
+   maintainer's run of the launcher on the Steam Deck, Gaming Mode included, which also gives the
+   Deck's build time.
 5. Add to Steam, a menu entry and GitHub releases. Publishing waits for the licence decision and for
    the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
    from the sysroot, XenonRecomp with binutils' PowerPC disassembler, the AppImage runtime's libfuse).

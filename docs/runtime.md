@@ -98,6 +98,29 @@ AppImage, `build-installer/Backbreaker-Installer-x86_64.AppImage`, about 110 MB;
 content. `packaging/portable/test_distros.sh --installer <AppImage> --image <your image>` installs and
 runs the game with it in each distribution's container, none of which has a compiler.
 
+**RecompLauncher** (#138, part 4) is the front end players will use: it takes their disc image,
+runs the installer, shows the settings and starts the game. `packaging/installer/recomplauncher.json`
+tells it how, and `build_installer.sh` puts it at the AppImage's root, where the launcher reads it
+(its `docs/DEVELOPERS.md`, "Where the file goes"):
+- `game`: an `.iso` holding `default.xex` (`"xdvdfs"`), with the USA/Europe dump's size and CRC32
+  for its "verified" badge.
+- `prepare`: `install {game} --prefix {install}/build --progress`, so the built game lives in the
+  launcher's own folder for the game and goes when the player removes it there; done when
+  `bin/backbreaker` and `game/.complete` exist. Its `version` makes players who set up already build
+  again; a new runtime only needs `play`'s relink, so it changes only when the install itself does.
+- `start`: `play --prefix {install}/build --`, with the player's launch options after the `--`. In
+  Big Picture mode (`RECOMPLAUNCHER_MODE=bigpicture`) `play` adds `--fullscreen`.
+- `config` and `settings`: `{config}/backbreaker-recomp/settings.ini` (resolution, frame rate,
+  window, texture filtering, intro logos, the frame-rate counter; native 720p under Advanced),
+  edited line by line, so the keys the game writes itself (window size and position) stay.
+- `saves`, `folders` and `actions`: saves, achievements and settings for its backups; Open Mods
+  Folder and Open Screenshots; the log folder for crash reports. `exit_codes` explain `play`'s 7 and 8.
+
+To try it before there is a release: in RecompLauncher (0.90 beta 63 or newer), Settings,
+Developers, turn on Developer tools, then "Add a build" and pick a folder holding just
+`Backbreaker-Installer-x86_64.AppImage`. Its Developer tab lists what it read from the manifest;
+setting it up asks for the disc image.
+
 The single steps are commands too:
 
     backbreaker-installer check <image>                 is it Backbreaker, the release supported?

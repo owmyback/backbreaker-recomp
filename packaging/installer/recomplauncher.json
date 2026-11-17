@@ -1,0 +1,148 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Backbreaker",
+  "repo": "owmyback/backbreaker-recomp",
+  "min": "0.90.0-beta.63",
+  "game": {
+    "kind": "iso",
+    "label": "Your disc image (.iso) of Backbreaker for Xbox 360, the USA/Europe release, made from your own disc.",
+    "check": { "xdvdfs": "default.xex" },
+    "dumps": [
+      { "name": "USA, Europe", "size": 7838695424, "crc32": "aa5356fe" }
+    ]
+  },
+  "prepare": {
+    "program": ["Backbreaker-Installer-x86_64.AppImage"],
+    "args": ["install", "{game}", "--prefix", "{install}/build", "--progress"],
+    "label": "Building the game from your disc: under a minute on a fast PC, longer on a Steam Deck",
+    "timeout": 7200,
+    "done": ["{install}/build/bin/backbreaker", "{install}/build/game/.complete"],
+    "version": "1"
+  },
+  "start": {
+    "program": ["Backbreaker-Installer-x86_64.AppImage"],
+    "args": ["play", "--prefix", "{install}/build", "--"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{config}/backbreaker-recomp/settings.ini" }],
+      "new": {
+        "fullscreen": "0",
+        "resolution_scale": "1",
+        "fps": "60",
+        "anisotropy": "16",
+        "native_720p": "1",
+        "skip_intro": "0",
+        "show_fps": "0"
+      }
+    }
+  ],
+  "groups": [{ "id": "Advanced", "advanced": true }],
+  "settings": [
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "group": "Display",
+      "help": "What the game draws at. 720p is the console's own; higher needs a faster graphics card.",
+      "choices": [
+        { "label": "720p", "set": { "resolution_scale": "1" } },
+        { "label": "1440p", "set": { "resolution_scale": "2" } },
+        { "label": "2160p", "set": { "resolution_scale": "3" } },
+        { "label": "2880p", "set": { "resolution_scale": "4" } }
+      ],
+      "defaults": { "resolution_scale": "1" }
+    },
+    {
+      "id": "fps",
+      "label": "Frame Rate",
+      "group": "Display",
+      "help": "30 is the console's rate. 60 is smoother where the PC keeps up; the game runs at the same speed.",
+      "choices": [
+        { "label": "30", "set": { "fps": "30" } },
+        { "label": "60", "set": { "fps": "60" } }
+      ],
+      "defaults": { "fps": "60" }
+    },
+    {
+      "id": "fullscreen",
+      "label": "Window",
+      "group": "Display",
+      "help": "F11 or Alt+Enter switches while playing. Big Picture mode always starts full screen.",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "0" } },
+        { "label": "Full Screen", "set": { "fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0" }
+    },
+    {
+      "id": "anisotropy",
+      "label": "Texture Filtering",
+      "group": "Display",
+      "help": "Keeps the field sharp toward the horizon.",
+      "choices": [
+        { "label": "Off", "set": { "anisotropy": "1" } },
+        { "label": "2x", "set": { "anisotropy": "2" } },
+        { "label": "4x", "set": { "anisotropy": "4" } },
+        { "label": "8x", "set": { "anisotropy": "8" } },
+        { "label": "16x", "set": { "anisotropy": "16" } }
+      ],
+      "defaults": { "anisotropy": "16" }
+    },
+    {
+      "id": "intro",
+      "label": "Intro Logos",
+      "group": "Game",
+      "help": "The publisher and middleware logos before the title screen.",
+      "choices": [
+        { "label": "Show", "set": { "skip_intro": "0" } },
+        { "label": "Skip", "set": { "skip_intro": "1" } }
+      ],
+      "defaults": { "skip_intro": "0" }
+    },
+    {
+      "id": "show_fps",
+      "label": "Frame Rate Counter",
+      "group": "Game",
+      "help": "The game's own frame rate, in the corner.",
+      "choices": [
+        { "label": "Off", "set": { "show_fps": "0" } },
+        { "label": "On", "set": { "show_fps": "1" } }
+      ],
+      "defaults": { "show_fps": "0" }
+    },
+    {
+      "id": "native_720p",
+      "label": "Match Picture",
+      "group": "Advanced",
+      "help": "Native draws matches at a full 1280x720. Console stretches the game's own 1152x640, as the Xbox 360 did.",
+      "choices": [
+        { "label": "Native", "set": { "native_720p": "1" } },
+        { "label": "Console", "set": { "native_720p": "0" } }
+      ],
+      "defaults": { "native_720p": "1" }
+    }
+  ],
+  "saves": [
+    "{local}/backbreaker-recomp/saves",
+    "{local}/backbreaker-recomp/achievements",
+    "{config}/backbreaker-recomp/settings.ini"
+  ],
+  "folders": {
+    "saves": [{ "path": "{local}/backbreaker-recomp/saves" }],
+    "logs": [{ "path": "{local}/backbreaker-recomp/logs" }],
+    "mods": [{ "path": "{local}/backbreaker-recomp/mods" }],
+    "screenshots": [{ "path": "{local}/backbreaker-recomp/screenshots" }]
+  },
+  "actions": [
+    { "id": "mods", "label": "Open Mods Folder", "help": "A file here replaces the disc's file at the same path.", "open": "mods" },
+    { "id": "screenshots", "label": "Open Screenshots", "help": "F12 saves the picture you see.", "open": "screenshots" }
+  ],
+  "exit_codes": {
+    "0": "ok",
+    "7": "The game isn't built yet. Set it up again from your disc image.",
+    "8": "Building the game failed. The log is in the game's folder, under build/obj."
+  }
+}

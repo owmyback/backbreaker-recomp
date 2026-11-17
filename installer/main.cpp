@@ -15,6 +15,7 @@
 #include <memory>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -377,6 +378,10 @@ namespace
         }
         const std::string game = o.prefix + "/bin/backbreaker";
         std::vector<std::string> args{game, "--data-dir", o.prefix + "/game"};
+        // RecompLauncher's Big Picture mode is played from a couch or a Steam Deck: full screen
+        // whatever settings.ini says (it sets RECOMPLAUNCHER_MODE for every game it starts)
+        const char* mode = std::getenv("RECOMPLAUNCHER_MODE");
+        if (mode && std::string(mode) == "bigpicture") args.push_back("--fullscreen");
         args.insert(args.end(), o.gameArgs.begin(), o.gameArgs.end());
         std::vector<char*> argv;
         for (std::string& s : args) argv.push_back(s.data());
