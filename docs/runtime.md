@@ -38,6 +38,32 @@ back to one checkout. The stamp is redone on every build, so it follows `HEAD`, 
 edit straight away; a source tarball, or a machine without git, says `unknown` rather than failing
 the build.
 
+### Runtime kit (#138)
+The build has two halves. The **runtime** (`backbreaker_runtime`, everything in `runtime/` except
+the import glue) is a static library that needs no game files: it is compiled against
+`runtime/sdk/ppc_config.h`, its own copy of the executable's four layout values, and configure stops
+if `ppc/ppc_config.h` says something else. The **game** is `ppc/` plus the import glue
+(`runtime/generated/imports.cpp`), both made from the player's executable, linked with the whole
+runtime library: the runtime replaces recompiled functions with strong definitions of the same
+name (`play_lock.cpp`, `fixed_seed.cpp`, `thread_times.cpp` ...), and from an ordinary archive the
+linker would keep ppc/'s weak versions instead (8 of the 14 hooks were dropped when tried that way).
+
+    cmake -B build-rt -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBB_RUNTIME_ONLY=ON
+    ninja -C build-rt                                                   # no ppc/, no game/ needed
+    cmake --install build-rt --component runtime --prefix <kit>         # the runtime kit
+    packaging/installer/link_game.sh --kit <kit> --ppc ppc --imports runtime/generated/imports.cpp \
+        --out <dir>/backbreaker                                         # the game, from the kit
+
+The kit holds `lib/libbackbreaker_runtime.a` (plus SDL3 and shaderc in a `BB_PORTABLE` build, and the
+XMA decoder's FFmpeg libraries), the headers `ppc/` and the import glue are compiled with, and
+`share/backbreaker-runtime/`: `version.txt` (the line `--version` prints), the runtime's
+`ppc_config.h`, and `ppc-compile.args`, `imports-compile.args` and `game-link.args`, every
+argument CMake uses, one per line (`@KIT@`, `@PPC@`, `@GAME@` are filled in by the linker step).
+`link_game.sh` compiles only the `ppc/` files whose objects are missing or older than their source,
+and all of them when the kit's compile arguments or headers change; after a runtime update it
+relinks in about a second. It is the prototype of the installer's build step (#138); the kit holds
+no game content.
+
 ## Where files live
 `runtime/paths.cpp` (#134). Two layouts:
 - **Checkout** (the default, as before): everything relative to the working directory, so run from
@@ -342,7 +368,9 @@ with the same line: 0 errors, and only the loader's own note left.
   - `files.cpp` file system (game:\ -> game/disc, cache:\ -> game/cache; saves mounted at runtime)
   - `xam_content.cpp` saves: content packages in game/saves/<type>/<name>/, mounted as save:\
   - `memory_imports.cpp`, `sync.cpp`, `strings.cpp`, `system.cpp`, `xex.cpp`, `variables.cpp`
-- `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py)
+- `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py);
+  compiled into the game, not the runtime library (see "Runtime kit")
+- `runtime/sdk/ppc_config.h` - the executable's layout the runtime library is built for
 
 ## Status (2026-11-12, headless phase 3; the current state is in docs/ROADMAP.md)
 Phase 3 (headless subsystems, see docs/ROADMAP.md) works end to end: the game boots, initializes graphics, audio, voice

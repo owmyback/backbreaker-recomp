@@ -112,7 +112,7 @@ pkg_hint() { # package names for the missing build dependencies, by distribution
     elif [ -x /usr/bin/pacman ]; then
         echo "  Arch: sudo pacman -S clang cmake ninja python3 git openssl sdl3 vulkan-headers shaderc"
     else
-        echo "  install: clang 18+, cmake 3.20+, ninja, python3, git, openssl, and the SDL3, Vulkan and shaderc development packages"
+        echo "  install: clang 18+, cmake 3.24+, ninja, python3, git, openssl, and the SDL3, Vulkan and shaderc development packages"
     fi
 }
 
@@ -135,7 +135,7 @@ check_prerequisites() {
     fi
     if command -v cmake >/dev/null 2>&1; then
         cm=$(cmake --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-        version_at_least 3.20 "$cm" || missing+=("cmake 3.20+ is needed (found $cm)")
+        version_at_least 3.24 "$cm" || missing+=("cmake 3.24+ is needed (found $cm): CMakeLists.txt links the runtime with WHOLE_ARCHIVE")
     fi
 
     # The runtime needs these development packages; a small probe says what is missing

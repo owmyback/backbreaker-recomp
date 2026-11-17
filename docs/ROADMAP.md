@@ -13,7 +13,9 @@ Work that can be picked up is tracked as GitHub issues and linked from each phas
 Last updated: 2026-11-17 (phase 9: the Deck is CPU-bound in matches, and a geometry cache cuts the command processor's work by
 a quarter on the PC, #146, and thread timing reports the long frames that remain; phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
 achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
-a game-fps readout and a log file, #148). Before that,
+a game-fps readout and a log file, #148; the installer, #138, started: RecompLauncher will be its front end,
+and the runtime builds as a library without game files, the "runtime kit" a player's machine links
+the game against). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -83,7 +85,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; launcher integration not started) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138 started: RecompLauncher as the front end, the runtime kit) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -768,11 +770,38 @@ for moving your own build between your own machines and are never published. The
 container image hold no game content. The repo has no licence yet, which is the maintainer's
 decision before it goes public.
 
-After that: a graphical installer and launcher for players who own the game (#138). They choose
-their ISO, the game code is translated and compiled on their machine against a prebuilt runtime, and
-the same app then launches the game and handles settings, mods and updates. It starts by checking
-whether an existing launcher such as recomplauncher.com could host this. Also still open: an install
-prefix.
+**The installer (#138, started 2026-11-17):** for players who own the game. They choose their ISO, and
+the game code is translated and compiled on their machine against a prebuilt runtime; nothing made
+from the game is ever published.
+
+Launchers checked first (2026-11-17):
+- **RecompLauncher** (GPL v3, desktop app 0.90 beta) can host it, and is the chosen front end. A
+  `recomplauncher.json` in our release declares the whole flow: the player drops in their disc image,
+  `game.check` confirms it holds `default.xex`, a `prepare` step runs our own builder headless with the
+  image's path (progress lines become its progress bar, the time limit is ours to set), `config` edits
+  `settings.ini` for its settings page and controller mode, and Play starts the game. It installs
+  and updates from our GitHub releases. It reruns `prepare` only when the manifest's `version`
+  changes, so after a runtime update the game's start step relinks itself (seconds, see below).
+- **Quiver Launcher** (source-available, BSL 1.1) installs and runs release files but has no setup
+  step, so it can't build from the player's disc.
+- So no GUI of our own for now: the builder also runs in a terminal (`--cli`), and a GUI comes back
+  only if a Steam Deck test of the RecompLauncher flow shows it's needed.
+
+The parts, in order:
+1. **The runtime kit** (done): the runtime builds as a library without game files
+   (`-DBB_RUNTIME_ONLY=ON`) and installs as a kit with its compile and link arguments, and
+   `packaging/installer/link_game.sh` builds the game from it: all of `ppc/` in about 30 s with 16 jobs on
+   the maintainer's desktop, a relink after a runtime update in under a second (docs/runtime.md, "Runtime kit").
+2. The extraction tools in C++ (no Python, no OpenSSL) and a check that the image is Backbreaker.
+3. A bundled clang, lld and Ubuntu 22.04 sysroot (about 330 MB unpacked, of which the LLVM part
+   compresses to 86 MB; measured in the build container), the headless install into `~/.local/share/backbreaker-recomp/`,
+   parallel jobs chosen by free memory, and `test_distros.sh` running it in each distribution.
+4. The `recomplauncher.json`, first tried on the Deck with a stand-in builder.
+5. Add to Steam, a menu entry and GitHub releases. Publishing waits for the licence decision and for
+   the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
+   from the sysroot, XenonRecomp with binutils' PowerPC disassembler, the AppImage runtime's libfuse).
+
+Also still open: an install prefix.
 
 ## Phase 11 - Achievements (done)
 
