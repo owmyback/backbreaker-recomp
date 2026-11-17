@@ -83,7 +83,9 @@ only when XenonRecomp, the config, the kit's compile arguments or the executable
 (`obj/build.stamp`). Parallel compiles: the CPU threads, or fewer when free memory is short (1 GB a
 job; the biggest file peaks at about 720 MB). `ppc/` is compiled with the kit's arguments plus
 `-g0`: crash backtraces use the exported symbol names, not debug info, and without it the biggest
-file takes 11 s instead of 13 s. A second installer started on the same folder while one is working
+file takes 11 s instead of 13 s. The optimisation level stays the kit's `-O2`: `-O1` compiles `ppc/` with
+23% less CPU but makes the game's threads need 28-40% more (ROADMAP, phase 10). A second installer
+started on the same folder while one is working
 stops with a message (`<prefix>/.lock`).
 
 Everything it builds with comes from its bundle, `build-installer/AppDir/usr/lib/backbreaker-installer`

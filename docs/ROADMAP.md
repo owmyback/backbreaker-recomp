@@ -814,8 +814,12 @@ The parts, in order:
    Fedora and Arch, none with a compiler, it installed from the image in 32 s each and the game
    reached the Exhibition kickoff (the title screen on lavapipe for Ubuntu 22.04 and Debian 12)
    (`packaging/portable/test_distros.sh --installer`).
-   Still open from part 6: the time on a Steam Deck, and what compiling `ppc/` at `-O1` instead of
-   `-O2` costs in frame rate (it compiles 9-28% faster per file, on three files measured).
+   `ppc/` stays at `-O2` (2026-11-17): `-O1` compiles it with 23% less CPU (342 s against 441 s), but
+   the game's own threads then need 28% more CPU by median, about 40% by mean, outside their waits
+   and spins (the headless Exhibition route with `BB_PERF=1`, runs alternating `-O2`, `-O1`, `-O2`,
+   `-O1`; both pairs agree). The Deck is short of CPU in matches already (#146). To redo if
+   XenonRecomp's register options are turned on in `config/backbreaker.toml` (written up on #146):
+   every `ppc/` file changes with them. Still open from part 6: the time on a Steam Deck.
 4. The `recomplauncher.json`, first tried on the Deck with a stand-in builder.
 5. Add to Steam, a menu entry and GitHub releases. Publishing waits for the licence decision and for
    the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
