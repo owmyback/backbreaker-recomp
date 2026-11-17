@@ -10,7 +10,9 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
+Last updated: 2026-11-17 (phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
+achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146). Before that,
+2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
 hold 60 fps at resolution scale 2 (#121); the Training Camp and second-match crashes are fixed (#129,
@@ -48,6 +50,9 @@ horizon. The crowd is whole (#55), replays no longer show a grid (#44), and the 
 and the decal passes (kick meter, zones, routes) render (#60, #54). Training Camp drills and a
 second match in one session no longer crash (#129, #127).
 
+**Other machines (2026-11-17):** the portable AppImage (#134) runs on the Steam Deck in Gaming Mode.
+There it is slow at moments (#146), and the achievements list needs R4 mapped to F1 (#145).
+
 Fixed on the way here: GPU skinning through memory export; predicated tiling in the
 command processor (without it a GPU->CPU callback re-ran D3D's worker job 3000+ times and the
 side-select load hung); offline networking (XNet/WSA startup, DNS, and sockets as kernel objects so
@@ -76,7 +81,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions in review, #134: #136 and #137; launcher integration not started) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; launcher integration not started) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -700,8 +705,17 @@ from your image. The image path never reaches the output or a file. README ("One
 Next in this phase: a portable build (#134), with an **AppImage** as the main output, that runs on
 the Steam Deck (SteamOS), Debian/Ubuntu, Fedora and Arch. Status (2026-11-16): built, and checked
 headless in containers of Ubuntu 22.04 and 24.04, Debian 12 and 13, Fedora and Arch (#136: where
-files live, mods folder, CPU check; #137: the container, `setup.sh --portable`, the AppImage); the
-Steam Deck play-test is next. Today's build doesn't travel:
+files live, mods folder, CPU check; #137: the container, `setup.sh --portable`, the AppImage). On
+2026-11-17 the maintainer's Steam Deck play-test ran the AppImage (`e795ba5`) in Gaming Mode as a
+non-Steam game. Two follow-ups came out of it:
+- #145: on the Deck, the achievements list needs a back grip mapped to F1 (README, step 5).
+- #146: the game is slow at moments on the Deck. The Deck's performance overlay showed no drop below
+  30 fps, because it counts the window's presents, not the game's frames.
+
+Still open in #134: the docker path, since only podman has been used.
+
+The native build (`scripts/setup.sh` without `--portable`) doesn't travel, which is why the portable
+build exists:
 - it needs the build machine's glibc (2.44 when built on Fedora 45);
 - it links SDL3, shaderc and SPIRV-Tools from the system;
 - it finds `game/` only in the working directory, and writes settings and saves there;

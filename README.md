@@ -65,6 +65,10 @@ the game's own icon). On a Steam Deck:
    library in Gaming Mode; the controls work through Steam Input.
 4. Start with `fps=30` and `resolution_scale=1` in `~/.config/backbreaker-recomp/settings.ini`; the
    Deck's GPU is far smaller than a desktop's.
+5. For the achievements list, open the game's controller settings in Steam and map the back grip
+   **R4** to the keyboard key **F1**. Steam keeps the Steam (Guide) button for its own menu, and the
+   Deck has no F1 key, so the list has no other way to open there (#145). R4 then opens and
+   closes it, and the d-pad moves through it.
 
 After changing the code, run `scripts/setup.sh --portable` again: it recompiles only what changed
 and repacks the AppImage (about a minute and a half for a change to the runtime).

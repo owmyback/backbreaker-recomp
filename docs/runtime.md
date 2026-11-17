@@ -457,6 +457,10 @@ the game does not even import `XamShowAchievementsUI`. The runtime draws one ins
   Up/Down (d-pad, left stick or arrow keys) moves, LB/RB or PgUp/PgDn a page, Home/End; B, Back,
   Esc, F1 or Guide closes it. While it is open the game sees a neutral controller (scripted
   `--press` input still goes through).
+- **On a Steam Deck** the Guide button is the Steam button. Steam keeps it for its own menu and the
+  game never sees the press, and the Deck has no F1 key. The way in is a back grip mapped to F1 in
+  the game's Steam Input layout: R4 → keyboard F1, tested in Gaming Mode on 2026-11-17 (#145; README,
+  "Steam Deck and other distributions", step 5).
 - An unlock shows an "Achievement unlocked" pop-up (icon, name, gamerscore) for 5 s, at the top of
   the screen, or at the bottom of the list when the list is open, with the unlock sound. Several
   unlocks at once take turns, and the pop-up says how many more are waiting (#105).
