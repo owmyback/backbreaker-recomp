@@ -15,6 +15,7 @@
 #include "xam_enum.h"
 #include "../log.h"
 
+#include <algorithm>
 #include <atomic>
 #include <ctime>
 #include <filesystem>

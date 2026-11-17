@@ -53,13 +53,23 @@ target_compile_options(backbreaker PRIVATE ${COMMON_FLAGS} -Wall -Wno-unused-fun
 # (the later -march wins) and reports a missing instruction set instead of crashing (#134)
 set_source_files_properties(${CMAKE_SOURCE_DIR}/runtime/cpu_check.cpp PROPERTIES COMPILE_OPTIONS "-march=x86-64")
 find_package(Vulkan REQUIRED)
-find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
-target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3 shaderc_shared)
+# Portable build (#134, packaging/portable): SDL3, shaderc and the C++ runtime linked in, so the
+# binary needs only glibc, libvulkan.so.1 and a driver from the system. scripts/setup.sh --portable
+# builds it in the container; a normal build links the system's shared libraries.
+option(BB_PORTABLE "Link SDL3, shaderc and the C++ runtime statically (scripts/setup.sh --portable)" OFF)
+if (BB_PORTABLE)
+    find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3-static)
+    target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3-static shaderc_combined
+        -static-libstdc++ -static-libgcc)
+else()
+    find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
+    target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3 shaderc_shared)
+endif()
 
 # XMA audio decoder (issue #93): FFmpeg's "xmaframes" decoder, built by scripts/build_xma_decoder.sh
 # into third_party/ffmpeg-xma (static, decoder-only, LGPL-2.1+). Optional: without it XMA sounds
 # play as silence.
-set(FFMPEG_XMA ${CMAKE_SOURCE_DIR}/third_party/ffmpeg-xma)
+set(FFMPEG_XMA ${CMAKE_SOURCE_DIR}/third_party/ffmpeg-xma CACHE PATH "The XMA decoder's install prefix (scripts/build_xma_decoder.sh --prefix)")
 if (EXISTS ${FFMPEG_XMA}/lib/libavcodec.a AND EXISTS ${FFMPEG_XMA}/lib/libavutil.a)
     target_include_directories(backbreaker PRIVATE ${FFMPEG_XMA}/include)
     target_compile_definitions(backbreaker PRIVATE BB_XMA_DECODER=1)

@@ -63,6 +63,30 @@ can't add files the game finds by listing a directory. The log names each file a
 `packedfilesx360/PackedOutputX360.pkd`; the whole archive can be replaced this way, but editing what
 is inside it needs a tool that doesn't exist yet.
 
+**Portable build** (`scripts/setup.sh --portable`, #134; README, "Steam Deck and other distributions"):
+- The container (`packaging/portable/Containerfile`): Ubuntu 22.04, so glibc 2.35 is the floor;
+  clang 23 from apt.llvm.org; SDL3 3.4.20, shaderc 2026.2 and Vulkan-Headers 1.4.350 built from
+  pinned tags; AppImage's static type2 runtime at a dated release, checked against its SHA-256.
+  Tagged by the Containerfile's hash, so editing it builds a new image. It holds tools only.
+- `setup.sh --portable` runs the same steps inside it (`--in-container`) with its own build
+  directories: `third_party/XenonRecomp/build-portable`, `third_party/ffmpeg-xma-portable` and
+  `build-portable/`. `ppc/` and `game/` are shared with the native build; `ppc/` counts as current
+  when it is newer than the config and the XenonRecomp patch, so neither build recompiles the other's
+  output. Symlinked `game`, `ppc` or `third_party`, and a git worktree's repository, are mounted at
+  their own paths so they resolve in the container. The image, if given, is mounted read-only as
+  `/image`.
+- `-DBB_PORTABLE=ON` links SDL3 (static; it still loads X11, Wayland, PipeWire, PulseAudio and ALSA
+  at run time), `shaderc_combined` and the C++ runtime in. The binary needs only `libvulkan.so.1`,
+  `libm`, `libc` and the loader: `objdump -p` and `ldd` list nothing else, and its newest glibc
+  symbol is 2.35.
+- `scripts/package_portable.sh` makes the folder (a launcher passing `--data-dir`, `bin/`, `game/` as
+  hard links to the checkout's), the AppImage (an `AppRun`, a `.desktop` entry, the title's own
+  icon from its XDBF resource via `tools/title_icon.py`, a zstd squashfs) and the `.tar.gz`.
+- `packaging/portable/test_distros.sh` runs the AppImage headless in containers of Ubuntu 22.04
+  and 24.04, Debian 12 and 13, Fedora and Arch, each with its own Vulkan loader and Mesa: the
+  Exhibition route on the GPU where the distribution's Mesa supports it, a boot to the title on
+  lavapipe (software Vulkan) where it doesn't.
+
 **CPU check:** the build targets x86-64-v3 (AVX2, FMA, BMI1/2, F16C, MOVBE). `runtime/cpu_check.cpp`,
 built for baseline x86-64, runs before anything else and on a CPU without them prints what is
 missing, also in a message box, and exits with code 1, instead of the first such instruction ending

@@ -1,0 +1,70 @@
+# Build environment for the portable build (#134): a backbreaker that runs on SteamOS (Steam Deck),
+# Debian/Ubuntu, Fedora, Arch and other distributions.
+#
+# Ubuntu 22.04 sets the floor: the binary needs glibc 2.35 or newer, and nothing else from the
+# system but the Vulkan loader (libvulkan.so.1) and a driver. SDL3, shaderc (with glslang and
+# SPIRV-Tools), the C++ runtime and the FFmpeg XMA decoder are linked in statically; SDL3 still
+# finds X11, Wayland, PipeWire, PulseAudio and ALSA at run time from whatever the system has.
+#
+# This image holds tools only - no game content - so it can be built and shared freely. It is built
+# and used by scripts/setup.sh --portable; by hand:
+#   podman build -t backbreaker-portable -f packaging/portable/Containerfile packaging/portable
+FROM docker.io/library/ubuntu:22.04
+
+ARG LLVM_VERSION=23
+ARG CMAKE_VERSION=3.31.6
+ARG SDL3_TAG=release-3.4.20
+ARG VULKAN_HEADERS_TAG=v1.4.350
+ARG SHADERC_TAG=v2026.2
+# AppImage's static type2 runtime (no libfuse2 needed on the host), at a dated release
+ARG APPIMAGE_RUNTIME_TAG=20251108
+ARG APPIMAGE_RUNTIME_SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg lsb-release software-properties-common \
+        git python3 python3-pip ninja-build pkg-config make file xz-utils zstd squashfs-tools \
+        openssl libssl-dev zlib1g-dev nasm g++-12 libstdc++-12-dev libvulkan-dev \
+        libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev \
+        libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev \
+        libegl1-mesa-dev libgles2-mesa-dev libdrm-dev libgbm-dev libpulse-dev libasound2-dev \
+        libpipewire-0.3-dev libudev-dev libdbus-1-dev libusb-1.0-0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# clang from apt.llvm.org (Ubuntu 22.04's own is 14)
+RUN wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh && bash /tmp/llvm.sh ${LLVM_VERSION} \
+    && rm -f /tmp/llvm.sh && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/clang-${LLVM_VERSION} /usr/local/bin/clang \
+    && ln -sf /usr/bin/clang++-${LLVM_VERSION} /usr/local/bin/clang++ \
+    && ln -sf /usr/bin/llvm-objdump-${LLVM_VERSION} /usr/local/bin/llvm-objdump
+
+RUN python3 -m pip install --no-cache-dir cmake==${CMAKE_VERSION}
+
+ENV CC=clang CXX=clang++
+
+RUN git clone -q --depth 1 -b ${VULKAN_HEADERS_TAG} https://github.com/KhronosGroup/Vulkan-Headers /tmp/vh \
+    && cmake -S /tmp/vh -B /tmp/vh/b -G Ninja >/dev/null && cmake --install /tmp/vh/b >/dev/null && rm -rf /tmp/vh
+
+RUN git clone -q --depth 1 -b ${SDL3_TAG} https://github.com/libsdl-org/SDL /tmp/sdl \
+    && cmake -S /tmp/sdl -B /tmp/sdl/b -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+        -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null \
+    && cmake --build /tmp/sdl/b >/dev/null && cmake --install /tmp/sdl/b >/dev/null && rm -rf /tmp/sdl
+
+RUN git clone -q --depth 1 -b ${SHADERC_TAG} https://github.com/google/shaderc /tmp/shaderc \
+    && cd /tmp/shaderc && python3 utils/git-sync-deps >/dev/null \
+    && cmake -S . -B b -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON \
+        -DSHADERC_SKIP_COPYRIGHT_CHECK=ON -DSPIRV_SKIP_TESTS=ON -DSPIRV_SKIP_EXECUTABLES=ON \
+        -DENABLE_GLSLANG_BINARIES=OFF -DSPIRV_TOOLS_BUILD_STATIC=ON >/dev/null \
+    && cmake --build b --target shaderc_combined >/dev/null \
+    && install -D -m 644 b/libshaderc/libshaderc_combined.a /usr/local/lib/libshaderc_combined.a \
+    && cp -r libshaderc/include/shaderc /usr/local/include/ \
+    && cd / && rm -rf /tmp/shaderc
+
+RUN curl -sSL -o /usr/local/share/appimage-runtime-x86_64 \
+        https://github.com/AppImage/type2-runtime/releases/download/${APPIMAGE_RUNTIME_TAG}/runtime-x86_64 \
+    && echo "${APPIMAGE_RUNTIME_SHA256}  /usr/local/share/appimage-runtime-x86_64" | sha256sum -c - >/dev/null
+
+# Files written into the mounted checkout belong to whoever runs the container (podman
+# --userns=keep-id, docker --user), with a writable home for the tools that want one
+ENV HOME=/tmp
+WORKDIR /src

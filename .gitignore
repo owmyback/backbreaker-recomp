@@ -21,3 +21,5 @@ __pycache__/
 # GPU frame captures (contain game shader microcode) and renderer screenshots (game imagery)
 captures/
 screenshots/
+build-portable/
+dist/

@@ -17,7 +17,8 @@ cd "$REPO"
 
 XENON=third_party/XenonRecomp
 XENON_REV=ddd128b                                    # the pin README.md and CI use
-XENON_BIN=$XENON/build/XenonRecomp/XenonRecomp
+XENON_BUILD=$XENON/build
+XENON_BIN=$XENON_BUILD/XenonRecomp/XenonRecomp
 PATCH=patches/xenonrecomp-backbreaker-instructions.patch
 DISC_STAMP=game/.disc-extracted                      # extraction has no other "done" marker
 
@@ -27,6 +28,7 @@ force=0
 regenerate=0
 check_only=0
 xma_decoder=1
+mode=native # native | portable (host side of --portable) | container (inside the build container)
 
 usage() {
     cat <<'TXT'
@@ -40,6 +42,12 @@ Options:
                     restores are one "git checkout config" away)
   --no-xma-decoder  skip building the XMA audio decoder (game sounds are then silent)
   --check-only      only check the prerequisites and exit
+  --portable        build in a container (podman or docker; nothing else needed on the host) a
+                    build that runs on other distributions too - SteamOS/Steam Deck, Debian,
+                    Ubuntu, Fedora, Arch: dist/Backbreaker-x86_64.AppImage and
+                    dist/backbreaker-linux-x86_64/ (+ .tar.gz). For your own machines only: they
+                    hold your game. See packaging/portable/ and README "Steam Deck and other
+                    distributions" (#134)
   --help            this text
 
 The image is your own: nothing here tells you where to get a game, and no game file is
@@ -60,6 +68,8 @@ while [ $# -gt 0 ]; do
         --regenerate) regenerate=1 ;;
         --no-xma-decoder) xma_decoder=0 ;;
         --check-only) check_only=1 ;;
+        --portable) mode=portable ;;
+        --in-container) mode=container ;; # internal: --portable runs this inside the container
         --help | -h) usage; exit 0 ;;
         -*) die "unknown option '$1' (--help)" ;;
         *) [ -z "$iso" ] || die "give exactly one image path"; iso=$1 ;;
@@ -231,6 +241,12 @@ step_disc() {
 }
 
 step_xenonrecomp() {
+    if [ "$mode" = container ] && [ $force -eq 0 ] && [ $regenerate -eq 0 ] && ppc_current; then
+        # ppc/ is current: the recompiler's sources (for their headers) are all the build needs
+        [ -d $XENON/.git ] || die "third_party/XenonRecomp is missing - run scripts/setup.sh once without --portable, or with --force"
+        done_step "ppc/ is current - XenonRecomp not needed in the container"
+        return
+    fi
     if [ ! -d $XENON/.git ]; then
         say "cloning XenonRecomp at $XENON_REV with its submodules"
         run_quiet git clone --recursive https://github.com/hedge-dev/XenonRecomp.git "$XENON"
@@ -259,9 +275,9 @@ step_xenonrecomp() {
         return
     fi
     say "building XenonRecomp"
-    run_quiet cmake -S "$XENON" -B "$XENON/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    run_quiet cmake -S "$XENON" -B "$XENON_BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-    run_quiet ninja -C "$XENON/build" ${jobs:+-j"$jobs"}
+    run_quiet ninja -C "$XENON_BUILD" ${jobs:+-j"$jobs"}
 }
 
 recompile() { # one XenonRecomp pass over the image with the config in config/
@@ -272,7 +288,10 @@ recompile() { # one XenonRecomp pass over the image with the config in config/
     say "recompiling the executable to ppc/ (a few minutes)"
     run_quiet "$XENON_BIN" config/backbreaker.toml "$XENON/XenonUtils/ppc_context.h" \
         | tee build/recompile.log
-    say "recompiled: $(find ppc -maxdepth 1 -name 'ppc_recomp.*.cpp' | wc -l) C++ files, $(grep -cE '\{ 0x[0-9A-Fa-f]+, sub_' ppc/ppc_func_mapping.cpp || true) functions, $(grep -ciE 'warning|error' build/recompile.log || true) warnings (full output: build/recompile.log)"
+    # XenonRecomp leaves a file whose content didn't change alone, so the function map can keep an
+    # older date than the config it was just made from; ppc_current() reads that date
+    touch ppc/ppc_func_mapping.cpp
+    say "recompiled: $(find ppc/ -maxdepth 1 -name 'ppc_recomp.*.cpp' | wc -l) C++ files, $(grep -cE '\{ 0x[0-9A-Fa-f]+, sub_' ppc/ppc_func_mapping.cpp || true) functions, $(grep -ciE 'warning|error' build/recompile.log || true) warnings (full output: build/recompile.log)"
     # A branch XenonRecomp cannot resolve becomes "// ERROR <target>" and a bare return: the
     # code there is silently skipped at run time (#47, #52). There are none with the committed
     # config, so any at all is news.
@@ -283,11 +302,14 @@ recompile() { # one XenonRecomp pass over the image with the config in config/
     fi
 }
 
-# ppc/ is out of date when the recompiler or its config changed after the last run.
+# ppc/ is out of date when the recompiler or its config changed after the last run. In the
+# container the recompiler is its own build of the same patched source, so the patch stands in
+# for the binary: a native and a portable build share ppc/ without recompiling it for each other.
 ppc_current() {
-    local f
+    local f recompiler=$XENON_BIN
+    [ "$mode" = container ] && recompiler=$PATCH
     [ -s ppc/ppc_func_mapping.cpp ] || return 1
-    for f in "$XENON_BIN" config/backbreaker.toml config/backbreaker_switch_tables.toml; do
+    for f in "$recompiler" config/backbreaker.toml config/backbreaker_switch_tables.toml; do
         [ ppc/ppc_func_mapping.cpp -nt "$f" ] || return 1
     done
 }
@@ -334,15 +356,95 @@ step_xma_decoder() { # optional: without it the runtime builds and XMA plays as 
     local args=()
     [ $force -eq 1 ] && args+=(--force)
     [ -n "$jobs" ] && args+=(-j "$jobs")
+    # The container's own copy, linked against its glibc (a host build would need a newer one)
+    [ "$mode" = container ] && args+=(--prefix third_party/ffmpeg-xma-portable --build-dir third_party/ffmpeg-portable-src)
     if ! scripts/build_xma_decoder.sh "${args[@]}"; then
         warn "the XMA decoder did not build: the game runs, but its sounds are silent (scripts/build_xma_decoder.sh retries it)"
     fi
 }
 
 step_build() {
+    if [ "$mode" = container ]; then
+        say "configuring and building the portable runtime (build-portable/backbreaker; the first time compiles all of ppc/, a while)"
+        run_quiet cmake -B build-portable -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DBB_PORTABLE=ON -DFFMPEG_XMA="$REPO/third_party/ffmpeg-xma-portable"
+        run_quiet ninja -C build-portable ${jobs:+-j"$jobs"}
+        return
+    fi
     say "configuring and building the runtime (build/backbreaker)"
     run_quiet cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
     run_quiet ninja -C build ${jobs:+-j"$jobs"}
+}
+
+# --- --portable (#134) ---------------------------------------------------------------------
+
+# Host side: build or reuse the container, run this script inside it, then move the player's
+# files where the portable build looks for them.
+portable_host() {
+    local engine tag
+    if command -v podman >/dev/null 2>&1; then engine=podman
+    elif command -v docker >/dev/null 2>&1; then engine=docker
+    else die "--portable needs podman or docker (every distribution packages one; SteamOS has podman)"
+    fi
+    command -v git >/dev/null 2>&1 || die "git is needed"
+    # Tagged by the Containerfile's contents: an edited Containerfile builds a new image
+    tag="backbreaker-portable:$(sha256sum packaging/portable/Containerfile | cut -c1-12)"
+    if "$engine" image inspect "$tag" >/dev/null 2>&1; then
+        done_step "build container ($tag)"
+    else
+        say "building the build container $tag (once: downloads and builds the toolchain, about 15 minutes)"
+        run_quiet "$engine" build -t "$tag" -f packaging/portable/Containerfile packaging/portable
+    fi
+    local run=("$engine" run --rm -v "$REPO:/src" -w /src --security-opt label=disable)
+    if [ "$engine" = podman ]; then run+=(--userns=keep-id); else run+=(--user "$(id -u):$(id -g)"); fi
+    # game/, ppc/ or third_party/ may be symlinks elsewhere (another drive, another checkout):
+    # their targets are mounted at the same path, so the links resolve inside the container too
+    local entry target
+    for entry in game ppc third_party; do
+        if [ -L "$entry" ]; then
+            target=$(readlink -f -- "$entry")
+            [ -d "$target" ] && run+=(-v "$target:$target")
+        fi
+    done
+    # A git worktree keeps its repository in the main checkout: mounted read-only at the same
+    # path, so the build can still say which commit it came from (--version, the log's first line)
+    if [ -f .git ]; then
+        target=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+        run+=(-v "$target:$target:ro")
+    fi
+    local args=(--in-container)
+    [ -n "$jobs" ] && args+=(--jobs "$jobs")
+    [ $force -eq 1 ] && args+=(--force)
+    [ $xma_decoder -eq 0 ] && args+=(--no-xma-decoder)
+    if [ -n "$iso" ]; then
+        # Mounted read-only under a neutral name: its path never reaches the container
+        run+=(-v "$(readlink -f -- "$iso"):/image:ro")
+        args+=(/image)
+    fi
+    say "building inside the container"
+    "${run[@]}" "$tag" scripts/setup.sh "${args[@]}"
+    import_player_files
+    say "done:"
+    say "  dist/Backbreaker-x86_64.AppImage     chmod +x it (done) and run it; one file to copy to a Steam Deck"
+    say "  dist/backbreaker-linux-x86_64/       the same as a folder: ./backbreaker (+ a .tar.gz of it)"
+    say "they hold your game: for your own machines only."
+}
+
+# The checkout keeps the player's files in game/; the portable build uses the per-user folders.
+# Copies them over once, when the per-user ones are still empty.
+import_player_files() {
+    local data=${XDG_DATA_HOME:-$HOME/.local/share}/backbreaker-recomp
+    local conf=${XDG_CONFIG_HOME:-$HOME/.config}/backbreaker-recomp
+    local d
+    mkdir -p "$data" "$conf"
+    for d in saves achievements sounds; do
+        if [ -d "game/$d" ] && [ -z "$(ls -A "$data/$d" 2>/dev/null)" ]; then
+            cp -a "game/$d" "$data/" && say "copied game/$d to $data/$d (the portable build's)"
+        fi
+    done
+    if [ -f game/settings.ini ] && [ ! -f "$conf/settings.ini" ]; then
+        cp game/settings.ini "$conf/settings.ini" && say "copied game/settings.ini to $conf/settings.ini"
+    fi
 }
 
 step_tests() { # same as CI: these need no game files
@@ -358,7 +460,20 @@ step_tests() { # same as CI: these need no game files
 
 # --- main ----------------------------------------------------------------------------------
 
-check_prerequisites
+if [ "$mode" = portable ]; then
+    if [ -n "$iso" ]; then
+        [ -e "$iso" ] || die "there is no file at that image path (it is never printed or stored)"
+        [ -r "$iso" ] || die "the image is not readable (permissions?)"
+    fi
+    portable_host
+    exit 0
+fi
+if [ "$mode" = container ]; then
+    XENON_BUILD=$XENON/build-portable
+    XENON_BIN=$XENON_BUILD/XenonRecomp/XenonRecomp
+else
+    check_prerequisites
+fi
 if [ $check_only -eq 1 ]; then
     exit 0
 fi
@@ -386,6 +501,10 @@ step_recompile
 step_imports
 step_xma_decoder
 step_build
+if [ "$mode" = container ]; then
+    scripts/package_portable.sh build-portable/backbreaker
+    exit 0
+fi
 step_tests
 
 say "done."

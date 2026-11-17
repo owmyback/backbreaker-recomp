@@ -4,7 +4,10 @@
 # hardware works in. Upstream FFmpeg has no such decoder; it comes from the fork Xenia uses
 # (xenia-canary's third_party/FFmpeg submodule, branch "xmaframes").
 #
-#   scripts/build_xma_decoder.sh [--force] [-j N]
+#   scripts/build_xma_decoder.sh [--force] [-j N] [--prefix DIR] [--build-dir DIR]
+#
+# --prefix installs somewhere else (the portable build's container uses its own, #134);
+# --build-dir builds from a clean copy of the source there instead of in third_party/FFmpeg.
 #
 # Fetches the fork at a pinned commit into third_party/FFmpeg (shallow, about 20 MB) and
 # installs a static, decoder-only libavcodec + libavutil into third_party/ffmpeg-xma/, which
@@ -20,6 +23,7 @@ FFMPEG_REV=dfc5a3993b405f3a8b382756828cdfae06380c8b # branch xmaframes, 2026-11-
 SRC=third_party/FFmpeg
 PREFIX=$REPO/third_party/ffmpeg-xma
 STAMP=$PREFIX/.rev
+BUILD_DIR=
 
 force=0
 jobs=$(nproc 2>/dev/null || echo 4)
@@ -28,6 +32,8 @@ while [ $# -gt 0 ]; do
         --force) force=1 ;;
         -j) shift; jobs=$1 ;;
         -j*) jobs=${1#-j} ;;
+        --prefix) shift; PREFIX=$(mkdir -p "$1" && cd "$1" && pwd); STAMP=$PREFIX/.rev ;;
+        --build-dir) shift; BUILD_DIR=$1 ;;
         -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -60,7 +66,13 @@ asm=--disable-x86asm
 command -v nasm >/dev/null 2>&1 && asm=""
 
 say "configuring (xmaframes decoder only, static)"
-cd "$SRC"
+if [ -n "$BUILD_DIR" ]; then
+    rm -rf "$BUILD_DIR" && mkdir -p "$BUILD_DIR"
+    git -C "$SRC" archive HEAD | tar -x -C "$BUILD_DIR"
+    cd "$BUILD_DIR"
+else
+    cd "$SRC"
+fi
 # shellcheck disable=SC2086 # $asm is empty or one switch
 ./configure --prefix="$PREFIX" --cc=clang \
     --disable-everything --disable-autodetect --disable-programs --disable-doc \

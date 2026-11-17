@@ -36,6 +36,39 @@ is cheap and safe; `--force` redoes everything, `--jobs N` limits the compile jo
 `config/backbreaker.toml` from your image (two recompile passes, see "Recompile"). The image path
 goes only into the two extraction commands: it is never printed, written to a file or committed.
 
+## Steam Deck and other distributions
+    scripts/setup.sh --portable "<iso>"
+
+builds, in a container, a version that runs on SteamOS (Steam Deck), Debian 12+, Ubuntu 22.04+,
+Fedora, Arch and other current distributions (#134). The machine you build on needs only podman or
+docker and git, whatever its distribution; the first run builds the container (about 15 minutes),
+later runs rebuild only what changed. It produces:
+- `dist/Backbreaker-x86_64.AppImage` (about 1 GB): one file, ready to run.
+- `dist/backbreaker-linux-x86_64/`: the same as a folder, started with `./backbreaker`, and
+  `dist/backbreaker-linux-x86_64.tar.gz` of it, for systems without FUSE.
+
+**Both hold your game** - code recompiled from your disc, and the disc's files. They are for your
+own machines: never upload or share them. Anyone else makes their own from their own disc with the
+same command.
+
+Where they keep things: settings in `~/.config/backbreaker-recomp/settings.ini`; saves,
+achievements, screenshots and the mods folder in `~/.local/share/backbreaker-recomp/`. On the machine
+you build on, `--portable` copies the checkout's settings and saves there once. Needs on the
+target: an x86-64 CPU with AVX2 (2013 or newer; the game says so if not), a Vulkan 1.3 driver
+(Mesa or NVIDIA) and glibc 2.35+.
+
+On a desktop, put the AppImage in `~/Applications` and give it a menu entry (it carries one, with
+the game's own icon). On a Steam Deck:
+1. Copy the AppImage over (USB stick, network share, or `scp`), in Desktop Mode.
+2. Make it executable: right-click > Properties > Permissions, or `chmod +x`.
+3. Steam (desktop) > Games > Add a Non-Steam Game to My Library > the AppImage. It is then in your
+   library in Gaming Mode; the controls work through Steam Input.
+4. Start with `fps=30` and `resolution_scale=1` in `~/.config/backbreaker-recomp/settings.ini`; the
+   Deck's GPU is far smaller than a desktop's.
+
+After changing the code, run `scripts/setup.sh --portable` again: it recompiles only what changed
+and repacks the AppImage (about a minute and a half for a change to the runtime).
+
 ## Reproduce extraction
     mkdir -p game/extracted game/disc
     python3 -I tools/xdvdfs.py "<iso>" game/extracted default.xex > docs/disc-listing.txt

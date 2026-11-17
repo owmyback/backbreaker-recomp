@@ -76,7 +76,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions planned, #134; launcher integration not started) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions in review, #134: #136 and #137; launcher integration not started) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -698,7 +698,10 @@ from your image. The image path never reaches the output or a file. README ("One
 `docs/runtime.md` ("Build and run") document it; the per-command sections stay as the reference.
 
 Next in this phase: a portable build (#134), with an **AppImage** as the main output, that runs on
-the Steam Deck (SteamOS), Debian/Ubuntu, Fedora and Arch. Today's build doesn't travel:
+the Steam Deck (SteamOS), Debian/Ubuntu, Fedora and Arch. Status (2026-11-16): built, and checked
+headless in containers of Ubuntu 22.04 and 24.04, Debian 12 and 13, Fedora and Arch (#136: where
+files live, mods folder, CPU check; #137: the container, `setup.sh --portable`, the AppImage); the
+Steam Deck play-test is next. Today's build doesn't travel:
 - it needs the build machine's glibc (2.44 when built on Fedora 45);
 - it links SDL3, shaderc and SPIRV-Tools from the system;
 - it finds `game/` only in the working directory, and writes settings and saves there;
@@ -723,7 +726,10 @@ for moving your own build between your own machines and are never published. The
 container image hold no game content. The repo has no licence yet, which is the maintainer's
 decision before it goes public.
 
-Also still open: optional integration with a launcher such as recomplauncher.com, and an install
+After that: a graphical installer and launcher for players who own the game (#138). They choose
+their ISO, the game code is translated and compiled on their machine against a prebuilt runtime, and
+the same app then launches the game and handles settings, mods and updates. It starts by checking
+whether an existing launcher such as recomplauncher.com could host this. Also still open: an install
 prefix.
 
 ## Phase 11 - Achievements (done)
