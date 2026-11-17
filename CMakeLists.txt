@@ -203,3 +203,11 @@ install(FILES ${RUNTIME_LAYOUT} DESTINATION ${KIT_SHARE} COMPONENT runtime)
 # version.txt: the same "<revision> (<branch>, built <date>)" line the game prints with --version
 install(CODE "set(BB_VERSION_HEADER \"${BUILD_VERSION_HEADER}\")\nset(BB_KIT_SHARE \"${KIT_SHARE}\")" COMPONENT runtime)
 install(SCRIPT cmake/kit_version.cmake COMPONENT runtime)
+
+# The installer's game-file steps (#138, installer/): checks the player's image and does what
+# tools/xdvdfs.py, xex_decrypt.py, gen_imports.py and title_icon.py do, without Python or OpenSSL.
+# Builds without game files, SDL3 or Vulkan; the kernel's export tables come from XenonUtils/xbox/.
+set(INSTALLER_SOURCES installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp)
+add_executable(backbreaker-installer installer/main.cpp ${INSTALLER_SOURCES})
+target_include_directories(backbreaker-installer PRIVATE ${XENON}/XenonUtils)
+target_compile_options(backbreaker-installer PRIVATE -Wall -Wextra)

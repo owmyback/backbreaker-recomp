@@ -15,7 +15,7 @@ a quarter on the PC, #146, and thread timing reports the long frames that remain
 achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
 a game-fps readout and a log file, #148; the installer, #138, started: RecompLauncher will be its front end,
 and the runtime builds as a library without game files, the "runtime kit" a player's machine links
-the game against). Before that,
+the game against; the extraction tools and the image check in C++). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -792,7 +792,10 @@ The parts, in order:
    (`-DBB_RUNTIME_ONLY=ON`) and installs as a kit with its compile and link arguments, and
    `packaging/installer/link_game.sh` builds the game from it: all of `ppc/` in about 30 s with 16 jobs on
    the maintainer's desktop, a relink after a runtime update in under a second (docs/runtime.md, "Runtime kit").
-2. The extraction tools in C++ (no Python, no OpenSSL) and a check that the image is Backbreaker.
+2. **The extraction tools in C++** (done): `backbreaker-installer` checks the image (another game, a
+   cut-short or damaged copy and an unknown release each get their own message and exit code) and does
+   what `tools/xdvdfs.py`, `xex_decrypt.py`, `gen_imports.py` and `title_icon.py` do, byte for byte,
+   with no Python or OpenSSL (docs/runtime.md, "Installer tools").
 3. A bundled clang, lld and Ubuntu 22.04 sysroot (about 330 MB unpacked, of which the LLVM part
    compresses to 86 MB; measured in the build container), the headless install into `~/.local/share/backbreaker-recomp/`,
    parallel jobs chosen by free memory, and `test_distros.sh` running it in each distribution.

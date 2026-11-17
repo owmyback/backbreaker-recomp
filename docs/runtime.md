@@ -64,6 +64,33 @@ and all of them when the kit's compile arguments or headers change; after a runt
 relinks in about a second. It is the prototype of the installer's build step (#138); the kit holds
 no game content.
 
+### Installer tools (#138)
+`build/backbreaker-installer` (`installer/`) does the game-file steps without Python or OpenSSL,
+for the installer, which can't count on either on a player's machine:
+
+    backbreaker-installer check <image>                 is it Backbreaker, the release supported?
+    backbreaker-installer game-files <image> <game dir> [--progress]   disc/ + extracted/default.{xex,pe}
+    backbreaker-installer list <image>                  | extract <image> <dir> --all | <file>...
+    backbreaker-installer decrypt <default.xex> <default.pe>
+    backbreaker-installer imports <default.xex> <default.pe> <imports.cpp>
+    backbreaker-installer icon <default.pe> <icon.png>
+
+`list`, `extract`, `decrypt`, `imports` and `icon` write the same bytes as `tools/xdvdfs.py`,
+`xex_decrypt.py`, `gen_imports.py` and `title_icon.py` (AES-128 and SHA-256 are in
+`installer/crypto.cpp`, checked against the standards' test vectors by `tests/installer_test.cpp`;
+the kernel's export tables are compiled in from XenonRecomp's `XenonUtils/xbox/*_table.inc`).
+`check` (also the first step of `game-files`) reads only the file system and `default.xex`, and
+refuses, each with its own message and exit code:
+- 3: the image can't be opened (missing, unreadable, a folder);
+- 4: not an Xbox 360 game disc (an archive or a content package is named as such), or no `default.xex`;
+- 5: another game (its title ID; Backbreaker's is `464F07DA`);
+- 6: damaged: a file or folder runs past the end of the image (a cut-short copy), or `default.xex`
+  isn't a known release (`kKnownReleases` in `installer/game_check.cpp`: its SHA-256).
+
+It doesn't read the rest of the disc, so damage elsewhere goes unnoticed until the file is used.
+Messages never contain the image's path. `--progress` prints `progress <0-1> <step>` lines, the form
+RecompLauncher shows as a progress bar. `scripts/setup.sh` still uses the Python tools.
+
 ## Where files live
 `runtime/paths.cpp` (#134). Two layouts:
 - **Checkout** (the default, as before): everything relative to the working directory, so run from
@@ -371,6 +398,7 @@ with the same line: 0 errors, and only the loader's own note left.
 - `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py);
   compiled into the game, not the runtime library (see "Runtime kit")
 - `runtime/sdk/ppc_config.h` - the executable's layout the runtime library is built for
+- `installer/` - `backbreaker-installer`: the image check and the game-file steps in C++ (see "Installer tools")
 
 ## Status (2026-11-12, headless phase 3; the current state is in docs/ROADMAP.md)
 Phase 3 (headless subsystems, see docs/ROADMAP.md) works end to end: the game boots, initializes graphics, audio, voice
