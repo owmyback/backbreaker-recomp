@@ -3049,6 +3049,12 @@ void main()
         // time and resolved as 1_5_5_5, each row 256 KB on, i.e. 128 rows of 2-byte pixels further
         // down; counted in the image's 4-byte pixels that was 64 rows, and every row of fans landed
         // on the lower half (the legs) of the one before.
+        // Only an image resolved this frame or the last counts: the tiles of a target, and the rows of
+        // an atlas, are resolved one after the other, the first at the image's own address. An older
+        // image that merely covers the address is memory the game has since handed out again (#140):
+        // back in a Training Camp drill, the 1280x720 scene was resolved 48 KB past the previous
+        // visit's, which matched as "x = 192 of that one"; the new texture got no image of its own,
+        // sampled guest memory, and the field rendered black.
         Image* resolveInto(uint32_t destBase, uint32_t destPitch, VkFormat format, uint32_t bytes, VkExtent2D extent, VkOffset2D& offset)
         {
             if (!bytes || !destPitch) return nullptr;
@@ -3058,6 +3064,7 @@ void main()
                 --it;
                 Image& img = it->second;
                 if (img.format != format || img.resolvePitch != destPitch || (img.guestBytes && img.guestBytes != bytes)) continue;
+                if (g_frameSerial - img.memResolveFrame > 1) continue; // stale: see above
                 uint32_t delta = destBase - it->first, w = img.width / g_scale, h = img.height / g_scale;
                 for (uint32_t y = 0; y + extent.height <= h; y += 32)
                     for (uint32_t x = 0; x + extent.width <= w; x += 32)
