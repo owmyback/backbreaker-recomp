@@ -1,6 +1,7 @@
 // Time, system information and process-level imports.
 #include "import_support.h"
 #include "kernel.h"
+#include "ntstatus.h"
 #include "../log.h"
 
 #include <chrono>
@@ -254,11 +255,8 @@ GUEST_IMPORT(ExGetXConfigSetting)
 GUEST_IMPORT(ExRegisterTitleTerminateNotification) {}
 GUEST_IMPORT(FscSetCacheElementCount) { ctx.r3.u64 = STATUS_SUCCESS; }
 
-GUEST_IMPORT(RtlNtStatusToDosError)
-{
-    uint32_t s = ctx.r3.u32;
-    ctx.r3.u64 = s == 0 ? 0 : (s & 0xFFFF0000) == 0x80070000 ? (s & 0xFFFF) : 317; // ERROR_MR_MID_NOT_FOUND
-}
+// The game's XAPI layer sets its Win32 errors from this; the table is in ntstatus.h (#132).
+GUEST_IMPORT(RtlNtStatusToDosError) { ctx.r3.u64 = kernel::ntStatusToDosError(ctx.r3.u32); }
 
 // Fatal paths: report and stop.
 GUEST_IMPORT(KeBugCheck) { fatal("guest KeBugCheck(%08X)", ctx.r3.u32); }

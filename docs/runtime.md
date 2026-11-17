@@ -354,6 +354,30 @@ logged with FFmpeg's error.
 One difference from Xenia: a pass that starts with no valid input still delivers the rest of the
 stream's last frame (Xenia's starved-input branch resets the write offset and drops it).
 
+## Movies
+The game plays its movies with its own player, Microsoft's WMV decoder (VC-1 video, WMA Pro audio)
+linked into the executable: the CPU decoding is recompiled code, and the picture is assembled by
+GPU shaders the renderer runs. All are 1280x720 at 29.97 fps with stereo sound at 48 kHz:
+- `505.wmv` (11.4 s) and `nmlogo.wmv` (9.9 s), the boot logos, played by `NmgMovie::Play`
+  (`sub_82804660`) from the boot code while the game loads. `skip_intro=1` in `game/settings.ini`
+  or `--skip-intro 1` leaves them out (`runtime/intro_movies.cpp`); headless runs skip them unless
+  given `--skip-intro 0`, so the title screen comes about 4 s after launch, as scripted routes expect.
+- `attract.wmv` (30.5 s), on the title screen after about two minutes without input.
+- `Bonus/Trailer1-5.wmv` (69-85 s; Trailer5 is a copy of the attract movie), in Locker Room > Bonus >
+  Media > Videos (`media\bonusVideo\bonusVideo_list.xml`).
+
+Every movie used to stop after a second or two (#132). The player keeps eight 128 KB reads ahead of
+its parser on each of its two file handles and reads one block past the end of the file; it expects
+`ERROR_HANDLE_EOF` from that read and treats any other error as a broken stream. The Win32 error
+comes from `RtlNtStatusToDosError`, which answered 317 (`ERROR_MR_MID_NOT_FOUND`) for every status.
+The parser, still a second or two of video behind its reads, then failed its next refill
+(`0x80500001` from `sub_828188E8`), the video decoder reported end of stream, and the player said it
+was done. `runtime/kernel/ntstatus.h` now maps the statuses as Windows does (tested by
+`tests/ntstatus_test.cpp`). Checked headless against the files decoded with FFmpeg: the boot logos,
+the attract movie and trailer 1 play to the end, and their sound matches the soundtrack sample for
+sample at a constant offset over the whole movie, so speed and A/V sync are right (the picture
+follows the same clock, within a frame or two in screenshots).
+
 ## Achievements
 The game's 29 achievements (1000 G) come from its own SPA resource: an XDBF blob in the XEX,
 named after the title id 464F07DA, at 0x82E00000 in the loaded image (`runtime/kernel/spa.h`
@@ -475,7 +499,9 @@ Settings -> Game Controller -> pointer navigation, or the stick also moves the m
 
 ## Scripted input
 `--press "start@12,a@20,down@24.5"` presses each button that many seconds after launch (held
-150 ms), reported as pad state and as keystrokes, added to any real controller on user 0.
+150 ms), reported as pad state and as keystrokes, added to any real controller on user 0. Routes
+count on the title screen about 4 s after launch: headless runs skip the two boot logo movies
+(about 21 s) unless given `--skip-intro 0` (see "Movies").
 Buttons: a b x y start back up down left right lb rb lt rt ls rs (`lt`/`rt` pull the trigger fully
 for the hold). Example that gets past the title
 screen to the main menu: `--press "a@20,a@26"`. Sticks: `ls_` or `rs_` plus `left`, `right`, `up`
@@ -776,9 +802,12 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
 - Kernel objects (KTHREAD, PCR, TLS slots, events) are never freed; only a thread's stack is
 - NtSuspendThread only works before a thread starts; decommits are ignored (memory stays backed)
 - Timer APC routines are not delivered
-- Networking carries no data (socket objects exist, nothing is ever connected); movies (XMV) are
-  stubs; XMA plays as silence in a build without the decoder (`scripts/build_xma_decoder.sh`); the
-  XMA "interrupt when done" and "stop when done" bits are ignored
+- Networking carries no data (socket objects exist, nothing is ever connected); XMA plays as silence
+  in a build without the decoder (`scripts/build_xma_decoder.sh`); the XMA "interrupt when done" and
+  "stop when done" bits are ignored
+- File reads and writes complete before the call returns, also on handles opened for overlapped I/O
+  (the console returns `STATUS_PENDING` there and completes later); the result is in the I/O status
+  block and the event either way
 - WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
   first load); resolves to formats other

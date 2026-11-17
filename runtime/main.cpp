@@ -18,6 +18,7 @@
 #include "memory.h"
 #include "frame_rate.h"
 #include "scene_size.h"
+#include "intro_movies.h"
 #include "settings.h"
 
 #include <algorithm>
@@ -253,6 +254,7 @@ int main(int argc, char** argv)
     int fpsArg = -1;   // --fps, the same way (#89)
     int anisoArg = -1; // --anisotropy, the same way
     int native720pArg = -1; // --native-720p 0|1, the same way
+    int skipIntroArg = -1;  // --skip-intro 0|1, the same way
     std::string overlayPreview;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
@@ -295,6 +297,15 @@ int main(int argc, char** argv)
             if (fpsArg != 30 && fpsArg != 60)
             {
                 std::fprintf(stderr, "--fps %s: 30 or 60\n", argv[i]);
+                return 2;
+            }
+        }
+        else if (a == "--skip-intro" && i + 1 < argc)
+        {
+            skipIntroArg = std::atoi(argv[++i]);
+            if (skipIntroArg != 0 && skipIntroArg != 1)
+            {
+                std::fprintf(stderr, "--skip-intro %s: 0 or 1\n", argv[i]);
                 return 2;
             }
         }
@@ -363,6 +374,10 @@ int main(int argc, char** argv)
         info("[gpu] anisotropic filtering %ux (%s)", aniso, anisoArg >= 0 ? "--anisotropy" : settings::kPath);
     const bool native720p = native720pArg >= 0 ? native720pArg == 1 : !headless && file.native720p;
     scene_size::setNative720p(native720p);
+    const bool skipIntro = skipIntroArg >= 0 ? skipIntroArg == 1 : headless || file.skipIntro;
+    intro_movies::setSkip(skipIntro);
+    info("[movie] boot logos %s (%s)", skipIntro ? "skipped" : "shown",
+         skipIntroArg >= 0 ? "--skip-intro" : headless ? "headless" : settings::kPath);
     info("[gpu] matches render at %s (%s)", native720p ? "1280x720" : "the game's 1152x640, stretched to 1280x720",
          native720pArg >= 0 ? "--native-720p" : headless ? "headless" : settings::kPath);
     mem::init();

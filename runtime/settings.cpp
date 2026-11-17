@@ -61,6 +61,12 @@ namespace settings
                     warn("%s: anisotropy=%s is not 1-16 - using %ld", path.c_str(), text.c_str(), level);
                 s.anisotropy = uint32_t(level);
             }
+            else if (key == "skip_intro")
+            {
+                std::string text = trim(eq + 1);
+                if (text == "0" || text == "1") s.skipIntro = text == "1";
+                else warn("%s: skip_intro=%s is not 0 or 1 - using %d", path.c_str(), text.c_str(), int(s.skipIntro));
+            }
             else if (key == "native_720p")
             {
                 std::string text = trim(eq + 1);
@@ -88,8 +94,9 @@ namespace settings
             warn("cannot write %s: %s", path.c_str(), std::strerror(errno));
             return false;
         }
-        std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\nresolution_scale=%u\nfps=%u\nanisotropy=%u\nnative_720p=%d\n",
-                     s.width, s.height, s.x, s.y, int(s.fullscreen), s.resolutionScale, s.fps, s.anisotropy, int(s.native720p));
+        std::fprintf(f, "width=%d\nheight=%d\nx=%d\ny=%d\nfullscreen=%d\nresolution_scale=%u\nfps=%u\nanisotropy=%u\nnative_720p=%d\nskip_intro=%d\n",
+                     s.width, s.height, s.x, s.y, int(s.fullscreen), s.resolutionScale, s.fps, s.anisotropy, int(s.native720p),
+                     int(s.skipIntro));
         std::fclose(f);
         return true;
     }

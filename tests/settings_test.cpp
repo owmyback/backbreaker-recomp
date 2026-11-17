@@ -11,6 +11,7 @@
 //   - fps: 30 or 60, anything else the default (60)
 //   - anisotropy: 1-16, default 16; out of range the nearest, not a number the default
 //   - native_720p: 0 or 1, default 1; anything else the default
+//   - skip_intro: 0 or 1, default 0; anything else the default
 //   - a file that can't be written: save returns false
 //
 // No game files. Build and run: README "Tests" / .github/workflows/ci.yml
@@ -46,6 +47,7 @@ static uint32_t scaleOf(const char* name, const char* text) { return settings::l
 static uint32_t fpsOf(const char* name, const char* text) { return settings::load(write(name, text)).fps; }
 static uint32_t anisoOf(const char* name, const char* text) { return settings::load(write(name, text)).anisotropy; }
 static bool nativeOf(const char* name, const char* text) { return settings::load(write(name, text)).native720p; }
+static bool skipOf(const char* name, const char* text) { return settings::load(write(name, text)).skipIntro; }
 
 int main()
 {
@@ -61,6 +63,7 @@ int main()
         ok(s.fps == 60, "no file: 60 fps");
         ok(s.anisotropy == 16, "no file: anisotropy 16");
         ok(s.native720p, "no file: native 720p");
+        ok(!s.skipIntro, "no file: boot logos shown");
     }
     {
         // exactly what the presenter wrote before #115
@@ -74,7 +77,7 @@ int main()
         settings::Settings a;
         a.width = 1920; a.height = 1080; a.x = 40; a.y = 30; a.hasPosition = true;
         a.fullscreen = true; a.resolutionScale = 3; a.fps = 30; a.anisotropy = 4;
-        a.fullscreen = true; a.resolutionScale = 3; a.fps = 30; a.native720p = false;
+        a.fullscreen = true; a.resolutionScale = 3; a.fps = 30; a.native720p = false; a.skipIntro = true;
         std::string path = g_dir + "/roundtrip.ini";
         ok(settings::save(a, path), "save succeeds");
         settings::Settings b = settings::load(path);
@@ -84,6 +87,7 @@ int main()
         ok(b.fps == 30, "round trip: fps kept");
         ok(b.anisotropy == 4, "round trip: anisotropy kept");
         ok(!b.native720p, "round trip: native_720p=0 kept");
+        ok(b.skipIntro, "round trip: skip_intro=1 kept");
         // and again: a second close of the window writes the same file
         ok(settings::save(b, path) && settings::load(path).resolutionScale == 3, "second save keeps the scale");
         ok(settings::load(path).fps == 30, "second save keeps fps");
@@ -133,6 +137,10 @@ int main()
     ok(!nativeOf("native0.ini", "native_720p=0\n"), "native_720p=0");
     ok(nativeOf("native1.ini", " native_720p = 1 \r\n"), "native_720p=1 with spaces and CRLF");
     ok(nativeOf("nativeword.ini", "native_720p=off\n"), "native_720p=off -> the default (1)");
+    ok(!skipOf("noskip.ini", "width=2560\nheight=1362\nnative_720p=1\n"), "file without skip_intro: logos shown");
+    ok(skipOf("skip1.ini", " skip_intro = 1 \r\n"), "skip_intro=1 with spaces and CRLF");
+    ok(!skipOf("skip0.ini", "skip_intro=0\n"), "skip_intro=0");
+    ok(!skipOf("skipword.ini", "skip_intro=yes\n"), "skip_intro=yes -> the default (0)");
 
     ok(!settings::save(settings::Settings{}, g_dir + "/no/such/dir/settings.ini"), "unwritable path: save fails");
 

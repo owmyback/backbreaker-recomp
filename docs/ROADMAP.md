@@ -10,7 +10,8 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
+Last updated: 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
+Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
 hold 60 fps at resolution scale 2 (#121); the Training Camp and second-match crashes are fixed (#129,
 #127); phase 4: the crowd (#55), anisotropic filtering by default (#126) and matches rendered at a
 native 1280x720 (#128); phase 11 done). Before that, 2026-11-15 (phase 12, online multiplayer, added
@@ -71,7 +72,7 @@ timing hid (#129).
 | 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-19 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels, player highlight, decal passes, the crowd, anisotropic filtering, native 1280x720 matches) | `258ec24`, `7bf4023`, `9ac4cb9`, `733e432`, `0ed897c` |
 | 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
 | 6 | Audio output (real XMA decoding, mixing) | **Done** (output to SDL3, #90; XMA decoding, #93; confirmed by ear 2026-11-15) | #92, #95 |
-| 7 | Movies (WMV / XMV playback) | Planned | - |
+| 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `100ec86` |
@@ -617,12 +618,23 @@ render-driver callback.
 Left for later: a soft limiter if the occasional over-full-scale peaks ever become audible; the
 XMA "interrupt when done" / "stop when done" bits (ignored, as in Xenia). Movies are phase 7.
 
-## Phase 7 - Movies (planned)
+## Phase 7 - Movies (done)
 
 The logo and attract movies are `.wmv` files. The frame captures show the game's own movie player
 decodes them and draws the YUV planes on the GPU (motion-compensation shaders), so pictures should
 appear once the renderer handles those draws. This phase covers what remains: movie audio, timing,
 and any decoding the player expects hardware for.
+
+Status (#132, 2026-11-16): pictures, sound and timing needed nothing, but every movie stopped after
+a second or two (the 505 logo at 2.6 s of 11.4 s, the NaturalMotion logo at 0.8 s of 9.9 s). The
+player reads one block past the end of each file and expects `ERROR_HANDLE_EOF` from that read; our
+`RtlNtStatusToDosError` answered 317 for every status, so the stream counted as broken and the video
+decoder ended early. With the statuses mapped as Windows maps them (`runtime/kernel/ntstatus.h`), the
+boot logos, the attract movie (after about two minutes on the title screen) and the bonus trailers
+(Locker Room > Bonus > Media > Videos) play to the end, at the right speed and in sync, checked
+against the files decoded with FFmpeg. The boot logos now take about 21 s: `skip_intro=1` in
+`game/settings.ini` leaves them out, and headless runs skip them so scripted routes keep their
+timing. See `docs/runtime.md`, "Movies".
 
 ## Phase 8 - Saves and profile (saves done)
 

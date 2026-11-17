@@ -30,6 +30,9 @@ namespace settings
         // Render matches at 1280x720 instead of the game's 1152x640 stretched to 1280x720 (what that
         // changes: docs/runtime.md). Windowed runs only; --native-720p overrides it for one run.
         bool native720p = true;
+        // Leave out the two boot logo movies (505 Games, NaturalMotion; about 21 s). Windowed runs
+        // only (headless runs skip them); --skip-intro overrides it for one run.
+        bool skipIntro = false;
     };
 
     // No file or no key: the defaults above. A value out of range gets a warning and the nearest

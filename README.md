@@ -122,6 +122,11 @@ lines, and out-of-range or non-numeric scales:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 -I runtime tests/settings_test.cpp runtime/settings.cpp -o build/settings_test && build/settings_test
 
+NTSTATUS to Win32 error codes (`runtime/kernel/ntstatus.h`, #132), what the game's own file calls
+see when one fails:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/ntstatus_test.cpp -o build/ntstatus_test && build/ntstatus_test
+
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 `scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`
@@ -167,6 +172,11 @@ to `game/settings.ini` the same way, or pass `--fps 30` for one run (`--fps 60` 
 Headless runs use 30 unless given `--fps`. What 60 changes in the game, and how:
 `docs/runtime.md`, "Frame rate" ([issue #89](https://github.com/owmyback/backbreaker-recomp/issues/89)).
 
+The game opens with two logo movies (505 Games, NaturalMotion; about 21 s). `skip_intro=1` in
+`game/settings.ini` (or `--skip-intro 1` for one run) leaves them out; headless runs skip them unless
+given `--skip-intro 0`. The attract movie (after about two minutes on the title screen) and the
+trailers in Locker Room > Bonus > Media > Videos always play.
+
 Textures get 16x anisotropic filtering, which keeps the field sharp toward the horizon (the game
 asks for it on only a few textures). `anisotropy=N` in `game/settings.ini` (1-16; 1 is the game's
 own) or `--anisotropy N` for one run changes it; headless runs use 1 unless given the flag.
@@ -184,7 +194,7 @@ In the window:
 - **F12** - save the picture you see as `screenshots/<date-time>.png`
 - **F10** - GPU frame capture (draws, shaders, render targets) of the next frame to `captures/frame_N/`
 - **F11** or **Alt+Enter** - borderless fullscreen; window size, position and fullscreen state are
-  remembered in `game/settings.ini`, next to the `resolution_scale`, `native_720p`, `fps` and `anisotropy` above
+  remembered in `game/settings.ini`, next to the `resolution_scale`, `native_720p`, `fps`, `anisotropy` and `skip_intro` above
 
 Everything else - headless runs, screenshots by frame number or by second, scripted input,
 controllers, the renderer's debug aids - is in [`docs/runtime.md`](docs/runtime.md).
