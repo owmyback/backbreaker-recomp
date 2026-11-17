@@ -10,7 +10,8 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
+Last updated: 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
+with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
 hold 60 fps at resolution scale 2 (#121); the Training Camp and second-match crashes are fixed (#129,
 #127); phase 4: the crowd (#55), anisotropic filtering by default (#126) and matches rendered at a
@@ -75,7 +76,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; launcher integration not started) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions planned, #134; launcher integration not started) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -696,9 +697,34 @@ output already exists, `--force` redoes everything, and `--regenerate` re-derive
 from your image. The image path never reaches the output or a file. README ("One-step setup") and
 `docs/runtime.md` ("Build and run") document it; the per-command sections stay as the reference.
 
-Still open in this phase: optional integration with a launcher such as recomplauncher.com, and
-whatever a release build needs (install prefix, the game files next to the binary instead of
-`game:\` pointing into the checkout).
+Next in this phase: a portable build (#134), with an **AppImage** as the main output, that runs on
+the Steam Deck (SteamOS), Debian/Ubuntu, Fedora and Arch. Today's build doesn't travel:
+- it needs the build machine's glibc (2.44 when built on Fedora 45);
+- it links SDL3, shaderc and SPIRV-Tools from the system;
+- it finds `game/` only in the working directory, and writes settings and saves there;
+- `setup.sh` can't build natively on Debian 12 or Ubuntu 22.04/24.04, which don't package SDL3.
+
+The plan:
+- **A build container:** Ubuntu 22.04 for a glibc 2.35 floor, with SDL3, shaderc and the C++ runtime
+  linked statically, and appimagetool with the static runtime, so hosts don't need `libfuse2`.
+- **`setup.sh --portable`:** runs extraction, recompile, build and packaging in it with podman or
+  docker, so any distribution with one of those works. The build folder stays in the checkout, so
+  rebuilding after a code change stays incremental.
+- **Outputs:** `Backbreaker-x86_64.AppImage`, plus the same as a plain folder or `.tar.gz`.
+- **Where files live:** game data is found next to the executable or inside the AppImage. Settings
+  and saves move to the per-user folders (`~/.config/backbreaker-recomp`,
+  `~/.local/share/backbreaker-recomp`) for the AppImage and the folder; the checkout build keeps
+  `game/`.
+- **A mods folder** that overlays the disc's files without a rebuild.
+- **A CPU check, and Steam Deck instructions.**
+
+The binary and the AppImage contain the player's own recompiled game and disc files, so they are
+for moving your own build between your own machines and are never published. The repo and the
+container image hold no game content. The repo has no licence yet, which is the maintainer's
+decision before it goes public.
+
+Also still open: optional integration with a launcher such as recomplauncher.com, and an install
+prefix.
 
 ## Phase 11 - Achievements (done)
 
