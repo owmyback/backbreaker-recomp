@@ -52,7 +52,8 @@ own machines: never upload or share them. Anyone else makes their own from their
 same command.
 
 Where they keep things: settings in `~/.config/backbreaker-recomp/settings.ini`; saves,
-achievements, screenshots and the mods folder in `~/.local/share/backbreaker-recomp/`. On the machine
+achievements, screenshots, the mods folder and the logs of the last three runs (`logs/`) in
+`~/.local/share/backbreaker-recomp/`. On the machine
 you build on, `--portable` copies the checkout's settings and saves there once. Needs on the
 target: an x86-64 CPU with AVX2 (2013 or newer; the game says so if not), a Vulkan 1.3 driver
 (Mesa or NVIDIA) and glibc 2.35+.
@@ -72,6 +73,14 @@ the game's own icon). On a Steam Deck:
 
 After changing the code, run `scripts/setup.sh --portable` again: it recompiles only what changed
 and repacks the AppImage (about a minute and a half for a change to the runtime).
+
+If the game plays slowly at times (#146), add `show_fps=1` to `settings.ini`. The top-left corner
+then shows the game's own frames a second, its speed (below 100% it runs in slow motion) and its
+longest frame. Steam's performance overlay can't show this: it counts the window's redraws, which
+stay at 30 while the game slows down. Every run also leaves its log in
+`~/.local/share/backbreaker-recomp/logs/backbreaker.log`; the two runs before it are `.1.log` and
+`.2.log`. Copy it to a PC and run `tools/fps_report.py` on it. For more detail in the log, set the
+game's launch options in Steam to `BB_PERF=1 %command%`.
 
 ## Reproduce extraction
     mkdir -p game/extracted game/disc
@@ -222,6 +231,11 @@ Textures get 16x anisotropic filtering, which keeps the field sharp toward the h
 asks for it on only a few textures). `anisotropy=N` in `game/settings.ini` (1-16; 1 is the game's
 own) or `--anisotropy N` for one run changes it; headless runs use 1 unless given the flag.
 
+`show_fps=1` in `game/settings.ini` (or `--show-fps 1` for one run) shows the game's own frames a
+second, its speed and its longest frame in the top-left corner of the window (#146). Speed is game
+time over real time: the game counts a frame as at most 1/30 s, so a long frame slows it down even
+when the frame count looks fine (`docs/runtime.md`, "Frame rate").
+
 Both flags only change 3D scenes (`--resolution-scale` goes to 4, `--anisotropy` to 16); what each
 does to the picture - and what it leaves alone, like the 1280x720 attract movie and UI textures -
 is in `docs/runtime.md`. On a Radeon RX 9070 XT neither costs measurable frame rate: headless over
@@ -235,7 +249,7 @@ In the window:
 - **F12** - save the picture you see as `screenshots/<date-time>.png`
 - **F10** - GPU frame capture (draws, shaders, render targets) of the next frame to `captures/frame_N/`
 - **F11** or **Alt+Enter** - borderless fullscreen; window size, position and fullscreen state are
-  remembered in `game/settings.ini`, next to the `resolution_scale`, `native_720p`, `fps`, `anisotropy` and `skip_intro` above
+  remembered in `game/settings.ini`, next to the `resolution_scale`, `native_720p`, `fps`, `anisotropy`, `skip_intro` and `show_fps` above
 
 Everything else - headless runs, screenshots by frame number or by second, scripted input,
 controllers, the renderer's debug aids - is in [`docs/runtime.md`](docs/runtime.md).

@@ -81,6 +81,18 @@ jobs:
       - name: Run SPA parser test
         run: ./build/spa_test
 
+      - name: Build frame timing test (header-only)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/frame_stats_test.cpp -o build/frame_stats_test
+
+      - name: Run frame timing test
+        run: ./build/frame_stats_test
+
+      - name: Build log file test (runtime/log_file.cpp alone)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 -pthread tests/log_file_test.cpp runtime/log_file.cpp -o build/log_file_test
+
+      - name: Run log file test
+        run: ./build/log_file_test
+
       - name: Build unlock sound test (header-only)
         run: clang++ -std=c++20 -Wall -Wextra -O2 tests/system_sound_test.cpp -o build/system_sound_test
 
@@ -164,6 +176,13 @@ jobs:
           grep -qF 'frames total 286 vs 194: 67.8%' compare.txt
           python3 tools/fps_report.py tests/data/fps_report_sample.log --compare tests/data/fps_report_sample_b.log --from 3 --to 9 > compare_narrow.txt
           grep -qF 'frames total 162 vs 109: 67.3%' compare_narrow.txt
+          # Status lines with the longest frame and speed (#146); the older fixtures above have none
+          python3 tools/fps_report.py tests/data/fps_report_speed.log > speed.txt
+          grep -qF 'speed mean 87.8%  min 40%  game time lost 0.7 s of 6' speed.txt
+          grep -qE '^  t=3 +12 fps .*speed 40%, longest 250 ms' speed.txt
+          grep -qF 'slower than 95% without a dip: 1 of 6 seconds' speed.txt
+          grep -qE '^  t=2 +29 fps .*speed 92%, longest 117 ms  first use:' speed.txt
+          if grep -qF 'speed mean' fps_report.txt; then exit 1; fi
 
       # The tools' unit tests, tests/test_*.py: capture_diff.py's comparison rules against the small
       # capture pairs in tests/data (#79), and shader_effects.py against a hand-built pack (#80).

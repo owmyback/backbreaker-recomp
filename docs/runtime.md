@@ -48,11 +48,21 @@ the build.
   the AppImage's `game/`), or when a launcher passes `--data-dir <dir>` (a directory with `disc/` and
   `extracted/`). The game's files may then be read-only. The player's go to the per-user folders:
   `~/.config/backbreaker-recomp/settings.ini` and `~/.local/share/backbreaker-recomp/` (`saves/`,
-  `cache/`, `achievements/`, `sounds/`, `mods/`, `screenshots/`, `captures/`), following
+  `cache/`, `achievements/`, `sounds/`, `mods/`, `screenshots/`, `captures/`, `logs/`), following
   `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME`. The log's `[paths]` line names all three.
 
 `--user-dir <dir>` puts all of the player's files in one directory instead, in either layout. The
 shader cache is in `~/.cache/backbreaker-recomp` in both.
+
+**Log file** (`runtime/log_file.cpp`, #146): in the installed layout and with `--user-dir`, each run's
+log is also kept in `logs/backbreaker.log`, with the two runs before it as `backbreaker.1.log` and
+`backbreaker.2.log`. That's the log of a run started from Steam or a launcher, which has no terminal.
+It holds everything the process writes to stderr: the runtime's log, a crash report, SDL's and the
+Vulkan driver's messages. The file is stderr itself, so a crash report is complete in it. A thread
+copies what it gets on to the terminal or pipe the run started with, every 20 ms, and the last of it
+just before the process ends, so the console still shows the whole log. A console that goes away (a
+closed pipe) no longer ends the game: SIGPIPE is ignored once the file is open. At 256 MB the file
+stops growing and the rest goes to the console only. The checkout layout writes no file.
 
 **Mods folder:** `mods/` in the player's directory (`game/mods` in the checkout layout) overlays the
 disc. A file there replaces the disc's file at the same path, matched without regard to case like
@@ -214,12 +224,15 @@ the import that made them.
 While a run is up, the GPU thread prints one status line per second on stderr, and that line is the
 frame trace every frame-rate question here starts from:
 
-    [rt] [gpu] 30 fps, 900 draws/s, 30 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB
+    [rt] [gpu] 30 fps, 900 draws/s, 30 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB, longest frame 33 ms, speed 100%
 
 `fps` and `draws/s` are that second's counts, `frames total` is what the guest has finished since
 the run started (so comparing it across two runs of the same timed route is the frame-rate ratio),
 the front buffer is the guest's own surface address and size, and the two numbers after `mem` are
-guest virtual and physical bytes in use, in MB. `[rt] ` is the prefix on every log line (`info()`
+guest virtual and physical bytes in use, in MB. `longest frame` and `speed` (#146) are the longest
+gap between two of the game's swaps in that second and the game's speed over it (see "Frame rate",
+"Speed"); they come last, so tools that read the line from its start still work with older logs.
+`[rt] ` is the prefix on every log line (`info()`
 in `runtime/log.h`); the tag after it says who wrote it - `[gpu]`, `[render]`, `[iso host]`,
 `[video]`, `[capture]`. `tools/fps_report.py` reads a saved log of these lines into a dip report;
 it is under "Debugging aids" below.
@@ -542,6 +555,28 @@ sub_82277110 while the byte 0x82C75097 is set. The code only ever clears that by
 points at it, so it looks unused, and it was 0 throughout the route and a play-test. Above 60
 fps would need a faster guest vblank (`runtime/gpu/`, 60 Hz) and a matching tick.
 
+**Speed** (#146, `runtime/gpu/frame_stats.h`). Because the game clock clamps a frame to 1/30 s, a
+frame that takes longer loses game time: one 50 ms frame loses 17 ms, and the game plays in slow
+motion. A second can do that and still count 29 or 30 frames. So each second also reports:
+- the longest gap between two of the game's swaps;
+- the game's speed, game time over real time: each gap of dt advances the game by min(dt, 1/30 s).
+  A gap still open when the second closes counts toward that second, so a freeze shows in every
+  second it lasts.
+
+It's an estimate from the swaps' host times. The game measures its frames with its own timer, which
+runs at the same pace, so the two agree while frames are steady. A loading screen that stops drawing
+reads as slow too. Both numbers end the `[gpu]` status line (`longest frame 52 ms, speed 94%`).
+`tools/fps_report.py` sums the game time lost and lists the slow seconds that aren't fps dips.
+
+**The fps readout.** `show_fps=1` in `settings.ini` (or `--show-fps 1` for one run) shows the game's
+frames, speed and longest frame over the last second in the top-left corner of the window, and turns
+the speed gold below 98%. It's the number to watch on a Steam Deck. Its performance overlay counts
+the window's presents, and the presenter presents on every vsync, showing the last picture again
+when the game hasn't finished a new one. So under Steam's 30 fps limit that overlay reads 30 even
+while the game slows down. The readout is drawn by the overlay (`runtime/video/overlay.cpp`) and
+hidden while the achievements list is open. It redraws once a second and then uploads only its own
+rectangle. Windowed runs only. `--overlay-preview` draws it with sample numbers when it's on.
+
 ## Fixes to the game's own code
 - Tackle Alley at 60 fps (`runtime/tackle_alley.cpp`, #139): after a tackle the next attempt never
   started (the player stood still, the clock frozen). The between-attempts stage (43) starts a
@@ -856,7 +891,9 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
   resolve destinations, screenshots and captures (those two cost frames themselves, and are marked
   as overhead). `--from S --to S` narrows the seconds, `--compare OTHER.log` lines two runs up and
   ends with the ratio of frames rendered, which is the frame-rate number a headless A/B run is after.
-  Fixtures it is checked against: `tests/data/fps_report_sample*.log`.
+  For logs that carry the speed (#146), it also prints the mean speed and the game time lost, and
+  lists the seconds below `--slower-than` (95%) that aren't fps dips: long single frames.
+  Fixtures it is checked against: `tests/data/fps_report_sample*.log`, `tests/data/fps_report_speed.log`.
 - Sampling a busy thread: `eu-stack -1 -p <tid>` (recompiled frames are named sub_XXXXXXXX)
 - Crash report: host backtrace, all the guest registers, recent profiler scopes and import calls of
   the crashing thread. Indirect calls to addresses without a recompiled function are reported with

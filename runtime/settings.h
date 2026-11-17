@@ -33,6 +33,9 @@ namespace settings
         // Leave out the two boot logo movies (505 Games, NaturalMotion; about 21 s). Windowed runs
         // only (headless runs skip them); --skip-intro overrides it for one run.
         bool skipIntro = false;
+        // The game's own frames a second and speed in the top-left corner (#146; what speed means:
+        // gpu/frame_stats.h). Windowed runs only; --show-fps overrides it for one run.
+        bool showFps = false;
     };
 
     // No file or no key: the defaults above. A value out of range gets a warning and the nearest

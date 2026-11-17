@@ -1,0 +1,8 @@
+[rt] backbreaker-recomp: run log fixture for tools/fps_report.py (issue #146): status lines ending in the longest frame and the game's speed; events precede the status line of their second
+[rt] [gpu] 30 fps, 900 draws/s, 30 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB, longest frame 33 ms, speed 100%
+[rt] [gpu] 30 fps, 900 draws/s, 60 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB, longest frame 34 ms, speed 100%
+[rt] [render] first use: 2 shaders translated (0 ms), 0 compiled by shaderc (0 ms), 2 from the shader cache, 1 pipelines (0 ms)
+[rt] [gpu] 29 fps, 870 draws/s, 89 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB, longest frame 117 ms, speed 92%
+[rt] [gpu] 12 fps, 360 draws/s, 101 frames total, front buffer 00840000 1280x720, 156 xma frames, mem 43+62 MB, longest frame 250 ms, speed 40%
+[rt] [gpu] 30 fps, 900 draws/s, 131 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB, longest frame 33 ms, speed 100%
+[rt] [gpu] 28 fps, 840 draws/s, 159 frames total, front buffer 00840000 1280x720, 390 xma frames, mem 43+62 MB, longest frame 84 ms, speed 95%

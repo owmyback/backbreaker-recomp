@@ -11,7 +11,8 @@ Work that can be picked up is tracked as GitHub issues and linked from each phas
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
 Last updated: 2026-11-17 (phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
-achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146). Before that,
+achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
+a game-fps readout and a log file, #148). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -684,6 +685,15 @@ Performance (done):
   (#122); EDRAM transfers skipped for tiles a clear overwrites (#123); and on the command processor
   thread, which decides whether a frame makes the vblank (`BB_CP_TIME`), index and vertex copies
   reused within a frame (#124). Window play-test: 59.9 fps, lowest second 56.
+
+Performance (open): the Steam Deck is slow at moments (#146). The Deck's performance overlay can't
+show it: it counts the window's presents, not the game's frames. To measure it there:
+- `show_fps=1` puts the game's own frames, speed and longest frame in the corner of the window;
+- the `[gpu]` status line ends with the second's longest frame and the game's speed;
+- `tools/fps_report.py` totals the game time lost;
+- the installed build keeps a log file in `~/.local/share/backbreaker-recomp/logs/`.
+
+Next: a Deck run with these, then CPU or GPU.
 
 Correctness: the analyzer fixes (#52); crashes fixed: a reused TLS slot that handed back freed data
 on the second match load (#127), and the Training Camp passing drills, a race between the game's

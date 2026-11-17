@@ -1,6 +1,8 @@
 #pragma once
 // Xenos GPU front end: register file, PM4 command processor and display interrupts.
 // Phase 1 is headless: commands are executed for their memory/sync side effects only.
+#include "frame_stats.h"
+
 #include <cstdint>
 
 namespace gpu
@@ -36,6 +38,10 @@ namespace gpu
     void initializeRingBuffer(uint32_t physAddr, uint32_t sizeLog2);
     void enableReadPointerWriteBack(uint32_t physAddr, uint32_t blockLog2);
     void wakeCommandProcessor();
+
+    // The last whole second of the game's swaps (#146; frame_stats.h): frames, the longest frame
+    // and the game's speed. Updated once a second, with the [gpu] status line. Any thread.
+    FrameSecond lastSecond();
 
     // Display size the game is told about
     constexpr uint32_t kDisplayWidth = 1280;

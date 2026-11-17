@@ -16,6 +16,7 @@ namespace
     std::string g_settings = "game/settings.ini";
     std::string g_screenshots = "screenshots";
     std::string g_captures = "captures";
+    std::string g_logs; // none in the checkout layout: a terminal or a pipe has the log there
 
     std::string home()
     {
@@ -63,14 +64,21 @@ namespace paths
         {
             g_screenshots = g_user + "/screenshots";
             g_captures = g_user + "/captures";
+            g_logs = g_user + "/logs";
         }
 
         std::error_code ec;
         fs::create_directories(g_user, ec);
         fs::create_directories(fs::path(g_settings).parent_path(), ec);
-        if (g_installed || !o.userDir.empty())
+    }
+
+    void printLayout()
+    {
+        if (!g_logs.empty())
             info("[paths] game files %s; player files %s; settings %s", g_data.c_str(), g_user.c_str(), g_settings.c_str());
     }
+
+    const std::string& logs() { return g_logs; }
 
     bool installed() { return g_installed; }
     const std::string& data() { return g_data; }

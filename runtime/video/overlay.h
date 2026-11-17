@@ -2,7 +2,7 @@
 // In-window overlay drawn by the runtime on top of the game (issue #101, roadmap phase 11 parts
 // 3-5): the achievements list (F1 or the controller's Guide/PS button) and an "Achievement
 // unlocked" pop-up. The game has no achievements screen of its own; on the console it was the
-// Guide's.
+// Guide's. Also the fps readout (show_fps, #146): the game's own frames a second and speed.
 //
 // Everything here runs on the presenter thread (window events, controller presses, the present
 // path). Drawing happens on the CPU (SDL's software renderer and its built-in 8x8 font, icons
@@ -29,6 +29,11 @@ namespace overlay
     // Records nothing while nothing is shown. The previous submission must have completed (the
     // presenter waits on its fence first), since the staging buffer is rewritten here.
     void record(vkctx::Context& ctx, VkCommandBuffer cmd, VkImage dst, VkExtent2D extent);
+
+    // The fps readout in the top-left corner (settings.ini show_fps / --show-fps, #146): the game's
+    // frames, speed and longest frame over the last second (gpu::lastSecond()). Hidden while the
+    // achievements list is open. Before the window opens.
+    void setShowFps(bool on);
 
     // Frees the GPU resources (device idle).
     void destroy(VkDevice device);

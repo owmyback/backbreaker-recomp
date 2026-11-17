@@ -2,7 +2,7 @@
 """Per-second fps and dip report from a runtime run log (issue #78).
 
 Usage:
-    tools/fps_report.py LOG [--threshold N] [--from S --to S]
+    tools/fps_report.py LOG [--threshold N] [--slower-than P] [--from S --to S]
     tools/fps_report.py LOG --compare OTHER.log [--threshold N] [--from S --to S]
 
 The runtime prints one `[rt] [gpu] N fps, ...` status line per second, so a run log is already
@@ -12,6 +12,11 @@ are involved - it reads a text log.
 `--threshold` (default 25) picks which seconds count as dips. `--from`/`--to` are inclusive
 second numbers, counted from the first fps line (that one is t=0). `--compare` lines two logs
 up second by second.
+
+Logs from #146 on also carry each second's longest frame and the game's speed (game time over
+real time: the game counts a frame as at most 1/30 s, so a long frame slows it even when the
+fps count looks fine). The report then lists the seconds below `--slower-than` percent
+(default 95) as well. Older logs, without those fields, report as before.
 """
 import argparse
 import re
@@ -21,6 +26,8 @@ from collections import Counter
 # The status line, as printed by runtime/gpu/command_processor.cpp. Deliberately stops before
 # the front buffer, so a change to what comes after it cannot break the report.
 FPS_RE = re.compile(r'\[gpu\] (\d+) fps, (\d+) draws/s, (\d+) frames total')
+# Its end since #146 (absent from older logs): the second's longest frame and the game's speed
+SPEED_RE = re.compile(r'longest frame (\d+) ms, speed (\d+)%')
 
 # Everything else on the log is a candidate cause for the second it landed in.
 FIRST_USE_RE = re.compile(r'\[render\] first use: (.*)')
@@ -39,9 +46,14 @@ GROUPED = ('pipeline', 'resolve')     # often hundreds in one second: reported a
 
 
 class Second:
-    def __init__(self, t, fps, draws, frames_total):
+    def __init__(self, t, fps, draws, frames_total, longest=None, speed=None):
         self.t, self.fps, self.draws, self.frames_total = t, fps, draws, frames_total
+        self.longest, self.speed = longest, speed  # None in logs from before #146
         self.events = []
+
+    def timing(self):
+        """`speed 64%, longest 133 ms`, or '' for a log without them"""
+        return f'speed {self.speed}%, longest {self.longest} ms' if self.speed is not None else ''
 
     @property
     def overhead(self):
@@ -65,7 +77,9 @@ def parse(path):
         for line in f:
             m = FPS_RE.search(line)
             if m:
-                s = Second(len(out), int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                sp = SPEED_RE.search(line)
+                s = Second(len(out), int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                           int(sp.group(1)) if sp else None, int(sp.group(2)) if sp else None)
                 s.events, pending = pending, []
                 out.append(s)
                 continue
@@ -156,10 +170,21 @@ def summary(secs):
         head += f'\n        seconds holding a screenshot or capture: {n_over} {rest}'
     if secs:
         head += f'\n        frames rendered {secs[-1].frames_total} (last status line)'
+    speeds = [s.speed for s in secs if s.speed is not None]
+    if speeds:
+        lost = sum(100 - v for v in speeds) / 100.0
+        head += (f'\n        speed mean {mean(speeds):.1f}%  min {min(speeds)}%  '
+                 f'game time lost {lost:.1f} s of {len(speeds)}')
     return head
 
 
-def report(path, secs, threshold, lo_t, hi_t):
+def line(s, flag=''):
+    timing = s.timing()
+    return (f'  t={s.t:<4} {s.fps:>3} fps {s.draws:>5} draws/s{flag}  '
+            + (f'{timing}  ' if timing else '') + f'{describe(s.events) or "-"}')
+
+
+def report(path, secs, threshold, lo_t, hi_t, slower_than=95):
     secs = [s for s in secs if lo_t <= s.t <= hi_t]
     if not secs:
         return secs
@@ -168,9 +193,14 @@ def report(path, secs, threshold, lo_t, hi_t):
     dips = [s for s in secs if s.fps < threshold]
     print(f'dips below {threshold}: {len(dips)} of {len(secs)} seconds')
     for s in dips:
-        flag = '  [overhead]' if s.overhead else ''
-        print(f'  t={s.t:<4} {s.fps:>3} fps {s.draws:>5} draws/s{flag}  '
-              f'{describe(s.events) or "-"}')
+        print(line(s, '  [overhead]' if s.overhead else ''))
+    timed = [s for s in secs if s.speed is not None]
+    if timed:
+        # The seconds the game ran slow in without a dip in the count: long single frames
+        slow = [s for s in timed if s.speed < slower_than and s.fps >= threshold]
+        print(f'slower than {slower_than}% without a dip: {len(slow)} of {len(timed)} seconds')
+        for s in slow:
+            print(line(s, '  [overhead]' if s.overhead else ''))
     return secs
 
 
@@ -212,6 +242,8 @@ def main():
     ap.add_argument('log')
     ap.add_argument('--compare', metavar='OTHER.log')
     ap.add_argument('--threshold', type=int, default=25)
+    ap.add_argument('--slower-than', type=int, default=95, metavar='P',
+                    help='list the seconds the game ran below P%% speed without an fps dip')
     ap.add_argument('--from', dest='from_s', type=int, default=0)
     ap.add_argument('--to', dest='to_s', type=int, default=1 << 30)
     a = ap.parse_args()
@@ -223,7 +255,7 @@ def main():
         if not sa or not sb:
             sys.exit('no [gpu] fps status lines in that window')
         compare(a.log, sa, a.compare, sb, a.threshold)
-    elif not report(a.log, parse(a.log), a.threshold, a.from_s, a.to_s):
+    elif not report(a.log, parse(a.log), a.threshold, a.from_s, a.to_s, a.slower_than):
         sys.exit('no [gpu] fps status lines in that window')
 
 

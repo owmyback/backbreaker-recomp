@@ -71,6 +71,16 @@ namespace gpu
         uint32_t g_frontBuffer = 0, g_frontWidth = 0, g_frontHeight = 0;
         uint64_t g_counter = 0; // EVENT_WRITE_SHD counter
 
+        // Frame timing (#146): each swap feeds it, the vblank thread closes a second with each
+        // status line and keeps the result for lastSecond()
+        std::mutex g_frameStatsLock;
+        FrameStats g_frameStats;
+        FrameSecond g_lastSecond;
+        double hostSeconds()
+        {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
+
         uint32_t gpuSwap(uint32_t v, uint32_t endian)
         {
             switch (endian & 3)
@@ -382,6 +392,10 @@ namespace gpu
                 r.skip(count - 3);
                 g_frames++;
                 g_counter++;
+                {
+                    std::lock_guard g(g_frameStatsLock);
+                    g_frameStats.onSwap(hostSeconds());
+                }
                 capture::onSwap(g_frames, g_frontBuffer, g_frontWidth, g_frontHeight);
                 render::onSwap(g_frontBuffer, g_frontWidth, g_frontHeight, g_frames); // before publishFrame
                 video::publishFrame(g_frontBuffer, g_frontWidth, g_frontHeight, g_frames);
@@ -571,10 +585,18 @@ namespace gpu
                     uint64_t f = g_frames, d = g_draws;
                     uint64_t vmb, pmb;
                     mem::usage(vmb, pmb);
-                    info("[gpu] %llu fps, %llu draws/s, %llu frames total, front buffer %08X %ux%u, %llu xma frames, mem %llu+%llu MB",
+                    FrameSecond s;
+                    {
+                        std::lock_guard g(g_frameStatsLock);
+                        s = g_lastSecond = g_frameStats.closeSecond(hostSeconds());
+                    }
+                    // New fields go at the end: tools/fps_report.py reads the line from its start
+                    info("[gpu] %llu fps, %llu draws/s, %llu frames total, front buffer %08X %ux%u, %llu xma frames, mem %llu+%llu MB, "
+                         "longest frame %u ms, speed %u%%",
                          (unsigned long long)(f - lastFrames), (unsigned long long)(d - lastDraws),
                          (unsigned long long)f, g_frontBuffer, g_frontWidth, g_frontHeight,
-                         (unsigned long long)apu::xmaFramesDecoded(), (unsigned long long)vmb, (unsigned long long)pmb);
+                         (unsigned long long)apu::xmaFramesDecoded(), (unsigned long long)vmb, (unsigned long long)pmb,
+                         s.longestMs, s.speedPercent);
                     lastFrames = f;
                     lastDraws = d;
                     lastReport = clock::now();
@@ -664,6 +686,12 @@ namespace gpu
     }
 
     void wakeCommandProcessor() { g_wake.notify_one(); }
+
+    FrameSecond lastSecond()
+    {
+        std::lock_guard g(g_frameStatsLock);
+        return g_lastSecond;
+    }
 }
 
 // MMIO stores from recompiled code (PPC_MM_STORE_U32).

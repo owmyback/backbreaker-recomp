@@ -19,6 +19,7 @@
 #include "frame_rate.h"
 #include "scene_size.h"
 #include "intro_movies.h"
+#include "log_file.h"
 #include "paths.h"
 #include "settings.h"
 
@@ -41,12 +42,14 @@ PPC_EXTERN_FUNC(_xstart);
 namespace
 {
     // Every way the process ends prints this, so a run's last lines say what it was doing and
-    // whether the Vulkan validation layer had anything to complain about.
+    // whether the Vulkan validation layer had anything to complain about. Last, the console gets
+    // what the log file's copies haven't sent it yet (log_file.h), since _exit follows.
     void printExitSummary()
     {
         kernel::printSummary();
         apu::printAudioSummary();
         vkctx::logValidationSummary();
+        log_file::drain();
     }
 
     void crashHandler(int sig, siginfo_t* si, void* uctx)
@@ -258,6 +261,7 @@ int main(int argc, char** argv)
     int anisoArg = -1; // --anisotropy, the same way
     int native720pArg = -1; // --native-720p 0|1, the same way
     int skipIntroArg = -1;  // --skip-intro 0|1, the same way
+    int showFpsArg = -1;    // --show-fps 0|1, the same way (#146)
     std::string overlayPreview;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
@@ -316,6 +320,15 @@ int main(int argc, char** argv)
                 return 2;
             }
         }
+        else if (a == "--show-fps" && i + 1 < argc)
+        {
+            showFpsArg = std::atoi(argv[++i]);
+            if (showFpsArg != 0 && showFpsArg != 1)
+            {
+                std::fprintf(stderr, "--show-fps %s: 0 or 1\n", argv[i]);
+                return 2;
+            }
+        }
         else if (a == "--native-720p" && i + 1 < argc)
         {
             native720pArg = std::atoi(argv[++i]);
@@ -360,8 +373,13 @@ int main(int argc, char** argv)
     }
 
     installHandlers();
-    info("built from %s", build_id::line()); // first line of every log says what made it (#75)
     paths::init(pathOptions);
+    // The installed layout keeps a log file (#146): started before the first line, so it has them all
+    const std::string logFile = paths::logs().empty() ? std::string() : log_file::start(paths::logs());
+    info("built from %s", build_id::line()); // first line of every log says what made it (#75)
+    paths::printLayout();
+    if (!logFile.empty())
+        info("[log] this run's log: %s (the two runs before it: backbreaker.1.log, backbreaker.2.log)", logFile.c_str());
     if (image.empty())
         image = paths::data() + "/extracted/default.pe";
     const std::string xex = paths::data() + "/extracted/default.xex";
@@ -394,6 +412,11 @@ int main(int argc, char** argv)
          skipIntroArg >= 0 ? "--skip-intro" : headless ? "headless" : settingsName);
     info("[gpu] matches render at %s (%s)", native720p ? "1280x720" : "the game's 1152x640, stretched to 1280x720",
          native720pArg >= 0 ? "--native-720p" : headless ? "headless" : settingsName);
+    // The game's own frame rate and speed on screen (#146); a window's overlay, so never headless
+    const bool showFps = !headless && (showFpsArg >= 0 ? showFpsArg == 1 : file.showFps);
+    overlay::setShowFps(showFps);
+    if (showFps)
+        info("[overlay] fps readout on (%s)", showFpsArg >= 0 ? "--show-fps" : settingsName);
     mem::init();
     loadImage(image);
     buildFunctionTable();

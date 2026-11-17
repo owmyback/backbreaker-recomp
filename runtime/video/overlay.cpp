@@ -1,13 +1,16 @@
-// In-window overlay: the achievements list and the unlock pop-up (issue #101). See overlay.h.
+// In-window overlay: the achievements list and the unlock pop-up (issue #101), and the fps
+// readout (#146). See overlay.h.
 //
 // GPU side, kept off the FPS-critical present path: nothing is created until something is first
 // shown; then one RGBA8 image and one host-visible staging buffer the size of the swapchain
 // image. A present that shows something records, at most, one buffer-to-image copy (only when
-// the content changed) and one blit per visible panel (opaque, nearest filter, same size: a copy
-// with format conversion). No extra submits, waits or allocations per present.
+// the content changed; when only the fps readout did, just its rectangle) and one blit per
+// visible panel (opaque, nearest filter, same size: a copy with format conversion). No extra
+// submits, waits or allocations per present.
 #include "overlay.h"
 #include "vk_context.h"
 #include "../apu/apu.h"
+#include "../gpu/gpu.h"
 #include "../hid/hid.h"
 #include "../kernel/kernel.h"
 #include "../log.h"
@@ -42,12 +45,15 @@ namespace overlay
         kernel::AchievementView g_toastItem;
         std::deque<kernel::AchievementView> g_toastQueue; // unlocks waiting for their pop-up
         bool g_dirty = true;
+        bool g_showFps = false;        // the readout (#146)
+        gpu::FrameSecond g_fps;        // what it shows
+        bool g_fpsDirty = false;       // only the readout changed: its rectangle is uploaded alone
 
         // ---- CPU drawing ----
         SDL_Surface* g_surface = nullptr;
         SDL_Renderer* g_sw = nullptr;
         std::map<const uint8_t*, SDL_Texture*> g_icons; // by PNG address in the SPA
-        SDL_FRect g_listRect{}, g_toastRect{};
+        SDL_FRect g_listRect{}, g_toastRect{}, g_fpsRect{};
 
         // ---- GPU ----
         struct Gpu
@@ -287,6 +293,28 @@ namespace overlay
             outline(R, kGold, std::max(2.0f, float(s) * 0.75f));
         }
 
+        // Top-left: "28 fps  speed 94%" and, smaller, the longest frame. Its size comes from the widest
+        // numbers it expects, so it doesn't change with the digits.
+        void drawFps()
+        {
+            const int s = g_scale, small = std::max(1, s - 1);
+            const float glyph = 8.0f * s, pad = glyph * 0.5f;
+            const float w = std::max(textWidth("00 fps  speed 100%", s), textWidth("longest frame 0000 ms", small)) + pad * 2;
+            const float h = glyph + 8.0f * small + pad * 3;
+            g_fpsRect = { std::floor(glyph), std::floor(glyph), std::floor(w), std::floor(h) };
+            const SDL_FRect& R = g_fpsRect;
+            fill(R, kPanel);
+            char fps[24], speed[24], longest[32];
+            std::snprintf(fps, sizeof(fps), "%u fps", g_fps.frames);
+            std::snprintf(speed, sizeof(speed), "speed %u%%", g_fps.speedPercent);
+            std::snprintf(longest, sizeof(longest), "longest frame %u ms", g_fps.longestMs);
+            const float x = R.x + pad, y = R.y + pad;
+            const float fw = text(x, y, s, kText, fps);
+            // Below 98% the game is visibly slower than real time (gpu/frame_stats.h)
+            text(x + fw + glyph * 2, y, s, g_fps.speedPercent < 98 ? kGold : kText, speed, R.x + R.w - pad - (x + fw + glyph * 2));
+            text(x, y + glyph + pad, small, kDim, longest, R.w - pad * 2);
+        }
+
         // (Re)creates the CPU surface at this size; drops cached icons with the old renderer.
         bool ensureSurface(uint32_t w, uint32_t h)
         {
@@ -314,9 +342,10 @@ namespace overlay
                 SDL_SetRenderDrawColor(g_sw, 70, 90, 70, 255); // stands in for the game in a preview
                 SDL_RenderClear(g_sw);
             }
-            g_listRect = g_toastRect = {};
+            g_listRect = g_toastRect = g_fpsRect = {};
             if (g_listOpen) drawList(float(w), float(h));
             if (g_toast) drawToast(float(w), float(h));
+            if (g_showFps && !g_listOpen) drawFps(); // last: on top, as its own upload and blit leave it
             SDL_FlushRenderer(g_sw);
         }
 
@@ -350,6 +379,18 @@ namespace overlay
                 apu::playUnlockSound();
                 info("[overlay] pop-up: %s (%u G)%s", g_toastItem.label.c_str(), g_toastItem.gamerscore,
                      g_toastQueue.empty() ? "" : (", " + std::to_string(g_toastQueue.size()) + " more waiting").c_str());
+            }
+        }
+
+        // A new second of the game's swaps (once a second): the readout's numbers
+        void updateFps()
+        {
+            if (!g_showFps) return;
+            const gpu::FrameSecond s = gpu::lastSecond();
+            if (s.frames != g_fps.frames || s.longestMs != g_fps.longestMs || s.speedPercent != g_fps.speedPercent)
+            {
+                g_fps = s;
+                g_fpsDirty = true;
             }
         }
 
@@ -471,7 +512,9 @@ namespace overlay
     void record(vkctx::Context& ctx, VkCommandBuffer cmd, VkImage dst, VkExtent2D extent)
     {
         updateToast();
-        if (!g_listOpen && !g_toast) return; // hidden: nothing recorded
+        updateFps();
+        const bool fpsShown = g_showFps && !g_listOpen;
+        if (!g_listOpen && !g_toast && !fpsShown) return; // hidden: nothing recorded
         if (!extent.width || !extent.height) return;
         if (g_gpu.width != extent.width || g_gpu.height != extent.height)
         {
@@ -499,6 +542,37 @@ namespace overlay
                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
             g_gpu.written = true;
             g_dirty = false;
+            g_fpsDirty = false;
+        }
+        else if (g_fpsDirty && fpsShown)
+        {
+            // Only the readout changed: redraw it and upload its rectangle. The staging buffer keeps
+            // the surface's layout, so the copy reads its rows in place (bufferRowLength).
+            drawFps();
+            SDL_FlushRenderer(g_sw);
+            const uint32_t x0 = uint32_t(g_fpsRect.x), y0 = uint32_t(g_fpsRect.y);
+            const uint32_t x1 = std::min(uint32_t(g_fpsRect.x + g_fpsRect.w), extent.width);
+            const uint32_t y1 = std::min(uint32_t(g_fpsRect.y + g_fpsRect.h), extent.height);
+            if (x1 > x0 && y1 > y0)
+            {
+                const uint8_t* src = static_cast<const uint8_t*>(g_surface->pixels);
+                uint8_t* out = static_cast<uint8_t*>(g_gpu.map);
+                const size_t row = size_t(extent.width) * 4;
+                for (uint32_t y = y0; y < y1; y++)
+                    std::memcpy(out + y * row + size_t(x0) * 4, src + size_t(y) * g_surface->pitch + size_t(x0) * 4, size_t(x1 - x0) * 4);
+                imageBarrier(cmd, g_gpu.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+                VkBufferImageCopy copy{};
+                copy.bufferOffset = (VkDeviceSize(y0) * extent.width + x0) * 4;
+                copy.bufferRowLength = extent.width;
+                copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                copy.imageOffset = { int32_t(x0), int32_t(y0), 0 };
+                copy.imageExtent = { x1 - x0, y1 - y0, 1 };
+                vkCmdCopyBufferToImage(cmd, g_gpu.staging, g_gpu.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+                imageBarrier(cmd, g_gpu.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            }
+            g_fpsDirty = false;
         }
         // The game's blit into dst comes first in this command buffer: order our writes after it.
         VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
@@ -507,6 +581,13 @@ namespace overlay
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
         if (g_listOpen) blitRect(cmd, dst, g_listRect);
         if (g_toast) blitRect(cmd, dst, g_toastRect);
+        if (fpsShown) blitRect(cmd, dst, g_fpsRect);
+    }
+
+    void setShowFps(bool on)
+    {
+        g_showFps = on;
+        g_dirty = true;
     }
 
     void destroy(VkDevice device)
@@ -532,6 +613,12 @@ namespace overlay
         g_toastQueue.clear();
         if (g_toast) g_toastItem = g_list[size_t(g_selected)];
         if (g_list.size() > 1) g_toastQueue.push_back(g_list[0]); // shows "+1 more"
+        if (g_showFps)
+        {
+            // No game runs here: sample numbers, with the list closed so the readout shows
+            g_fps = { 28, 52, 94 };
+            g_listOpen = false;
+        }
         draw(width, height, true);
         bool ok = SDL_SavePNG(g_surface, path);
         if (!ok) warn("[overlay] could not write %s: %s", path, SDL_GetError());
