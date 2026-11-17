@@ -7,6 +7,7 @@
 #include "../hid/hid.h"
 #include "../log.h"
 #include "../memory.h"
+#include "../paths.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -68,7 +69,7 @@ namespace gpu::capture
         std::set<uint64_t> g_targets_pending; // frames still to capture
         std::multiset<double> g_timesPending;  // --capture-at seconds still to come
         std::string g_dumpDir;                // --dump-shaders target, empty = off
-        std::string g_dir = "captures";
+        std::string g_dir; // set by request()/requestAt(); paths::captures() unless given
         bool g_active = false;
 
         // Per-capture state
@@ -237,14 +238,14 @@ namespace gpu::capture
     {
         std::lock_guard guard(g_lock);
         g_targets_pending.insert(frame);
-        g_dir = dir;
+        g_dir = dir.empty() ? paths::captures() : dir;
     }
 
     void requestAt(double seconds, const std::string& dir)
     {
         std::lock_guard guard(g_lock);
         g_timesPending.insert(seconds);
-        g_dir = dir;
+        g_dir = dir.empty() ? paths::captures() : dir;
     }
 
     void onPacket(uint32_t opcode)

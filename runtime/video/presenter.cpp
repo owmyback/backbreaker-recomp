@@ -16,6 +16,7 @@
 #include "../log.h"
 #include "../memory.h"
 #include "../settings.h"
+#include "../paths.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -113,7 +114,7 @@ namespace video
             if (!g_fullscreen)
                 rememberWindowGeometry();
             g_settings.fullscreen = g_fullscreen;
-            settings::save(g_settings);
+            settings::save(g_settings, paths::settingsFile());
         }
 
         void setFullscreen(bool on)
@@ -372,7 +373,7 @@ namespace video
             std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm);
             for (int n = stamp == lastStamp ? lastN + 1 : 1;; n++)
             {
-                std::string path = std::string("screenshots/") + stamp + (n > 1 ? "_" + std::to_string(n) : std::string()) + ".png";
+                std::string path = paths::screenshots() + "/" + stamp + (n > 1 ? "_" + std::to_string(n) : std::string()) + ".png";
                 if (std::filesystem::exists(path)) continue; // from an earlier run
                 lastStamp = stamp;
                 lastN = n;
@@ -400,7 +401,7 @@ namespace video
             // handles on a mash of F12 presses: retire the oldest once there are a few.
             if (vk.shotWriters.size() >= 4) { vk.shotWriters.front().join(); vk.shotWriters.erase(vk.shotWriters.begin()); }
             vk.shotWriters.emplace_back([path, rgba = std::move(rgba), w, h, start]() mutable {
-                std::filesystem::create_directories("screenshots");
+                std::filesystem::create_directories(paths::screenshots());
                 if (debug::writePng(path, rgba.data(), w, h))
                     info("[video] screenshot %s (%ux%u, %.1f MB, %.0f ms)", path.c_str(), w, h, double(rgba.size()) / (1024 * 1024),
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
@@ -576,7 +577,7 @@ namespace video
         SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // SIGINT/SIGTERM end the run (main.cpp)
         if (!SDL_Init(SDL_INIT_VIDEO))
             fatal("[video] SDL_Init: %s (use --headless to run without a window)", SDL_GetError());
-        g_settings = settings::load();
+        g_settings = settings::load(paths::settingsFile());
         // The revision is in the title so a screenshot of a window identifies the checkout (#75).
         char openTitle[128];
         snprintf(openTitle, sizeof(openTitle), "Backbreaker (recomp) %s", build_id::revision());
@@ -616,7 +617,7 @@ namespace video
                     // press, into captures/frame_N/ - for "it looks wrong right now" moments
                     uint64_t f = g_frameNumber.load(std::memory_order_acquire) + 2;
                     gpu::capture::request(f);
-                    info("[video] F10: capturing frame %llu into captures/frame_%llu/", (unsigned long long)f, (unsigned long long)f);
+                    info("[video] F10: capturing frame %llu into %s/frame_%llu/", (unsigned long long)f, paths::captures().c_str(), (unsigned long long)f);
                 }
                 else if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
                     haveSwapchain = false;

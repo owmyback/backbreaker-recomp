@@ -15,6 +15,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <set>
 #include <vector>
 
 using namespace mem;
@@ -32,7 +33,8 @@ namespace
 
     constexpr uint32_t FILE_ATTRIBUTE_READONLY = 0x01, FILE_ATTRIBUTE_DIRECTORY = 0x10, FILE_ATTRIBUTE_NORMAL = 0x80;
 
-    struct Mount { std::string prefix; fs::path root; bool writable; };
+    // overlay: a directory whose files replace the root's at the same path (the mods folder, #134)
+    struct Mount { std::string prefix; fs::path root; bool writable; fs::path overlay = {}; };
 
     std::mutex g_fsLock;
     std::vector<Mount> g_mounts;
@@ -94,7 +96,9 @@ namespace
         return exact;
     }
 
-    // Guest path -> host path. Returns false if no mount matches.
+    std::set<std::string> g_loggedOverlay; // replaced files already in the log (under g_fsLock)
+
+    // Guest path -> host path. Returns false if no mount matches. Called with g_fsLock held.
     bool resolve(std::string guest, fs::path& out, bool& writable)
     {
         std::replace(guest.begin(), guest.end(), '/', '\\');
@@ -120,19 +124,34 @@ namespace
             if (lg.rfind(m.prefix, 0) != 0)
                 continue;
             std::string rest = guest.substr(m.prefix.size());
-            fs::path p = m.root;
-            size_t i = 0;
-            while (i < rest.size())
-            {
-                size_t j = rest.find('\\', i);
-                if (j == std::string::npos) j = rest.size();
-                std::string comp = rest.substr(i, j - i);
-                if (!comp.empty() && comp != ".")
-                    p = comp == ".." ? p.parent_path() : matchComponent(p, comp);
-                i = j + 1;
-            }
-            out = p;
+            auto walk = [&](fs::path p) {
+                size_t i = 0;
+                while (i < rest.size())
+                {
+                    size_t j = rest.find('\\', i);
+                    if (j == std::string::npos) j = rest.size();
+                    std::string comp = rest.substr(i, j - i);
+                    if (!comp.empty() && comp != ".")
+                        p = comp == ".." ? p.parent_path() : matchComponent(p, comp);
+                    i = j + 1;
+                }
+                return p;
+            };
+            out = walk(m.root);
             writable = m.writable;
+            // A file in the overlay at the same path (matched without case, like the disc) is used
+            // instead. Only files: directories, and so directory listings, stay the root's.
+            if (!m.overlay.empty())
+            {
+                std::error_code ec;
+                fs::path o = walk(m.overlay);
+                if (fs::is_regular_file(o, ec))
+                {
+                    if (g_loggedOverlay.insert(o.string()).second)
+                        info("[mods] %s replaces %s", o.c_str(), guest.c_str());
+                    out = o;
+                }
+            }
             return true;
         }
         return false;
@@ -258,6 +277,17 @@ namespace kernel
         g_mounts.erase(std::remove_if(g_mounts.begin(), g_mounts.end(), [&](auto& m) { return m.prefix == prefix; }), g_mounts.end());
         g_mounts.push_back({ prefix, hostRoot, writable });
         std::sort(g_mounts.begin(), g_mounts.end(), [](auto& a, auto& b) { return a.prefix.size() > b.prefix.size(); });
+    }
+
+    void setDiscOverlay(const std::string& dir)
+    {
+        std::lock_guard guard(g_fsLock);
+        for (auto& m : g_mounts)
+            if (m.prefix == "\\device\\cdrom0")
+            {
+                m.overlay = dir;
+                info("[mods] files in %s replace the disc's at the same path", dir.c_str());
+            }
     }
 
     void removeMount(const std::string& devicePrefix)

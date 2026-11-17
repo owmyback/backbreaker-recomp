@@ -172,6 +172,10 @@ to `game/settings.ini` the same way, or pass `--fps 30` for one run (`--fps 60` 
 Headless runs use 30 unless given `--fps`. What 60 changes in the game, and how:
 `docs/runtime.md`, "Frame rate" ([issue #89](https://github.com/owmyback/backbreaker-recomp/issues/89)).
 
+Files in `game/mods/` replace the disc's files at the same path, without a rebuild: for example
+`game/mods/media/Movies/Xbox360/505.wmv` replaces the 505 logo movie. The log names each replaced
+file. More, including where an installed build keeps its files: `docs/runtime.md`, "Where files live".
+
 The game opens with two logo movies (505 Games, NaturalMotion; about 21 s). `skip_intro=1` in
 `game/settings.ini` (or `--skip-intro 1` for one run) leaves them out; headless runs skip them unless
 given `--skip-intro 0`. The attract movie (after about two minutes on the title screen) and the

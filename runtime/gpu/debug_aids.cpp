@@ -4,6 +4,7 @@
 #include "../debug/png.h"
 #include "../log.h"
 #include "../memory.h"
+#include "../paths.h"
 
 #include <algorithm>
 #include <cctype>
@@ -189,15 +190,16 @@ namespace gpu::debugaids
         double sum[4] = {};
         for (size_t i = 0; i < size_t(width) * height * 4; i++) sum[i & 3] += rgba[i];
         double n = double(width) * height * 255.0;
-        char name[96];
-        snprintf(name, sizeof name, "screenshots/resolve_%08X_%llu.png", config().dump, (unsigned long long)frameNumber);
-        std::filesystem::create_directories("screenshots");
+        char file[64];
+        snprintf(file, sizeof file, "/resolve_%08X_%llu.png", config().dump, (unsigned long long)frameNumber);
+        const std::string name = paths::screenshots() + file;
+        std::filesystem::create_directories(paths::screenshots());
         if (!debug::writePng(name, rgba, width, height))
         {
-            warn("[debug] BB_DEBUG_DUMP: could not write %s", name);
+            warn("[debug] BB_DEBUG_DUMP: could not write %s", name.c_str());
             return;
         }
-        info("[debug] BB_DEBUG_DUMP: %s (%ux%u), channel means R %.3f G %.3f B %.3f A %.3f%s", name, width, height, sum[0] / n,
+        info("[debug] BB_DEBUG_DUMP: %s (%ux%u), channel means R %.3f G %.3f B %.3f A %.3f%s", name.c_str(), width, height, sum[0] / n,
              sum[1] / n, sum[2] / n, sum[3] / n, swapRB ? " (image order: the guest's texture view swaps R and B)" : "");
     }
 }

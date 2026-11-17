@@ -49,6 +49,9 @@ add_custom_target(build_version ALL
 add_dependencies(backbreaker build_version)
 target_include_directories(backbreaker PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_compile_options(backbreaker PRIVATE ${COMMON_FLAGS} -Wall -Wno-unused-function)
+# The CPU check runs before anything built for x86-64-v3 can, so it is built for baseline x86-64
+# (the later -march wins) and reports a missing instruction set instead of crashing (#134)
+set_source_files_properties(${CMAKE_SOURCE_DIR}/runtime/cpu_check.cpp PROPERTIES COMPILE_OPTIONS "-march=x86-64")
 find_package(Vulkan REQUIRED)
 find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
 target_link_libraries(backbreaker PRIVATE backbreaker_ppc Vulkan::Vulkan SDL3::SDL3 shaderc_shared)

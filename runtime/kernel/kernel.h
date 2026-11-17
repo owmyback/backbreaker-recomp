@@ -17,6 +17,8 @@ namespace kernel
     // Map guest devices (game:, d:, cache:) to host directories. Saves (XAM content packages)
     // live under savesRoot.
     void initFileSystem(const std::string& discRoot, const std::string& cacheRoot, const std::string& savesRoot);
+    // The mods folder (#134): a file in dir replaces the disc's file at the same path. After initFileSystem.
+    void setDiscOverlay(const std::string& dir);
     // Achievements (xam_achievements.cpp): reads the title's list from the loaded image and the
     // unlocks earned so far from dir (game/achievements). After the image and XEX header load.
     void initAchievements(const std::string& dir);

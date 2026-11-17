@@ -38,6 +38,36 @@ back to one checkout. The stamp is redone on every build, so it follows `HEAD`, 
 edit straight away; a source tarball, or a machine without git, says `unknown` rather than failing
 the build.
 
+## Where files live
+`runtime/paths.cpp` (#134). Two layouts:
+- **Checkout** (the default, as before): everything relative to the working directory, so run from
+  the repo root. The game's files and the player's settings, saves (`game/saves`), the game's cache
+  partition (`game/cache`), achievements and a custom unlock sound (`game/sounds/achievement.wav`) are
+  in `game/`; screenshots and captures go to `screenshots/` and `captures/` beside it.
+- **Installed**: inside an AppImage (its runtime sets `APPIMAGE` and `APPDIR`; the game's files are
+  the AppImage's `game/`), or when a launcher passes `--data-dir <dir>` (a directory with `disc/` and
+  `extracted/`). The game's files may then be read-only. The player's go to the per-user folders:
+  `~/.config/backbreaker-recomp/settings.ini` and `~/.local/share/backbreaker-recomp/` (`saves/`,
+  `cache/`, `achievements/`, `sounds/`, `mods/`, `screenshots/`, `captures/`), following
+  `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME`. The log's `[paths]` line names all three.
+
+`--user-dir <dir>` puts all of the player's files in one directory instead, in either layout. The
+shader cache is in `~/.cache/backbreaker-recomp` in both.
+
+**Mods folder:** `mods/` in the player's directory (`game/mods` in the checkout layout) overlays the
+disc. A file there replaces the disc's file at the same path, matched without regard to case like
+the disc itself, from the next launch, with no rebuild: `mods/media/Movies/Xbox360/505.wmv` replaces
+the 505 logo, for example. Only files are replaced; directory listings stay the disc's, so a mod
+can't add files the game finds by listing a directory. The log names each file a mod replaces
+(`[mods] ... replaces ...`). Most of the game's content is inside
+`packedfilesx360/PackedOutputX360.pkd`; the whole archive can be replaced this way, but editing what
+is inside it needs a tool that doesn't exist yet.
+
+**CPU check:** the build targets x86-64-v3 (AVX2, FMA, BMI1/2, F16C, MOVBE). `runtime/cpu_check.cpp`,
+built for baseline x86-64, runs before anything else and on a CPU without them prints what is
+missing, also in a message box, and exits with code 1, instead of the first such instruction ending
+the process with SIGILL.
+
 ## Renderer
 `runtime/gpu/renderer.cpp` executes the game's draws with Vulkan (one device shared with the
 window, `runtime/video/vk_context.cpp`): shaders are translated (see below) and compiled with

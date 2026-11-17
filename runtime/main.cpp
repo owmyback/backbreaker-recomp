@@ -19,9 +19,11 @@
 #include "frame_rate.h"
 #include "scene_size.h"
 #include "intro_movies.h"
+#include "paths.h"
 #include "settings.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <atomic>
 #include <csignal>
 #include <cstring>
@@ -246,8 +248,9 @@ namespace
 int main(int argc, char** argv)
 {
     blockEndSignals(); // first: every thread started from here on inherits the mask
-    std::string image = "game/extracted/default.pe";
-    std::string xex = "game/extracted/default.xex";
+    std::string image; // the positional argument; default <data>/extracted/default.pe once paths are known
+    paths::Options pathOptions; // --data-dir, --user-dir (#134)
+    bool dumpShaders = false;
     int timeout = 0;
     bool headless = false, fullscreen = false, mute = false, audio = false, listAchievements = false;
     int scaleArg = -1; // --resolution-scale; without it, windowed runs use game/settings.ini's (#115)
@@ -269,6 +272,10 @@ int main(int argc, char** argv)
         }
         else if (a == "--timeout" && i + 1 < argc)
             timeout = std::atoi(argv[++i]);
+        else if (a == "--data-dir" && i + 1 < argc)
+            pathOptions.dataDir = argv[++i]; // the game's files (disc/, extracted/); player files go to the per-user folders
+        else if (a == "--user-dir" && i + 1 < argc)
+            pathOptions.userDir = argv[++i]; // all of the player's files (settings, saves, screenshots, ...) in one directory
         else if (a == "--fixed-seed")
             kernel::setFixedSeed(true); // the same random numbers in every test run (issue #71)
         else if (a == "--headless")
@@ -332,7 +339,7 @@ int main(int argc, char** argv)
                 if (parseSeconds(s, "--screenshot-at", t)) gpu::render::requestScreenshotAt(t, s);
             });
         else if (a == "--dump-shaders")
-            gpu::capture::dumpAllShaders("captures/shaders");
+            dumpShaders = true; // into <captures>/shaders, once paths are known
         else if (a == "--press" && i + 1 < argc)
         {
             if (!hid::setScript(argv[++i]))
@@ -354,40 +361,49 @@ int main(int argc, char** argv)
 
     installHandlers();
     info("built from %s", build_id::line()); // first line of every log says what made it (#75)
+    paths::init(pathOptions);
+    if (image.empty())
+        image = paths::data() + "/extracted/default.pe";
+    const std::string xex = paths::data() + "/extracted/default.xex";
+    if (dumpShaders)
+        gpu::capture::dumpAllShaders(paths::captures() + "/shaders");
 
     // Render scale of the 3D scenes and the frame rate. A flag wins for this run and leaves the file
     // alone. Headless runs (test routes, scripted screenshots) don't read the file, so what they
     // produce doesn't depend on the player's settings: scale 1 and the console's 30 fps.
-    const settings::Settings file = headless ? settings::Settings{} : settings::load();
+    const settings::Settings file = headless ? settings::Settings{} : settings::load(paths::settingsFile());
+    const char* settingsName = paths::settingsFile().c_str();
     uint32_t scale = scaleArg >= 0 ? uint32_t(std::clamp(scaleArg, 1, 4))
                    : headless      ? 1u
                                    : file.resolutionScale;
     gpu::render::setResolutionScale(scale);
     if (scale != 1)
-        info("[gpu] resolution scale %u (%s)", scale, scaleArg >= 0 ? "--resolution-scale" : settings::kPath);
+        info("[gpu] resolution scale %u (%s)", scale, scaleArg >= 0 ? "--resolution-scale" : settingsName);
     const uint32_t fps = fpsArg >= 0 ? uint32_t(fpsArg) : headless ? 30u : file.fps;
     frame_rate::set(fps);
-    info("%u fps (%s)", fps, fpsArg >= 0 ? "--fps" : headless ? "headless" : settings::kPath);
+    info("%u fps (%s)", fps, fpsArg >= 0 ? "--fps" : headless ? "headless" : settingsName);
     const uint32_t aniso = anisoArg >= 0 ? uint32_t(std::clamp(anisoArg, 1, 16)) : headless ? 1u : file.anisotropy;
     gpu::render::setAnisotropy(aniso);
     if (aniso > 1)
-        info("[gpu] anisotropic filtering %ux (%s)", aniso, anisoArg >= 0 ? "--anisotropy" : settings::kPath);
+        info("[gpu] anisotropic filtering %ux (%s)", aniso, anisoArg >= 0 ? "--anisotropy" : settingsName);
     const bool native720p = native720pArg >= 0 ? native720pArg == 1 : !headless && file.native720p;
     scene_size::setNative720p(native720p);
     const bool skipIntro = skipIntroArg >= 0 ? skipIntroArg == 1 : headless || file.skipIntro;
     intro_movies::setSkip(skipIntro);
     info("[movie] boot logos %s (%s)", skipIntro ? "skipped" : "shown",
-         skipIntroArg >= 0 ? "--skip-intro" : headless ? "headless" : settings::kPath);
+         skipIntroArg >= 0 ? "--skip-intro" : headless ? "headless" : settingsName);
     info("[gpu] matches render at %s (%s)", native720p ? "1280x720" : "the game's 1152x640, stretched to 1280x720",
-         native720pArg >= 0 ? "--native-720p" : headless ? "headless" : settings::kPath);
+         native720pArg >= 0 ? "--native-720p" : headless ? "headless" : settingsName);
     mem::init();
     loadImage(image);
     buildFunctionTable();
     kernel::loadXexHeader(xex);
     kernel::patchImports();
     kernel::startTimeStampThread(); // keeps KeTimeStampBundle current while the game runs
-    kernel::initFileSystem("game/disc", "game/cache", "game/saves");
-    kernel::initAchievements("game/achievements");
+    kernel::initFileSystem(paths::data() + "/disc", paths::user() + "/cache", paths::user() + "/saves");
+    if (std::filesystem::is_directory(paths::mods()))
+        kernel::setDiscOverlay(paths::mods());
+    kernel::initAchievements(paths::user() + "/achievements");
     if (listAchievements)
     {
         kernel::printAchievements();

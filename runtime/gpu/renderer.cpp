@@ -29,6 +29,7 @@
 #include "../memory.h"
 #include "../video/presenter.h"
 #include "../video/vk_context.h"
+#include "../paths.h"
 
 #include <shaderc/shaderc.h>
 
@@ -4263,7 +4264,7 @@ void main()
             vkUnmapMemory(D, memory);
             if (format == VK_FORMAT_B8G8R8A8_UNORM)
                 for (size_t i = 0; i < rgba.size(); i += 4) std::swap(rgba[i], rgba[i + 2]);
-            std::filesystem::create_directories("screenshots");
+            std::filesystem::create_directories(paths::screenshots());
             if (debug::writePng(path, rgba.data(), w, h)) info("[render] screenshot %s (%ux%u%s)", path.c_str(), w, h, note.c_str());
             else warn("[render] could not write %s", path.c_str());
             vkDestroyBuffer(D, buffer, nullptr);
@@ -4560,14 +4561,14 @@ void main()
         VkDeviceMemory shotMemory = VK_NULL_HANDLE;
         std::string shotPath, shotNote;
         if (g_screenshots.erase(frameNumber))
-            shotPath = "screenshots/frame_" + std::to_string(frameNumber) + ".png";
+            shotPath = paths::screenshots() + "/frame_" + std::to_string(frameNumber) + ".png";
         else if (!g_timedScreenshots.empty())
         {
             // One timed screenshot per swap: if two times fall within one frame, the next swap takes the second
             double t = hid::secondsSinceLaunch();
             if (t >= g_timedScreenshots.begin()->first)
             {
-                shotPath = "screenshots/t_" + g_timedScreenshots.begin()->second + ".png";
+                shotPath = paths::screenshots() + "/t_" + g_timedScreenshots.begin()->second + ".png";
                 char note[64];
                 snprintf(note, sizeof note, ", frame %llu at %.2f s", (unsigned long long)frameNumber, t);
                 shotNote = note;

@@ -16,6 +16,7 @@
 #include "../kernel/import_support.h"
 #include "../kernel/objects.h"
 #include "../log.h"
+#include "../paths.h"
 
 #include <SDL3/SDL.h>
 
@@ -346,7 +347,7 @@ namespace apu
 
     void initAudio()
     {
-        if (!loadUserUnlockSound("game/sounds/achievement.wav"))
+        if (!loadUserUnlockSound((paths::user() + "/sounds/achievement.wav").c_str()))
             g_chime = sound::unlockChime(kRate);
         // Debug aid: BB_DEBUG_CHIME=<seconds> plays the unlock sound at that time (checks the mix
         // in an --audio-dump without earning an achievement)
