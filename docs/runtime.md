@@ -530,13 +530,23 @@ Measured over the Exhibition route at 60: 60 PhysX steps a second of 1/60 s each
 1/60 s) gets two steps, so a dip below 60 fps keeps the game's speed. Below 30 fps the clamp
 slows the game, as on the console.
 
-Not covered yet: code with its own idea of 30 Hz. The constant 1/30 (0x8200E744) is used in
+Code that counts ticks rather than time runs twice as fast at 60. Tackle Alley's between-attempts
+sequence raced a time-based fade that way and never finished (#139, fixed: "Fixes to the game's own
+code"). Not covered yet: other code with its own idea of 30 Hz. The constant 1/30 (0x8200E744) is used in
 about 50 functions, mostly as a clamp on a frame's time. One forces 1/30 into an update in
 sub_82277110 while the byte 0x82C75097 is set. The code only ever clears that byte and nothing
 points at it, so it looks unused, and it was 0 throughout the route and a play-test. Above 60
 fps would need a faster guest vblank (`runtime/gpu/`, 60 Hz) and a matching tick.
 
 ## Fixes to the game's own code
+- Tackle Alley at 60 fps (`runtime/tackle_alley.cpp`, #139): after a tackle the next attempt never
+  started (the player stood still, the clock frozen). The between-attempts stage (43) starts a
+  0.25 s fade to black, and Tackle Alley sets up the next attempt when that fade has finished,
+  while still in stage 43. Meanwhile the play-flow state machine (sub_8215B710) steps one state a
+  tick and requests the next stage after about 14 ticks: 0.47 s at 30 fps, but 0.23 s at 60, before
+  the fade is done. Its fade back in then cuts the fade to black off, and the attempt is never set
+  up. The play flow now waits in that state (64) while the fade to black runs in stage 43, which
+  restores the order the console's timing gave; at 30 fps it never has to.
 - A play's player slots (`runtime/play_lock.cpp`): a play builds its list of 11 player slots on
   first use under the play lock (`sub_82323D28`), and the render thread does that when it looks a
   play up to draw the route display. The drill set-up in `sub_8236E8D0` has the same build inlined
