@@ -128,6 +128,25 @@ int main()
         check(pick(ds, { true }, 2).size() == 2, "at most maxLines");
     }
     {
+        // Stack samples: the fence spin counted apart, then stacks and functions by how often
+        std::vector<std::vector<std::string>> samples = {
+            { "[backtrace]", "sub_8240F1B8", "sub_8240F288", "sub_82277110" }, // waiting on the GPU
+            { "sub_82AAAAAA", "sub_82BBBBBB", "sub_82277110" },
+            { "sub_82AAAAAA", "sub_82BBBBBB", "sub_82277110" },
+            { "[NtAllocateVirtualMemory]", "sub_82CCCCCC", "sub_82BBBBBB", "sub_82277110" },
+            { "sub_82AAAAAA", "sub_82AAAAAA", "sub_82BBBBBB", "sub_82277110" }, // recursion: one frame
+        };
+        StackSummary sum = summarizeStacks(samples, "sub_8240F1B8");
+        check(sum.samples == 5 && sum.fence == 1, "the fence spin is counted apart");
+        check(!sum.stacks.empty() && sum.stacks[0].first == 3 && sum.stacks[0].second == "sub_82AAAAAA < sub_82BBBBBB < sub_82277110",
+              "the commonest stack, innermost first");
+        check(sum.stacks.size() == 2 && sum.stacks[1].second == "[NtAllocateVirtualMemory] < sub_82CCCCCC < sub_82BBBBBB < sub_82277110",
+              "a stack that stopped in an import names it");
+        check(sum.functions.size() >= 2 && sum.functions[0].first == 4 && sum.functions[1].first == 4 &&
+                  (sum.functions[0].second == "sub_82277110" || sum.functions[0].second == "sub_82BBBBBB"),
+              "functions on the stack in the most samples, once per sample");
+    }
+    {
         // Live: a spinning thread and a sleeping one, 200 ms, through their own schedstat files
         std::atomic<bool> stop{false};
         std::atomic<pid_t> busyTid{0}, idleTid{0};

@@ -923,6 +923,21 @@ What it prints:
     times. Each line gives CPU time, time waiting for a core, the time inside each kind of call,
     and the time outside them.
 - **`[perf]   threads:`** each second: the same for the second, in short.
+- **What the game's main thread ran.** Each `[hitch]` report also gives:
+  - guest 1's stacks: the share of samples in the GPU fence spin, then its commonest stacks, innermost
+    first. Each stack starts with the import or runtime function it stopped in, if any, such as
+    `[MmAllocatePhysicalMemoryEx]` or `[__mprotect]`, followed by up to four recompiled
+    functions (`sub_...`);
+  - guest 1's functions: the recompiled functions on its stack in the most samples outside the
+    fence spin, whole calls included. The main loop's outer frames are in all of them.
+- **How the sampling works:** a timer on guest 1's own CPU-time clock signals it every 2 ms of CPU
+  it uses, so a waiting thread isn't interrupted. The handler records the host return addresses in
+  a ring of the last ~20 s, and a report symbolizes the samples of its window (`dladdr`, as
+  `--sample-threads` does).
+  - **Switches:** `BB_THREAD_STACKS=0` turns the sampling off, and `BB_HITCH_MS=<ms>` (at least 20)
+    reports shorter frames than 80 ms, for a faster machine where the same work takes less time.
+- **Why the main thread:** on the Deck the hitches in play are bursts of the game's main thread
+  working through the whole frame, roughly once a play, while the other threads wait for it.
 
 What it showed on the PC (Exhibition route, 30 fps, match seconds):
 - The game's main thread spends about 950 ms a second in the GPU fence spin, and the command

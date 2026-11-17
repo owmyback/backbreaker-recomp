@@ -712,8 +712,15 @@ With the cache, the Deck holds 29.7 fps and 97% speed in a match, and the comman
   of the time, and the command processor polling for the game as much. At 30 fps both wait for the
   vblank on a full core each.
 
-Next: a Deck run with the thread timing. It shows whether the hitches come from too few free cores
-(the spinners), from one thread's own work, or from waiting (files, the audio, another thread).
+The Deck run with it (2026-11-17) answered that the hitches in play aren't a lack of free cores.
+- **One thread's work:** the game's main thread runs the game's own code for 85–100 ms of the frame,
+  roughly once a play, while the other threads wait for it.
+- **The spinners don't explain them:** in play they leave the other threads only 30–60 ms a second
+  waiting for a core.
+- **Stack sampling:** the main thread's stacks are now sampled into the hitch reports.
+
+Next: a Deck run with the sampling, to name the code. It's either the game's own logic or one of the
+runtime's imports it calls, such as memory allocation.
 
 Correctness: the analyzer fixes (#52); crashes fixed: a reused TLS slot that handed back freed data
 on the second match load (#127), and the Training Camp passing drills, a race between the game's

@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -180,6 +182,64 @@ namespace debug::threadtimes
         auto score = [](const ThreadDelta* d) { return d->cpuNs + d->queueNs + d->bucketNs[kFile]; };
         std::stable_sort(out.begin(), out.end(), [&](const ThreadDelta* x, const ThreadDelta* y) { return score(x) > score(y); });
         if (out.size() > maxLines) out.resize(maxLines);
+        return out;
+    }
+
+    // Stack samples of one thread over a window, each symbolized innermost first: "sub_XXXXXXXX" for
+    // recompiled guest code, "[name]" for a host function (an import or the runtime). Summarized as:
+    //  - how many samples were in the GPU fence spin (any frame equal to `fence`): the thread waiting;
+    //  - the commonest stacks among the others: the innermost host function if the sample stopped in
+    //    one, then up to `guestFrames` guest frames;
+    //  - the guest functions on the stack in the most of those samples (where the time went, whole
+    //    calls included).
+    struct StackSummary
+    {
+        size_t samples = 0, fence = 0;
+        std::vector<std::pair<size_t, std::string>> stacks, functions; // (samples, name), most first
+    };
+
+    inline StackSummary summarizeStacks(const std::vector<std::vector<std::string>>& samples, const std::string& fence,
+                                        size_t topStacks = 4, size_t topFunctions = 8, size_t guestFrames = 4)
+    {
+        StackSummary out;
+        out.samples = samples.size();
+        std::map<std::string, size_t> stacks, functions;
+        for (const std::vector<std::string>& frames : samples)
+        {
+            if (std::find(frames.begin(), frames.end(), fence) != frames.end())
+            {
+                out.fence++;
+                continue;
+            }
+            std::string key;
+            size_t guest = 0;
+            std::set<std::string> seen;
+            for (const std::string& f : frames)
+            {
+                const bool isGuest = f.rfind("sub_", 0) == 0;
+                if (isGuest)
+                {
+                    if (seen.insert(f).second) functions[f]++;
+                    if (guest < guestFrames && key.find(f) == std::string::npos)
+                    {
+                        key += (key.empty() ? "" : " < ") + f;
+                        guest++;
+                    }
+                }
+                else if (key.empty() && !f.empty())
+                    key = f; // the innermost host function, before any guest frame
+            }
+            stacks[key.empty() ? "(no guest frames)" : key]++;
+        }
+        auto top = [](const std::map<std::string, size_t>& m, size_t n) {
+            std::vector<std::pair<size_t, std::string>> v;
+            for (const auto& [name, count] : m) v.push_back({ count, name });
+            std::stable_sort(v.begin(), v.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+            if (v.size() > n) v.resize(n);
+            return v;
+        };
+        out.stacks = top(stacks, topStacks);
+        out.functions = top(functions, topFunctions);
         return out;
     }
 }

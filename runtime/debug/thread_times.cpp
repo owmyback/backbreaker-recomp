@@ -4,17 +4,23 @@
 #include <ppc_config.h>
 #include <ppc_context.h>
 
+#include <cxxabi.h>
 #include <dirent.h>
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -29,7 +35,8 @@ namespace debug::threadtimes
         const uint64_t g_startNs = nowNs(); // reports give times since the process started
         constexpr auto kSamplePeriod = std::chrono::milliseconds(20);
         constexpr double kRingSeconds = 3.0;
-        constexpr double kHitchSeconds = 0.08;
+        // A frame this long gets a report: 80 ms, or BB_HITCH_MS (at least 20) to look at shorter ones
+        const double kHitchSeconds = getenv("BB_HITCH_MS") ? std::max(20.0, atof(getenv("BB_HITCH_MS"))) / 1000 : 0.08;
         constexpr size_t kMaxLines = 8, kSecondLines = 6;
 
         // One host thread's counters. Never freed: the sampler may still read a thread's last values
@@ -59,6 +66,118 @@ namespace debug::threadtimes
         double seconds(uint64_t ns) { return double(ns) / 1e9; }
 
         void samplerLoop();
+
+        // ---- the game's main thread's stacks ----
+        //
+        // A CPU-time timer on guest thread 1 signals it every 2 ms of its own CPU time (so a thread
+        // that waits isn't interrupted), and the handler keeps the host return addresses in a ring.
+        // A hitch report symbolizes the samples of its window: which recompiled functions (sub_...) or
+        // imports the main thread was in. The other threads' reports say what they waited for.
+        constexpr int kStackFrames = 28;
+        constexpr size_t kStackRing = 8192; // about 20 s of the main thread at 350 samples a second
+        constexpr long kStackPeriodNs = 2000000;
+        struct StackSample
+        {
+            std::atomic<uint64_t> seq{0}; // the sample's number + 1 once complete, 0 while written
+            uint64_t t = 0;
+            int n = 0;
+            void* pc[kStackFrames];
+        };
+        StackSample* g_stacks = nullptr;
+        std::atomic<uint64_t> g_stackCount{0};
+
+        void onStackSample(int, siginfo_t*, void*)
+        {
+            const int saved = errno;
+            const uint64_t i = g_stackCount.load(std::memory_order_relaxed);
+            StackSample& s = g_stacks[i % kStackRing];
+            s.seq.store(0, std::memory_order_relaxed);
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+            s.t = nowNs();
+            s.n = backtrace(s.pc, kStackFrames);
+            s.seq.store(i + 1, std::memory_order_release);
+            g_stackCount.store(i + 1, std::memory_order_release);
+            errno = saved;
+        }
+
+        // On the thread to sample (the game's main thread), once
+        void startStackSampling()
+        {
+            g_stacks = new StackSample[kStackRing];
+            void* warm[4];
+            backtrace(warm, 4); // the unwinder's first use may allocate: not inside a signal handler
+            const int sig = SIGRTMIN + 5; // the hang sampler (debug/sampler.cpp) uses SIGRTMIN + 4
+            struct sigaction sa{};
+            sa.sa_sigaction = onStackSample;
+            sa.sa_flags = SA_SIGINFO | SA_RESTART;
+            sigemptyset(&sa.sa_mask);
+            clockid_t cpuClock;
+            sigevent sev{};
+            sev.sigev_notify = SIGEV_THREAD_ID;
+            sev.sigev_signo = sig;
+            sev._sigev_un._tid = tidNow();
+            timer_t timer;
+            itimerspec period{};
+            period.it_interval.tv_nsec = period.it_value.tv_nsec = kStackPeriodNs;
+            if (sigaction(sig, &sa, nullptr) != 0 || pthread_getcpuclockid(pthread_self(), &cpuClock) != 0 ||
+                timer_create(cpuClock, &sev, &timer) != 0 || timer_settime(timer, 0, &period, nullptr) != 0)
+            {
+                warn("[threads] can't sample the main thread's stacks (%s): the hitch reports won't name its functions", strerror(errno));
+                return;
+            }
+            info("[threads] sampling the game's main thread every %ld ms of its CPU time for the hitch reports", kStackPeriodNs / 1000000);
+        }
+
+        // "sub_XXXXXXXX" for recompiled code, "[Name]" for an import or a runtime function, "" if unknown.
+        // On the sampler thread only (cached: the same addresses come back).
+        const std::string& frameName(void* pc)
+        {
+            static std::unordered_map<void*, std::string> cache;
+            auto it = cache.find(pc);
+            if (it != cache.end()) return it->second;
+            std::string name;
+            Dl_info di{};
+            if (dladdr(pc, &di) && di.dli_sname)
+            {
+                // Imports are C++ functions named __imp__<Name>(PPCContext&, unsigned char*): demangle
+                // first, then keep the name up to its arguments
+                int status = 0;
+                char* d = abi::__cxa_demangle(di.dli_sname, nullptr, nullptr, &status);
+                std::string full = status == 0 && d ? d : di.dli_sname;
+                free(d);
+                full = full.substr(0, full.find('('));
+                if (size_t sub = full.find("sub_"); sub != std::string::npos && full.size() >= sub + 12) name = full.substr(sub, 12);
+                else if (size_t imp = full.find("__imp__"); imp != std::string::npos) name = "[" + full.substr(imp + 7, 40) + "]";
+                else name = "[" + full.substr(0, 48) + "]";
+            }
+            return cache.emplace(pc, std::move(name)).first->second;
+        }
+
+        // The main thread's samples from t0 to t1 (steady clock ns), symbolized innermost first
+        std::vector<std::vector<std::string>> stackSamples(uint64_t t0, uint64_t t1)
+        {
+            std::vector<std::vector<std::string>> out;
+            if (!g_stacks) return out;
+            const uint64_t end = g_stackCount.load(std::memory_order_acquire);
+            for (uint64_t i = end > kStackRing ? end - kStackRing : 0; i < end; i++)
+            {
+                StackSample& s = g_stacks[i % kStackRing];
+                if (s.seq.load(std::memory_order_acquire) != i + 1) continue;
+                const uint64_t t = s.t;
+                const int n = std::min(s.n, kStackFrames);
+                void* pc[kStackFrames];
+                std::copy(s.pc, s.pc + n, pc);
+                if (s.seq.load(std::memory_order_acquire) != i + 1 || t < t0 || t > t1) continue; // overwritten meanwhile, or outside
+                std::vector<std::string> frames;
+                for (int f = 2; f < n; f++) // past the handler and the signal trampoline
+                {
+                    const std::string& name = frameName(pc[f]);
+                    if (!name.empty()) frames.push_back(name);
+                }
+                out.push_back(std::move(frames));
+            }
+            return out;
+        }
 
         Counters* counters()
         {
@@ -172,6 +291,28 @@ namespace debug::threadtimes
                     info("[hitch]   %s: %s", labels[d->slot].c_str(), describe(*d).c_str());
                 if (otherCpu >= 5000000 || otherQueue >= 5000000)
                     info("[hitch]   other threads (%u): cpu %.0f ms, waiting for a core %.0f ms", B.otherCount, ms(otherCpu), ms(otherQueue));
+                // What the main thread was running
+                StackSummary sum = summarizeStacks(stackSamples(uint64_t(A.t * 1e9), uint64_t(B.t * 1e9)), "sub_8240F1B8", 4, 12);
+                if (sum.samples)
+                {
+                    const double pct = 100.0 / double(sum.samples), rest = sum.samples > sum.fence ? 100.0 / double(sum.samples - sum.fence) : 0;
+                    std::string line;
+                    char buf[160];
+                    for (const auto& [count, stack] : sum.stacks)
+                    {
+                        snprintf(buf, sizeof buf, " | %.0f%% ", count * pct);
+                        line += buf + stack;
+                    }
+                    info("[hitch]   guest 1's stacks (%zu samples, one per %ld ms of its CPU; innermost first): GPU fence spin %.0f%%%s", sum.samples,
+                         kStackPeriodNs / 1000000, sum.fence * pct, line.c_str());
+                    line.clear();
+                    for (const auto& [count, fn] : sum.functions)
+                    {
+                        snprintf(buf, sizeof buf, "%s%s %.0f%%", line.empty() ? "" : ", ", fn.c_str(), count * rest);
+                        line += buf;
+                    }
+                    if (!line.empty()) info("[hitch]   guest 1's functions, by share of its samples outside the fence spin: %s", line.c_str());
+                }
                 return;
             }
             // The second's line: the busiest threads, briefly
@@ -340,8 +481,11 @@ namespace debug::threadtimes
         Counters* c = counters();
         if (c->role) return; // a role's thread binding a guest thread for its callbacks keeps its role
         setName(name);
-        std::lock_guard g(g_lock);
-        c->guestId = guestId;
+        {
+            std::lock_guard g(g_lock);
+            c->guestId = guestId;
+        }
+        if (guestId == 1 && !g_stacks && !(getenv("BB_THREAD_STACKS") && getenv("BB_THREAD_STACKS")[0] == '0')) startStackSampling();
     }
 
     void registerRole(const char* label, const char* threadName)
