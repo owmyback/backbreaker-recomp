@@ -3,6 +3,7 @@
 #include "kernel.h"
 #include "ntstatus.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 
 #include <chrono>
 #include <cstring>
@@ -95,6 +96,7 @@ GUEST_IMPORT(KeQuerySystemTime) { if (ctx.r3.u32) write64(ctx.r3.u32, kernel::sy
 // NTSTATUS KeDelayExecutionThread(u32 WaitMode, BOOL Alertable, i64* Interval)  (negative = relative, 100 ns)
 GUEST_IMPORT(KeDelayExecutionThread)
 {
+    debug::threadtimes::Timer timer(debug::threadtimes::kSleep, uint32_t(ctx.lr));
     int64_t interval = int64_t(read64(ctx.r5.u32));
     if (interval < 0)
         std::this_thread::sleep_for(std::chrono::nanoseconds(-interval * 100));
@@ -109,6 +111,7 @@ namespace
     // it for coarse timing without an import call, so keep it current from a host thread.
     void timeStampLoop()
     {
+        debug::threadtimes::registerRole("time stamp", "bb-timestamp");
         using namespace std::chrono;
         using clock = std::chrono::steady_clock;
         const uint32_t bundle = kernel::timeStampBundleAddress();

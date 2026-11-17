@@ -3,6 +3,7 @@
 #include "import_support.h"
 #include "kernel.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 
 #include <atomic>
 #include <mutex>
@@ -100,8 +101,13 @@ GUEST_IMPORT(RtlEnterCriticalSection)
         write32(cs + kCsRecursion, read32(cs + kCsRecursion) + 1);
         return;
     }
-    while (!cas32(cs + kCsOwner, 0, me))
-        sched_yield();
+    if (!cas32(cs + kCsOwner, 0, me))
+    {
+        // Held by another thread: spin until it is free (timed with BB_PERF, #146)
+        debug::threadtimes::Timer timer(debug::threadtimes::kLockSpin, uint32_t(ctx.lr));
+        while (!cas32(cs + kCsOwner, 0, me))
+            sched_yield();
+    }
     write32(cs + kCsRecursion, 1);
     write32(cs + kCsLockCount, 0);
 }

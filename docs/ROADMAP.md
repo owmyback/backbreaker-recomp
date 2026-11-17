@@ -11,7 +11,7 @@ Work that can be picked up is tracked as GitHub issues and linked from each phas
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
 Last updated: 2026-11-17 (phase 9: the Deck is CPU-bound in matches, and a geometry cache cuts the command processor's work by
-a quarter on the PC, #146; phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
+a quarter on the PC, #146, and thread timing reports the long frames that remain; phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
 achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
 a game-fps readout and a log file, #148). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
@@ -702,8 +702,16 @@ Measured on the Deck (2026-11-17, #146): in a match the game makes 26 fps and ru
   PC it takes the thread's work in an Exhibition match from 6.5 to 4.7 ms a frame (`docs/runtime.md`,
   "Renderer").
 
-Next: a Deck run with the cache, then the next costs. The heavy items are recording passes,
-texture lookups and the work outside draws, and after those the GPU's EDRAM transfers.
+With the cache, the Deck holds 29.7 fps and 97% speed in a match, and the command processor does
+20.5 ms of work a frame. What's left are single long frames of 100–150 ms: 17 in a 7-minute match.
+- **Thread timing** (`BB_PERF=1`, `docs/runtime.md`, "Thread timing and hitch reports") reports
+  what every thread did in such a frame.
+- **On the PC it showed** the game's main thread spinning in D3D's wait for the GPU fence about 95%
+  of the time, and the command processor polling for the game as much. At 30 fps both wait for the
+  vblank on a full core each.
+
+Next: a Deck run with the thread timing. It shows whether the hitches come from too few free cores
+(the spinners), from one thread's own work, or from waiting (files, the audio, another thread).
 
 Correctness: the analyzer fixes (#52); crashes fixed: a reused TLS slot that handed back freed data
 on the second match load (#127), and the Training Camp passing drills, a race between the game's

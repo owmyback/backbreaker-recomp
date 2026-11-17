@@ -8,6 +8,7 @@
 #include "apu/apu.h"
 #include "gpu/capture.h"
 #include "debug/sampler.h"
+#include "debug/thread_times.h"
 #include "gpu/renderer.h"
 #include "video/vk_context.h"
 #include "hid/hid.h"
@@ -54,8 +55,17 @@ namespace
 
     void crashHandler(int sig, siginfo_t* si, void* uctx)
     {
-        // A write to a page the renderer watches for texture changes (mem::watch): not a crash
-        if (sig == SIGSEGV && mem::watch::onFault(si->si_addr)) return;
+        // A write to a page the renderer watches for texture changes (mem::watch): not a crash.
+        // Timed with BB_PERF (#146): a fault costs the faulting thread a syscall and a page fault.
+        if (sig == SIGSEGV)
+        {
+            const uint64_t t0 = debug::threadtimes::enabled() ? debug::threadtimes::nowNs() : 0;
+            if (mem::watch::onFault(si->si_addr))
+            {
+                if (t0) debug::threadtimes::addFault(debug::threadtimes::nowNs() - t0);
+                return;
+            }
+        }
         // Only the first crashing thread reports; others wait to be torn down with the process.
         static std::atomic<bool> crashing{false};
         if (crashing.exchange(true))

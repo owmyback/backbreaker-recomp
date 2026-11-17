@@ -93,6 +93,12 @@ jobs:
       - name: Run geometry cache test
         run: ./build/geometry_cache_test
 
+      - name: Build thread timing test (header-only, #146)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 -pthread tests/thread_times_test.cpp -o build/thread_times_test
+
+      - name: Run thread timing test
+        run: ./build/thread_times_test
+
       - name: Build log file test (runtime/log_file.cpp alone)
         run: clang++ -std=c++20 -Wall -Wextra -O2 -pthread tests/log_file_test.cpp runtime/log_file.cpp -o build/log_file_test
 

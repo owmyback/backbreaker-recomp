@@ -2,6 +2,7 @@
 #include "objects.h"
 #include "import_support.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 
 #include <atomic>
 #include <csignal>
@@ -153,6 +154,7 @@ namespace kernel
         {
             t->hostThread = (unsigned long)pthread_self();
             t->hostRunning = true;
+            debug::threadtimes::registerGuest(t->id); // its name for top -H, and its timing with BB_PERF (#146)
         }
     }
 
@@ -258,6 +260,9 @@ GUEST_IMPORT(RtlRaiseException)
         // ExceptionInformation: [0]=0x1000, [1]=name, [2]=thread id
         uint32_t name = read32(rec + 0x18), id = read32(rec + 0x1C);
         info("thread %d named \"%s\"", int32_t(id), name ? (const char*)host(name) : "?");
+        if (name)
+            debug::threadtimes::nameGuest(id == 0xFFFFFFFF && kernel::currentThread() ? kernel::currentThread()->id : id,
+                                          (const char*)host(name));
         return;
     }
     warn("RtlRaiseException(code %08X) ignored", code);

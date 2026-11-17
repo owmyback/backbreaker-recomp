@@ -836,6 +836,51 @@ is close to what each costs. `BB_GPU_TIME=2` splits EDRAM transfers by source an
 target, and `BB_GPU_TIME=3` also splits draws by pixel shader, blending and primitive type. Both
 add a `calls by kind` line with how many of each there were, with their tiles or indices.
 
+## Thread timing and hitch reports
+`BB_PERF=1` also times every thread (#146; `runtime/debug/thread_times.cpp`, logic in
+`thread_times_core.h`). `BB_THREAD_TIMES=0` turns that part off.
+- **Why:** on the Steam Deck the remaining slow moments are single long frames, and the renderer's
+  own lines couldn't say what the game's threads were doing during them.
+
+What it measures:
+- **From the kernel,** every 20 ms, for every thread: time on a CPU, and time runnable but waiting
+  for one (`/proc/self/task/<tid>/schedstat`). Waiting for a core is what too few cores look like.
+- **From the runtime:** each thread's wall-clock time inside the calls that block or spin, by kind:
+  - guest waits (the four wait imports), sleeps (`KeDelayExecutionThread`), file opens and reads;
+  - spinning on a held critical section (`RtlEnterCriticalSection` spins with `sched_yield`);
+  - write-watch faults (the handler's part only; the kernel's share of a fault isn't seen);
+  - the command processor polling `WAIT_REG_MEM`;
+  - **the GPU fence spin:** D3D's wait for the GPU, `sub_8240F1B8`. It reads the fence and spins
+    in `sub_82419CB0`, whose delay hints (`db16cyc`) are recompiled to nothing.
+  - For each kind, the longest call and its guest caller are kept.
+- **Thread names:** the threads carry them (`bb-gpu-cp`, `bb-vblank`, `bb-audio`, `bb-timestamp`,
+  `bb-g<N>` for guest thread N), so `top -H` tells them apart. The names are set without
+  `BB_PERF` too. Reports also use the game's own names ("Pool thread 0", "RenderThread",
+  "Morpheme Update 2", "File-System thread").
+
+What it prints:
+- **`[hitch]`:** a report for every frame of 80 ms or more, measured over the 20 ms snapshots
+  just around it:
+  - a header with how many cores were busy, and the total time threads waited for a core;
+  - a line for the game's main thread (guest 1), the command processor, and any thread that was
+    busy for a tenth of the frame, waited for a core, read files, spun on a lock or faulted 50
+    times. Each line gives CPU time, time waiting for a core, the time inside each kind of call,
+    and the time outside them.
+- **`[perf]   threads:`** each second: the same for the second, in short.
+
+What it showed on the PC (Exhibition route, 30 fps, match seconds):
+- The game's main thread spends about 950 ms a second in the GPU fence spin, and the command
+  processor about 930 ms polling for the game.
+- So at 30 fps two cores spin nearly all the time, each waiting for the other until the next
+  vblank. With 16 hardware threads that costs the others about 30 ms a second of waiting for a core.
+
+The Steam Deck has 8 hardware threads; its log is what tells whether this matters there.
+
+What it costs, on the PC's route (`BB_THREAD_TIMES=0` against on, back to back):
+- the sampler thread used about 1 ms of CPU a second;
+- frames rendered were 4,724 against 4,703, and the command processor's work 4.5 against 4.8 ms a
+  frame, both within run-to-run noise.
+
 ## Texture write watch
 Finding out whether a texture changed used to mean reading all of its bytes every frame it was
 used: 1.3 GB a second in a match, about a third of the renderer's time (issue #73). Now, before the

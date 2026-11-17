@@ -14,6 +14,7 @@
 #include "../gpu/capture.h"
 #include "../hid/hid.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 #include "../memory.h"
 #include "../settings.h"
 #include "../paths.h"
@@ -574,6 +575,7 @@ namespace video
 
     void run(bool startFullscreen)
     {
+        debug::threadtimes::registerRole("window", nullptr); // the process's main thread: its name stays
         SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // SIGINT/SIGTERM end the run (main.cpp)
         if (!SDL_Init(SDL_INIT_VIDEO))
             fatal("[video] SDL_Init: %s (use --headless to run without a window)", SDL_GetError());

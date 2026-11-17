@@ -3,6 +3,7 @@
 #include "objects.h"
 #include "import_support.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 
 #include <algorithm>
 #include <cstring>
@@ -337,12 +338,14 @@ namespace kernel
 //                       i64* AllocationSize, u32 FileAttributes, u32 ShareAccess, u32 CreateDisposition, ...)
 GUEST_IMPORT(NtCreateFile)
 {
+    debug::threadtimes::Timer timer(debug::threadtimes::kFile, uint32_t(ctx.lr));
     ctx.r3.u64 = openFile(ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r10.u32);
 }
 
 // NTSTATUS NtOpenFile(HANDLE* Handle, u32 DesiredAccess, OBJECT_ATTRIBUTES* Attr, IO_STATUS_BLOCK* Iosb, u32 ShareAccess, u32 OpenOptions)
 GUEST_IMPORT(NtOpenFile)
 {
+    debug::threadtimes::Timer timer(debug::threadtimes::kFile, uint32_t(ctx.lr));
     ctx.r3.u64 = openFile(ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, 1 /* FILE_OPEN */);
 }
 
@@ -354,6 +357,7 @@ GUEST_IMPORT(NtReadFile)
     File* f = fileFromHandle(ctx.r3.u32);
     if (!f || f->fd < 0) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
     uint64_t off = pOffset ? read64(pOffset) : f->position;
+    debug::threadtimes::Timer timer(debug::threadtimes::kFile, uint32_t(ctx.lr));
     ssize_t n = mem::readFile(f->fd, buf, len, off); // host buffer for watched physical pages
     if (n < 0) n = 0;
     f->position = off + n;
@@ -371,6 +375,7 @@ GUEST_IMPORT(NtReadFileScatter)
     File* f = fileFromHandle(ctx.r3.u32);
     if (!f || f->fd < 0) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
     uint64_t off = pOffset ? read64(pOffset) : f->position;
+    debug::threadtimes::Timer timer(debug::threadtimes::kFile, uint32_t(ctx.lr));
     uint32_t total = 0;
     for (uint32_t i = 0; total < len; i++)
     {

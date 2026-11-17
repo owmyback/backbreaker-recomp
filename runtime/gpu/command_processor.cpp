@@ -9,6 +9,7 @@
 #include "../kernel/objects.h"
 #include "../apu/apu.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 #include "../memory.h"
 
 #include <atomic>
@@ -198,6 +199,7 @@ namespace gpu
                 uint32_t info = r.next(), addr = r.next(), ref = r.next(), mask = r.next();
                 r.next(); // poll interval
                 r.skip(count - 5);
+                debug::threadtimes::Timer timer(debug::threadtimes::kCpPoll, 0);
                 auto start = std::chrono::steady_clock::now();
                 bool warned = false, first = true;
                 for (;;)
@@ -393,8 +395,14 @@ namespace gpu
                 g_frames++;
                 g_counter++;
                 {
-                    std::lock_guard g(g_frameStatsLock);
-                    g_frameStats.onSwap(hostSeconds());
+                    static double lastSwap = 0;
+                    const double now = hostSeconds();
+                    {
+                        std::lock_guard g(g_frameStatsLock);
+                        g_frameStats.onSwap(now);
+                    }
+                    debug::threadtimes::frameEnded(lastSwap, now); // a long frame gets a [hitch] report (BB_PERF)
+                    lastSwap = now;
                 }
                 capture::onSwap(g_frames, g_frontBuffer, g_frontWidth, g_frontHeight);
                 render::onSwap(g_frontBuffer, g_frontWidth, g_frontHeight, g_frames); // before publishFrame
@@ -543,6 +551,7 @@ namespace gpu
         void commandProcessorThread()
         {
             bindInterruptThread();
+            debug::threadtimes::registerRole("gpu command processor", "bb-gpu-cp");
             info("[gpu] command processor running (ring %08X, %u dwords)", g_ringBase, g_ringDwords);
             for (;;)
             {
@@ -571,6 +580,7 @@ namespace gpu
         void vblankThread()
         {
             bindInterruptThread();
+            debug::threadtimes::registerRole("vblank", "bb-vblank");
             using clock = std::chrono::steady_clock;
             auto next = clock::now();
             auto lastReport = next;

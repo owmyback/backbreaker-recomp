@@ -16,6 +16,7 @@
 #include "../kernel/import_support.h"
 #include "../kernel/objects.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 #include "../paths.h"
 
 #include <SDL3/SDL.h>
@@ -258,6 +259,7 @@ namespace
     {
         kernel::setCurrentThread(g_audioThread);
         kernel::adoptExistingThread(g_audioThreadObj);
+        debug::threadtimes::registerRole("audio", "bb-audio");
         using clock = std::chrono::steady_clock;
         const auto period = std::chrono::nanoseconds(1000000000ll * apu::frame::kSamples / kRate);
         auto next = clock::now();

@@ -2,6 +2,7 @@
 #include "objects.h"
 #include "import_support.h"
 #include "../log.h"
+#include "../debug/thread_times.h"
 
 #include <algorithm>
 #include <thread>
@@ -344,6 +345,7 @@ GUEST_IMPORT(NtWaitForSingleObjectEx)
 {
     auto* o = resolve(ctx.r3.u32, "NtWaitForSingleObjectEx");
     if (!o) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
+    debug::threadtimes::Timer timer(debug::threadtimes::kGuestWait, uint32_t(ctx.lr));
     ctx.r3.u64 = waitForObjects({ o }, false, deadlineFromGuest(ctx.r6.u32));
 }
 
@@ -357,12 +359,14 @@ GUEST_IMPORT(NtWaitForMultipleObjectsEx)
         if (!o) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
         objs.push_back(o);
     }
+    debug::threadtimes::Timer timer(debug::threadtimes::kGuestWait, uint32_t(ctx.lr));
     ctx.r3.u64 = waitForObjects(objs, ctx.r5.u32 == 0, deadlineFromGuest(ctx.r8.u32));
 }
 
 // NTSTATUS KeWaitForSingleObject(void* Object, u32 Reason, u32 Mode, BOOL Alertable, i64* Timeout)
 GUEST_IMPORT(KeWaitForSingleObject)
 {
+    debug::threadtimes::Timer timer(debug::threadtimes::kGuestWait, uint32_t(ctx.lr));
     ctx.r3.u64 = waitForObjects({ objectFromGuest(ctx.r3.u32) }, false, deadlineFromGuest(ctx.r7.u32));
 }
 
@@ -372,6 +376,7 @@ GUEST_IMPORT(KeWaitForMultipleObjects)
     std::vector<Object*> objs;
     for (uint32_t i = 0; i < ctx.r3.u32; i++)
         objs.push_back(objectFromGuest(read32(ctx.r4.u32 + i * 4)));
+    debug::threadtimes::Timer timer(debug::threadtimes::kGuestWait, uint32_t(ctx.lr));
     ctx.r3.u64 = waitForObjects(objs, ctx.r5.u32 == 0, deadlineFromGuest(ctx.r9.u32));
 }
 
