@@ -2,6 +2,7 @@
 #include "log.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -149,16 +150,19 @@ namespace mem
             std::atomic<uint8_t>* g_protected = new std::atomic<uint8_t>[kPages]();
 
             // The page's three host addresses: 0xA0000000 and 0xC0000000 views map physical 0 at
-            // their start, the 0xE0000000 view starts at physical 0x1000
-            void setProtection(uint32_t firstPage, uint32_t count, int prot)
+            // their start, the 0xE0000000 view starts at physical 0x1000. False if any mprotect failed
+            // (ENOMEM: each protected run splits a mapping, and vm.max_map_count can run out).
+            bool setProtection(uint32_t firstPage, uint32_t count, int prot)
             {
                 size_t bytes = size_t(count) << 12;
                 uint32_t phys = firstPage << 12;
-                mprotect(base + 0xA0000000u + phys, bytes, prot);
-                mprotect(base + 0xC0000000u + phys, bytes, prot);
-                if (phys >= 0x1000) mprotect(base + 0xE0000000u + phys - 0x1000, bytes, prot);
-                else if (count > 1) mprotect(base + 0xE0000000u, bytes - 0x1000, prot);
+                bool ok = mprotect(base + 0xA0000000u + phys, bytes, prot) == 0;
+                ok &= mprotect(base + 0xC0000000u + phys, bytes, prot) == 0;
+                if (phys >= 0x1000) ok &= mprotect(base + 0xE0000000u + phys - 0x1000, bytes, prot) == 0;
+                else if (count > 1) ok &= mprotect(base + 0xE0000000u, bytes - 0x1000, prot) == 0;
+                return ok;
             }
+            std::atomic<bool> g_protectFailed{false}; // since then, nothing new is protected
 
             // Order matters against protect() on the renderer thread: stamp, make writable, and only
             // then clear the flag. protect() re-protects only pages whose flag is clear, so its
@@ -175,6 +179,7 @@ namespace mem
         uint64_t protect(uint32_t start, uint32_t end)
         {
             uint64_t stamp = g_counter.load(); // before protecting: a write after it stamps later
+            if (g_protectFailed.load(std::memory_order_relaxed)) return stamp; // pages stay unflagged: never "unchanged"
             uint32_t p = start >> 12, last = std::min<uint32_t>((end + 0xFFF) >> 12, kPages);
             while (p < last)
             {
@@ -186,7 +191,20 @@ namespace mem
                     run++;
                 }
                 g_protectedCount.fetch_add(run - p);
-                setProtection(p, run - p, PROT_READ);
+                if (!setProtection(p, run - p, PROT_READ))
+                {
+                    // Not (all) protected: a write could go unseen. Make the run writable again and
+                    // unflag it with a new stamp, so it never reads as unchanged, and stop protecting:
+                    // the renderer then reads such memory every time, as it would without the watch.
+                    for (uint32_t q = p; q < run; q++) g_stamp[q].store(g_counter.fetch_add(1) + 1);
+                    setProtection(p, run - p, PROT_READ | PROT_WRITE);
+                    for (uint32_t q = p; q < run; q++)
+                        if (g_protected[q].exchange(0)) g_protectedCount.fetch_sub(1);
+                    if (!g_protectFailed.exchange(true))
+                        warn("[mem] write watch: mprotect failed (%s); memory is no longer watched, so textures and geometry "
+                             "are read every time (raise vm.max_map_count?)", strerror(errno));
+                    return stamp;
+                }
                 p = run;
             }
             return stamp;

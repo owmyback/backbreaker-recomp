@@ -132,6 +132,36 @@ their guest address, and the presenter shows the image resolved to the front buf
   write pending are copied every time. In the heaviest rain frames this reuses 84% of the index
   bytes and 62% of the vertex bytes and takes the command processor thread's work from 11.4 to
   8.5 ms a frame.
+- **The geometry cache (#146).** Indices and vertices that stay the same from frame to frame are
+  kept in a cache: `runtime/gpu/geometry_cache.h`, and `geomCached` in the renderer.
+  - **Why.** The copies above were reused only within a frame, and only until the guest next saw
+    progress. In a match that happens about 300 times a frame, nearly all of it `EVENT_WRITE_EXT`
+    screen extents. Yet 70% of the vertex bytes copied, and nearly all of the index bytes, were the
+    same as the last copy of that range. On the Steam Deck the copying was a third of the command
+    processor thread's work, and that thread decides the frame rate there.
+  - **Where.** The cache is a 64 MB ring at the start of the one upload buffer; the frames' parts
+    come after it. A cached copy is good while the write watch (below) says its guest pages are
+    unwritten, and no GPU write has been recorded over them. Progress signals don't matter to it.
+  - **What gets cached.** A range of at least 1 KB, copied alike (by a fingerprint) in 3 frames in a
+    row, with no GPU write over it. Only then are its pages protected, because a write fault costs
+    the game's thread about 90 µs (#119) and some buffers are rewritten every frame. A cached range
+    found written is left uncached for 300 frames, then 600, up to 2,400.
+  - **Why the ring can't overwrite data in use.** Each frame may write at most an eighth of the
+    ring, and a copy is used only while it is less than half the ring behind the newest; an older
+    one is copied forward. With two frames in flight, data a frame reads can't be overwritten
+    before the GPU has run that frame. `tests/geometry_cache_test.cpp` simulates that.
+  - **Result,** measured on the PC with `packaging/portable/test_distros.sh`'s route (`--fixed-seed`):
+    - **Exhibition** (started from a saved profile): the command processor's work went from 6.5 to
+      4.7 ms a frame in the match. Indices fell from 17.7 to 2.2 ms a second, vertices from 48.7 to
+      14.4.
+    - **Training Camp's passing drill** (a new profile, which the same presses take there): 7.3 to
+      5.3 ms a frame.
+    - Write faults and the frame count stayed the same.
+  - **Switches.** `BB_GEOM_CACHE=0` turns the cache off. `BB_GEOM_CHECK=1` checks every cached copy
+    it hands out against a host copy of the guest bytes taken when it was cached, and logs any that
+    differ: a write the watch missed.
+  - The vertex loop also reads its fetch constants from the register file, not back out of the
+    upload buffer. That buffer is write-combined memory, so every CPU read of it misses the cache.
 - A resolve whose destination lies inside an earlier resolve's (predicated tiling, or a texture
   atlas filled a strip at a time) goes into that image, at the place its address has in the
   destination's tiled layout. That layout is in the *destination* format's pixel size, which a
@@ -774,6 +804,14 @@ GPU vertex copies and draws recorded again after a sync, index and vertex copies
 "Renderer"), and the write watch: texture checks answered without reading, write faults and pages
 watched. Pair it with `tools/fps_report.py` on the same log for the fps side.
 
+A second line covers the geometry cache (#146, see "Renderer"):
+- hits, with their bytes, and new copies into the cache;
+- copies moved forward in the ring, because they were too far behind;
+- cached copies found written, which are then dropped;
+- copies that didn't fit the frame's ring budget and went to the frame's part instead;
+- how many vertex and index ranges it is tracking, and the megabytes written through the ring;
+- with `BB_GEOM_CHECK=1`, how many cached copies it handed out that differed from guest memory.
+
 `BB_CP_TIME=1` (with `BB_PERF=1`) adds a line with the command processor thread's time in draws,
 split by step: setup, constants, indices, vertices, textures, EDRAM sync, pass and recording, and
 memory export and after, with the bytes each copied into the upload buffer (#121). In heavy frames
@@ -811,7 +849,12 @@ when the renderer last read it; the stamps keep two textures that share a page a
 into physical memory go through a host buffer (`mem::readFile`), because `pread` into a
 protected page would fail with EFAULT instead of faulting. A texture that changed four times in a
 row (a movie frame, an image the CPU draws) is left unwatched for 300 frames and hashed every frame
-instead, so it does not fault on every write. `tests/memory_watch_test.cpp` checks all of this on
+instead, so it does not fault on every write. The geometry cache (#146, see "Renderer") watches the
+indices and vertices that stay the same the same way. Each protected run splits a memory mapping,
+and Linux limits a process's mappings (`vm.max_map_count`, 65,530 on some distributions). In a match
+the game holds about 1,500, so it's far from the limit. If `mprotect` fails anyway, the watch says so
+once and stops protecting, and pages it couldn't protect never read as unchanged.
+`tests/memory_watch_test.cpp` checks all of this on
 the real memory layout, including the race between a fault and the renderer re-protecting a page.
 
 Resolve images use the same watch (#63, #114, #119). A texture at a resolve destination samples

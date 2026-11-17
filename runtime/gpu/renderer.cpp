@@ -18,6 +18,7 @@
 #include "renderer.h"
 #include "clear_value.h"
 #include "debug_aids.h"
+#include "geometry_cache.h"
 #include "gpu.h"
 #include "shader_translator.h"
 #include "state.h"
@@ -60,6 +61,9 @@ namespace gpu::render
         constexpr uint32_t RB_DEPTH_CLEAR = 0x231D, RB_COLOR_CLEAR = 0x231E, RB_COLOR_CLEAR_LO = 0x231F, RB_BLEND_RED = 0x2105;
         constexpr uint32_t kFramesInFlight = 2;
         constexpr VkDeviceSize kUploadSize = 96ull << 20; // per frame in flight
+        // The geometry cache's ring (#146, geometry_cache.h): the first part of the one upload buffer,
+        // before the frames' parts
+        constexpr VkDeviceSize kGeomCacheSize = 64ull << 20;
         constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT; // D24S8 is not available on AMD
         constexpr uint32_t kConstantsSize = 4096 * 2 + 928;           // vs, ps, then bool/loop/fetch
 
@@ -135,7 +139,9 @@ namespace gpu::render
                            uint64_t flushExport = 0, flushSync = 0, exportDraws = 0, pendingAdded = 0, gpuVertexCopies = 0, syncRetries = 0, chunks = 0,
                                     idleSubmits = 0, asyncFences = 0, asyncWaits = 0, copyInsAroundPending = 0,
                                     hashSkips = 0, passes = 0, barriers = 0, gpuMarksDropped = 0,
-                                    transfers = 0, transferTiles = 0, exportBarriers = 0, transferTilesSkipped = 0, copiesReused = 0, bytesReused = 0;
+                                    transfers = 0, transferTiles = 0, exportBarriers = 0, transferTilesSkipped = 0, copiesReused = 0, bytesReused = 0,
+                                    geomHits = 0, geomHitBytes = 0, geomNew = 0, geomNewBytes = 0, geomForward = 0, geomWritten = 0,
+                                    geomOverBudget = 0, geomCheckFail = 0;
                            double hashMs = 0, waitMs = 0, cpWaitMs = 0;
                            std::vector<double> gpuMs;       // BB_GPU_TIME: GPU time by kind of work (see gpuMark)
                            std::vector<uint32_t> gpuSpans;  // how many stretches of each kind
@@ -508,15 +514,27 @@ void main() {
         struct CopyStamp { uint64_t seen = 0, gpuWrites = 0; };
         CopyStamp copyStamp() { return { g_guestSeen.load(std::memory_order_relaxed), g_gpuWriteSerial }; }
 
-        bool copyStillGood(const CopyStamp& c, uint64_t start, uint64_t end)
+        // No GPU write to [start, end) recorded since g_gpuWriteSerial was `serial`
+        bool noGpuWriteSince(uint64_t serial, uint64_t start, uint64_t end)
         {
-            if (c.seen != g_guestSeen.load(std::memory_order_relaxed)) return false;
-            if (c.gpuWrites == g_gpuWriteSerial || g_pageGpuWrite.empty()) return true;
+            if (serial == g_gpuWriteSerial || g_pageGpuWrite.empty()) return true;
             end = std::min<uint64_t>(end, mem::kPhysicalSize);
             for (uint64_t p = start >> kPageShift; start < end && p <= (end - 1) >> kPageShift; p++)
-                if (g_pageGpuWrite[p] > c.gpuWrites) return false;
+                if (g_pageGpuWrite[p] > serial) return false;
             return true;
         }
+
+        bool copyStillGood(const CopyStamp& c, uint64_t start, uint64_t end)
+        {
+            return c.seen == g_guestSeen.load(std::memory_order_relaxed) && noGpuWriteSince(c.gpuWrites, start, end);
+        }
+
+        // The geometry cache (#146, geometry_cache.h): copies that last across frames, good while the
+        // write watch says their guest memory is unchanged. BB_GEOM_CACHE=0 turns it off (A/B runs),
+        // BB_GEOM_CHECK=1 compares every copy it hands out with guest memory.
+        geometry::Ring g_geomRing{ kGeomCacheSize };
+        const bool g_geomOn = !(getenv("BB_GEOM_CACHE") && getenv("BB_GEOM_CACHE")[0] == '0');
+        const bool g_geomCheck = getenv("BB_GEOM_CHECK") != nullptr;
 
         bool pendingOverlap(uint32_t start, uint32_t end);
         void forgetCopies();
@@ -562,8 +580,9 @@ void main() {
             bool recording = false, submitted = false;
             VkBuffer upload = VK_NULL_HANDLE;
             VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
-            uint8_t* uploadMap = nullptr;
-            VkDeviceSize used = 0;
+            uint8_t* uploadMap = nullptr;   // the whole buffer's (all frames share one, see kGeomCacheSize)
+            VkDeviceSize uploadBase = 0;    // where this frame's part starts in it
+            VkDeviceSize used = 0;          // bytes of that part in use
             VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
             VkDescriptorSet buffers = VK_NULL_HANDLE; // set 0 over `upload`; constants by dynamic offset
             // BB_GPU_TIME: the timestamps this frame context's command buffers write (see gpuMark)
@@ -765,6 +784,7 @@ void main() {
         {
             collectGpuTime(f);
             forgetCopies(); // they are in the upload buffer being reset
+            g_geomRing.beginFrame(); // the frame before last has run (see geometry::Ring)
             VK_CHECK(vkResetCommandPool(D, f.pool, 0));
             f.cmdBuffersUsed = 1;
             f.cmd = f.cmdBuffers[0];
@@ -784,7 +804,7 @@ void main() {
                 return UINT64_MAX;
             }
             f.used = off + size;
-            return off;
+            return f.uploadBase + off; // frame parts start at multiples of 256: aligned alike
         }
 
         // ---------------------------------------------------------------- render targets
@@ -2812,6 +2832,33 @@ void main()
                 else
                     warn("[render] BB_GPU_TIME: this queue has no timestamps");
             }
+            // One upload buffer for the geometry cache's ring and every frame's part (#146): a draw's
+            // vertices are read through binding 0 at any offset in it, the ring's or the frame's
+            const VkDeviceSize uploadTotal = kGeomCacheSize + kFramesInFlight * kUploadSize;
+            VkBuffer upload = VK_NULL_HANDLE;
+            VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
+            uint8_t* uploadMap = nullptr;
+            {
+                VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+                bci.size = uploadTotal;
+                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &upload));
+                VkMemoryRequirements req;
+                vkGetBufferMemoryRequirements(D, upload, &req);
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = req.size;
+                mai.memoryTypeIndex = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &uploadMemory));
+                VK_CHECK(vkBindBufferMemory(D, upload, uploadMemory, 0));
+                VK_CHECK(vkMapMemory(D, uploadMemory, 0, uploadTotal, 0, (void**)&uploadMap));
+            }
+            if (g_geomOn)
+                info("[render] geometry cache: %llu MB for vertices and indices that stay the same from frame to frame (BB_GEOM_CACHE=0 "
+                     "turns it off%s)",
+                     (unsigned long long)(kGeomCacheSize >> 20), g_geomCheck ? "; BB_GEOM_CHECK: every copy it hands out is checked" : "");
+            else
+                info("[render] geometry cache off (BB_GEOM_CACHE=0)");
             for (Frame& f : g_frames)
             {
                 if (g_gpuTime)
@@ -2834,19 +2881,10 @@ void main()
                 f.cmdBuffers = { f.cmd };
                 VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
                 VK_CHECK(vkCreateFence(D, &fci, nullptr, &f.fence));
-                VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-                bci.size = kUploadSize;
-                bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                VK_CHECK(vkCreateBuffer(D, &bci, nullptr, &f.upload));
-                VkMemoryRequirements req;
-                vkGetBufferMemoryRequirements(D, f.upload, &req);
-                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-                mai.allocationSize = req.size;
-                mai.memoryTypeIndex = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-                VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &f.uploadMemory));
-                VK_CHECK(vkBindBufferMemory(D, f.upload, f.uploadMemory, 0));
-                VK_CHECK(vkMapMemory(D, f.uploadMemory, 0, kUploadSize, 0, (void**)&f.uploadMap));
+                f.upload = upload;
+                f.uploadMemory = uploadMemory;
+                f.uploadMap = uploadMap;
+                f.uploadBase = kGeomCacheSize + VkDeviceSize(&f - g_frames) * kUploadSize;
 
                 VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 }, { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3 } };
                 VkDescriptorPoolCreateInfo dpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
@@ -2859,7 +2897,7 @@ void main()
                 dai.descriptorSetCount = 1;
                 dai.pSetLayouts = &g_setLayouts[0];
                 VK_CHECK(vkAllocateDescriptorSets(D, &dai, &f.buffers));
-                VkDescriptorBufferInfo bufs[5] = { { f.upload, 0, kUploadSize }, { f.upload, 0, 4096 }, { f.upload, 0, 4096 }, { f.upload, 0, 928 },
+                VkDescriptorBufferInfo bufs[5] = { { f.upload, 0, uploadTotal }, { f.upload, 0, 4096 }, { f.upload, 0, 4096 }, { f.upload, 0, 928 },
                                                    g_memExportReady ? VkDescriptorBufferInfo{ g_guestMem, 0, mem::kPhysicalSize }
                                                                     : VkDescriptorBufferInfo{ f.upload, 0, 256 } };
                 VkWriteDescriptorSet w[5]{};
@@ -3683,7 +3721,25 @@ void main()
             uint32_t minIndex = 0, maxIndex = 0; // range of guest indices used (before VGT_INDX_OFFSET)
         };
 
-        IndexBuffer decodeIndices(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord, bool quads)
+        // Space for a copy of guest geometry: in the geometry cache's ring when `into` is given and this
+        // frame's ring budget allows (into->pos then says where), otherwise in the frame's own part
+        VkDeviceSize copySpace(VkDeviceSize size, VkDeviceSize align, geometry::History* into)
+        {
+            if (into)
+            {
+                uint64_t pos = g_geomRing.alloc(size, align);
+                if (pos != geometry::kNone)
+                {
+                    into->pos = pos;
+                    return g_geomRing.offset(pos); // the ring is at the start of the upload buffer
+                }
+                g_perf.geomOverBudget++;
+            }
+            return uploadAlloc(size, align);
+        }
+
+        IndexBuffer decodeIndices(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord, bool quads,
+                                  geometry::History* cacheInto = nullptr)
         {
             IndexBuffer ib;
             uint32_t count = s.indexCount;
@@ -3724,7 +3780,7 @@ void main()
             {
                 // Quad (a, b, c, d) -> triangles (a, b, c), (a, c, d)
                 uint32_t n = count / 4 * 6;
-                VkDeviceSize off = uploadAlloc(VkDeviceSize(n) * 4, 4);
+                VkDeviceSize off = copySpace(VkDeviceSize(n) * 4, 4, cacheInto);
                 if (off == UINT64_MAX) return ib;
                 uint32_t* out = (uint32_t*)(frame().uploadMap + off);
                 uint32_t lo = UINT32_MAX, hi = 0;
@@ -3743,7 +3799,7 @@ void main()
                 return { off, VK_INDEX_TYPE_UINT32, n, true, lo == UINT32_MAX ? 0 : lo, hi };
             }
             VkDeviceSize bytes = VkDeviceSize(count) * (s.indexSize ? 4 : 2);
-            VkDeviceSize off = uploadAlloc(bytes + 4, 4);
+            VkDeviceSize off = copySpace(bytes + 4, 4, cacheInto);
             if (off == UINT64_MAX) return ib;
             uint8_t* out = frame().uploadMap + off;
             uint32_t restart = s.indexSize ? 0xFFFFFFFFu : 0xFFFFu;
@@ -3791,6 +3847,74 @@ void main()
             g_vertexCopies.clear();
         }
 
+        // The geometry cache's ranges (geometry_cache.h): vertices by the same key as g_vertexCopies,
+        // indices by IndexCopyKey with the decoded copy. Kept across frames, pruned in endFrame.
+        std::unordered_map<uint64_t, geometry::History> g_geomVertices;
+        struct IndexHistory : geometry::History { IndexBuffer ib; };
+        std::unordered_map<IndexCopyKey, IndexHistory, IndexCopyKeyHash> g_geomIndices;
+
+        // The range's cached copy, if it still holds the guest's bytes: its pages all protected and
+        // unwritten since the copy (the write watch), no GPU write recorded over them since, and the
+        // copy recent enough in the ring. A copy found written is dropped and the range left unwatched
+        // for a while; one that is only old is copied forward by the caller.
+        bool geomCached(geometry::History& h, uint64_t start, uint64_t end)
+        {
+            if (h.pos == geometry::kNone) return false;
+            if (!noGpuWriteSince(h.gpuWrites, start, end) || !mem::watch::unchangedSince(uint32_t(start), uint32_t(end), h.watchStamp))
+            {
+                geometry::foundWritten(h, g_frameSerial);
+                g_perf.geomWritten++;
+                return false;
+            }
+            if (!g_geomRing.usable(h.pos))
+            {
+                h.pos = geometry::kNone;
+                g_perf.geomForward++;
+                return false;
+            }
+            h.lastSeen = g_frameSerial;
+            return true;
+        }
+
+        // May a copy of the range made now go into the cache? Copied alike for a few frames, and no GPU
+        // write recorded over it since it was last copied (memory export output changes every frame)
+        bool geomMayCache(const geometry::History& h, uint64_t start, uint64_t end)
+        {
+            return geometry::mayWatch(h, g_frameSerial, end - start) && noGpuWriteSince(h.gpuWrites, start, end);
+        }
+
+        // A copy of the range was made (into the cache or the frame's part): remember what it looked like
+        void geomObserve(geometry::History& h, uint64_t start, uint64_t end, uint64_t gpuWrites)
+        {
+            if (h.lastSeen != g_frameSerial || !h.stableFrames)
+                geometry::observe(h, geometry::fingerprint(mem::physical(uint32_t(start)), end - start), g_frameSerial);
+            h.gpuWrites = gpuWrites;
+        }
+
+        // BB_GEOM_CHECK: a host copy of each cached range's guest bytes, taken when it was cached. A
+        // hit whose guest bytes differ from it is a write the watch missed: the copy handed out is
+        // stale. (Not the cached copy itself: the upload buffer is write-combined, slow to read.)
+        std::unordered_map<const geometry::History*, std::vector<uint8_t>> g_geomShadow;
+
+        void geomShadowTake(const geometry::History& h, uint64_t start, uint64_t end)
+        {
+            const uint8_t* p = mem::physical(uint32_t(start));
+            g_geomShadow[&h].assign(p, p + (end - start));
+        }
+
+        void geomShadowCheck(const geometry::History& h, const char* what, uint64_t start, uint64_t end)
+        {
+            auto it = g_geomShadow.find(&h);
+            if (it != g_geomShadow.end() && it->second.size() == end - start &&
+                !std::memcmp(it->second.data(), mem::physical(uint32_t(start)), end - start))
+                return;
+            g_perf.geomCheckFail++;
+            static uint32_t logged = 0;
+            if (logged++ < 20)
+                warn("[render] BB_GEOM_CHECK: cached %s at %08llX (%llu bytes): guest memory changed since they were cached", what,
+                     (unsigned long long)start, (unsigned long long)(end - start));
+        }
+
         IndexBuffer indices(const DrawState& s, uint32_t indexBase, uint32_t indexSizeWord, bool quads)
         {
             if (s.indexSource != 0) return decodeIndices(s, indexBase, indexSizeWord, quads);
@@ -3809,8 +3933,37 @@ void main()
                     return it->second.ib;
                 }
             }
+            end = std::min<uint64_t>(end, mem::kPhysicalSize);
+            IndexHistory* gh = keep && g_geomOn && end > start && end - start >= geometry::kMinBytes ? &g_geomIndices[key] : nullptr;
+            auto ibBytes = [](const IndexBuffer& b) { return uint64_t(b.count) * (b.type == VK_INDEX_TYPE_UINT32 ? 4 : 2); };
+            if (gh && geomCached(*gh, start, end))
+            {
+                g_perf.geomHits++;
+                g_perf.geomHitBytes += ibBytes(gh->ib);
+                if (g_geomCheck) geomShadowCheck(*gh, "indices", start, end);
+                return gh->ib;
+            }
+            bool cacheIt = gh && geomMayCache(*gh, start, end);
             CopyStamp stamp = copyStamp(); // before reading guest memory
-            IndexBuffer ib = decodeIndices(s, indexBase, indexSizeWord, quads);
+            uint64_t watch = cacheIt ? mem::watch::protect(start, uint32_t(end)) : 0; // protect, then read
+            IndexBuffer ib = decodeIndices(s, indexBase, indexSizeWord, quads, cacheIt ? gh : nullptr);
+            if (gh)
+            {
+                if (ib.ok && !g_syncRetry)
+                {
+                    geomObserve(*gh, start, end, stamp.gpuWrites);
+                    if (gh->pos != geometry::kNone)
+                    {
+                        gh->watchStamp = watch;
+                        gh->ib = ib;
+                        g_perf.geomNew++;
+                        g_perf.geomNewBytes += ibBytes(ib);
+                        if (g_geomCheck) geomShadowTake(*gh, start, end);
+                        return ib;
+                    }
+                }
+                gh->pos = geometry::kNone;
+            }
             if (keep && ib.ok && !g_syncRetry) g_indexCopies[key] = { ib, stamp };
             return ib;
         }
@@ -3999,9 +4152,12 @@ void main()
             {
                 if (!((vs->t.vertexFetchSlots[slot / 32] >> (slot % 32)) & 1)) continue;
                 // Copy the vertices this draw uses (the whole buffer when the shader computes its
-                // own fetch index), at most 16 MB
-                uint32_t& d0 = fetch[slot * 2];
-                uint64_t baseDw = d0 >> 2, sizeDw = (fetch[slot * 2 + 1] >> 2) & 0xFFFFFF, stride = vs->t.vertexStride[slot];
+                // own fetch index), at most 16 MB. The fetch constant is read from the register file:
+                // `fetch` is in the upload buffer, write-combined memory the CPU should only write
+                // (every read of it misses the cache).
+                const uint32_t fetch0 = __builtin_bswap32(regs[kFetchConstants + slot * 2]);
+                const uint32_t fetch1 = __builtin_bswap32(regs[kFetchConstants + slot * 2 + 1]);
+                uint64_t baseDw = fetch0 >> 2, sizeDw = (fetch1 >> 2) & 0xFFFFFF, stride = vs->t.vertexStride[slot];
                 uint64_t first = 0, end = sizeDw;
                 if (vs->t.vertexIndexDirect && stride)
                 {
@@ -4023,24 +4179,49 @@ void main()
                     uint64_t a = std::max<uint64_t>(w.start, src), b = std::min<uint64_t>(w.end, uint64_t(src) + dwords * 4);
                     if (a < b) hits.push_back({ a, b });
                 }
-                // The same bytes copied earlier in the frame, unchanged since (see g_guestSeen)
+                // The same bytes copied earlier in the frame, unchanged since (see g_guestSeen), or a
+                // copy in the geometry cache (see geomCached)
                 uint64_t copyKey = uint64_t(src) << 32 | dwords;
+                const uint64_t bytes = dwords * 4, srcEnd = uint64_t(src) + bytes;
                 auto copied = hits.empty() ? g_vertexCopies.find(copyKey) : g_vertexCopies.end();
+                const bool frameCopy = copied != g_vertexCopies.end() && copyStillGood(copied->second.stamp, src, srcEnd);
+                geometry::History* gh = !frameCopy && hits.empty() && g_geomOn && bytes >= geometry::kMinBytes && srcEnd <= mem::kPhysicalSize
+                                            ? &g_geomVertices[copyKey]
+                                            : nullptr;
                 VkDeviceSize off;
-                if (copied != g_vertexCopies.end() && copyStillGood(copied->second.stamp, src, uint64_t(src) + dwords * 4))
+                if (frameCopy)
                 {
                     off = copied->second.offset;
                     g_perf.copiesReused++;
-                    g_perf.bytesReused += dwords * 4;
+                    g_perf.bytesReused += bytes;
+                }
+                else if (gh && geomCached(*gh, src, srcEnd))
+                {
+                    off = g_geomRing.offset(gh->pos);
+                    g_perf.geomHits++;
+                    g_perf.geomHitBytes += bytes;
+                    if (g_geomCheck) geomShadowCheck(*gh, "vertices", src, srcEnd);
                 }
                 else
                 {
+                    bool cacheIt = gh && geomMayCache(*gh, src, srcEnd);
                     CopyStamp stamp = copyStamp(); // before reading guest memory
-                    off = uploadAlloc(dwords * 4 + 16, 16);
+                    uint64_t watch = cacheIt ? mem::watch::protect(src, uint32_t(srcEnd)) : 0; // protect, then read
+                    if (gh) gh->pos = geometry::kNone;
+                    off = copySpace(bytes + 16, 16, cacheIt ? gh : nullptr);
                     if (off == UINT64_MAX) return false;
-                    std::memcpy(f.uploadMap + off, mem::physical(src), dwords * 4);
-                    if (g_cpTime) g_perf.cpBytes[kCpVertices] += dwords * 4;
-                    if (hits.empty()) g_vertexCopies[copyKey] = { off, stamp };
+                    std::memcpy(f.uploadMap + off, mem::physical(src), bytes);
+                    if (g_cpTime) g_perf.cpBytes[kCpVertices] += bytes;
+                    if (gh) geomObserve(*gh, src, srcEnd, stamp.gpuWrites);
+                    if (gh && gh->pos != geometry::kNone)
+                    {
+                        gh->watchStamp = watch;
+                        g_perf.geomNew++;
+                        g_perf.geomNewBytes += bytes;
+                        if (g_geomCheck) geomShadowTake(*gh, src, srcEnd);
+                    }
+                    else if (hits.empty())
+                        g_vertexCopies[copyKey] = { off, stamp };
                 }
                 if (!hits.empty() && g_guestMem)
                 {
@@ -4053,7 +4234,7 @@ void main()
                         if (i < hits.size()) { a = hits[i].first; b = hits[i].second; }
                     }
                 }
-                d0 = uint32_t(off / 4) - uint32_t(first); // shader: mem[d0 + index * stride] (mod 2^32)
+                fetch[slot * 2] = uint32_t(off / 4) - uint32_t(first); // shader: mem[d0 + index * stride] (mod 2^32)
             }
             if (!gpuVertexCopies.empty())
             {
@@ -4469,6 +4650,16 @@ void main()
                          (unsigned long long)p.copyInsAroundPending, (unsigned long long)p.hashSkips,
                          (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages());
                     faultsLast = mem::watch::faults();
+                    if (g_geomOn)
+                    {
+                        char check[64] = "";
+                        if (g_geomCheck) snprintf(check, sizeof check, "; BB_GEOM_CHECK: %llu differ", (unsigned long long)p.geomCheckFail);
+                        info("[perf]   geometry cache: %llu hits (%.1f MB), %llu new copies (%.1f MB), %llu copied forward, %llu found written, "
+                             "%llu over the frame's budget; %zu vertex and %zu index ranges known, %.0f MB through the ring so far%s",
+                             (unsigned long long)p.geomHits, p.geomHitBytes / 1048576.0, (unsigned long long)p.geomNew, p.geomNewBytes / 1048576.0,
+                             (unsigned long long)p.geomForward, (unsigned long long)p.geomWritten, (unsigned long long)p.geomOverBudget,
+                             g_geomVertices.size(), g_geomIndices.size(), g_geomRing.written() / 1048576.0, check);
+                    }
                     if (g_cpTime)
                     {
                         static uint64_t tscLast = 0;
@@ -4619,6 +4810,11 @@ void main()
         }
         g_frameSerial++;
         g_drawsInFrame = 0;
+        if (g_frameSerial % geometry::kForgetFrames == 0)
+        {
+            geometry::prune(g_geomVertices, g_frameSerial);
+            geometry::prune(g_geomIndices, g_frameSerial);
+        }
         if (frameNumber % 300 == 0)
             info("[render] textures: %llu uploads, %llu unchanged and kept so far", (unsigned long long)g_texturesUploaded,
                  (unsigned long long)g_texturesKept);

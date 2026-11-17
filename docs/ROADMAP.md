@@ -10,7 +10,8 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-17 (phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
+Last updated: 2026-11-17 (phase 9: the Deck is CPU-bound in matches, and a geometry cache cuts the command processor's work by
+a quarter on the PC, #146; phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
 achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
 a game-fps readout and a log file, #148). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
@@ -81,7 +82,7 @@ timing hid (#129).
 | 6 | Audio output (real XMA decoding, mixing) | **Done** (output to SDL3, #90; XMA decoding, #93; confirmed by ear 2026-11-15) | #92, #95 |
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
-| 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
+| 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; launcher integration not started) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
@@ -693,7 +694,16 @@ show it: it counts the window's presents, not the game's frames. To measure it t
 - `tools/fps_report.py` totals the game time lost;
 - the installed build keeps a log file in `~/.local/share/backbreaker-recomp/logs/`.
 
-Next: a Deck run with these, then CPU or GPU.
+Measured on the Deck (2026-11-17, #146): in a match the game makes 26 fps and runs at 87% speed.
+- **The limit is the CPU.** The command processor thread, which also runs the renderer, does
+  28.8 ms of work a frame against a 33 ms budget, and the GPU is idle 28% of the time.
+- **Uniformly slower.** Each step of that work costs about 3.3 times what it does on the PC.
+- **The geometry cache (#146)** keeps indices and vertices that stay the same across frames. On the
+  PC it takes the thread's work in an Exhibition match from 6.5 to 4.7 ms a frame (`docs/runtime.md`,
+  "Renderer").
+
+Next: a Deck run with the cache, then the next costs. The heavy items are recording passes,
+texture lookups and the work outside draws, and after those the GPU's EDRAM transfers.
 
 Correctness: the analyzer fixes (#52); crashes fixed: a reused TLS slot that handed back freed data
 on the second match load (#127), and the Training Camp passing drills, a race between the game's
