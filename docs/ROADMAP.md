@@ -20,7 +20,9 @@ from the player's image with its own clang and sysroot, in each distribution's c
 manifest that lets RecompLauncher set the game up and start it; on a Steam Deck the install takes
 about 4 minutes, and the game and the installer now start with no options, for a Steam shortcut; the
 game's window has the title's icon, and a terminal install adds a menu entry with it; on the Deck
-Steam lists that entry with its icon and starts the game from it). Before that,
+Steam lists that entry with its icon and starts the game from it; a terminal install now adds the
+game to Steam itself while Steam is closed, and on the Deck that shortcut is in Gaming Mode's
+library with its icon and starts the game, #160). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -90,7 +92,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck; Add to Steam, #160, tried on the Deck) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -849,6 +851,24 @@ The parts, in order:
      the taskbar (`scripts/package_portable.sh` puts `icon.png` in the AppImage's `game/`).
    - Still empty: Steam's library artwork (cover, banner, logo). Steam reads it only from the
      shortcut, so Add to Steam has to set it; the title's icon is 64x64, too small for a cover.
+
+   Add to Steam (#160): `install` from a terminal and
+   `add-to-steam` write the non-Steam game into every Steam account's `shortcuts.vdf`, native and
+   Flathub's. They write nothing while Steam runs, since Steam writes its own list back when it
+   closes, and say which command to run once it's closed. An existing Backbreaker entry is updated,
+   not doubled, and keeps its `appid`, so its playtime and artwork stay. The format and the keys
+   match what Steam itself wrote on the maintainer's PC (client 1792618285, October 2026): a copy of
+   that file came back with its other entry byte for byte (docs/runtime.md, "Installer tools").
+   Tried by the maintainer on the Steam Deck on 2026-11-18, from a fresh install (the earlier
+   shortcut, install, settings and menu entry moved away first) with Steam exited in Desktop Mode:
+   - `install` said it had added Backbreaker to Steam.
+   - In Gaming Mode the library had one Backbreaker entry, with its icon, and it started the game.
+   - After playing, with Steam exited again, `add-to-steam` said Backbreaker was already in Steam:
+     the file Steam wrote back on exit still held the entry as written, so nothing changed.
+   - With Steam running, `add-to-steam` refused and wrote nothing.
+
+   Not tried: Flathub's Steam. Still to do: library artwork (decide), updates before releases
+   (decide), and the GitHub Releases workflow.
    Publishing waits for the licence decision and for
    the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
    from the sysroot, XenonRecomp with binutils' PowerPC disassembler, the AppImage runtime's libfuse).

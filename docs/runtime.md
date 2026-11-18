@@ -71,6 +71,7 @@ with nothing from the host but glibc, a Vulkan driver and the kernel: no Python,
     ./Backbreaker-Installer-x86_64.AppImage install <image> [--prefix <dir>] [--jobs <n>] [--progress]
     ./Backbreaker-Installer-x86_64.AppImage play [--prefix <dir>] [-- <game options>]
     ./Backbreaker-Installer-x86_64.AppImage rebuild [--prefix <dir>]
+    ./Backbreaker-Installer-x86_64.AppImage add-to-steam [--prefix <dir>]
     ./Backbreaker-Installer-x86_64.AppImage
 
 The program inside is `backbreaker-installer`, but nothing puts it on the PATH: it runs as the
@@ -84,6 +85,42 @@ made from the player's own executable (the `icon` command's, `tools/title_icon.p
 or, for an older install, by `play`. `--no-menu-entry` leaves the entry out, and `--progress` (a
 launcher's install) never adds one, since the launcher has its own entry for the game. `TryExec` hides
 the entry once the game's folder is gone; deleting the `.desktop` file removes it.
+
+**Add to Steam** (#160): `install` from a terminal, and `add-to-steam` on its own, add Backbreaker
+to Steam as a non-Steam game, for every Steam account on the machine, in
+`userdata/<account>/config/shortcuts.vdf` (`installer/steam_shortcut.h`). The entry starts
+`<prefix>/bin/backbreaker`, in quotes, with no launch options and the title's icon,
+`<prefix>/game/icon.png`. Steam is found at `~/.steam/steam` and the other folders its launcher script
+uses, and Flathub's Steam at `~/.var/app/com.valvesoftware.Steam/.local/share/Steam`. On a Steam
+Deck (2026-11-18), after a fresh `install` with Steam closed, Gaming Mode's library had the one
+entry, with its icon, and it started the game. Details:
+- **Steam has to be closed:** it reads the file when it starts and writes its own list back when it
+  closes. While a process named `steam` of the player's is running, nothing is written: `install`
+  says so and names the `add-to-steam` command to run once Steam is closed, and `add-to-steam`
+  itself stops with exit code 1. In a Steam Deck's Gaming Mode, Steam is always running, so this is
+  done from Desktop Mode.
+- **No duplicates:** an entry that already starts the same program is updated, and so is one named
+  Backbreaker, in any case, that starts something else (the portable AppImage, say). The entry keeps
+  its `appid`, which Steam keys the game's playtime, controller settings and library artwork by. It
+  also keeps its other keys and, when it already started this program, the player's launch options.
+  Run again with nothing to change, it writes nothing.
+- **A new entry** has the keys, order and defaults of Steam's own "Add a Non-Steam Game", and
+  `crc32(Exe + AppName) | 0x80000000` as its `appid`, as Steam ROM Manager and RecompLauncher give
+  it. Steam stores the id in the entry and uses it as stored. An entry it adds itself gets an id
+  of its own: on the maintainer's PC (Steam client 1792618285, October 2026), neither shortcut's
+  id was that checksum.
+- **A file it can't read**, a value type it doesn't know or a file cut short, is left as it is, and
+  so is a path with `"`, `` ` ``, `$` or `\` in it. The file as it was before the first change is
+  kept beside it as `shortcuts.vdf.before-backbreaker`.
+- **Flathub's Steam** can only start a program its sandbox can see. When it gets the shortcut, the
+  installer prints the line that lets it read the game's folder:
+  `flatpak override --user --filesystem=<prefix>:ro com.valvesoftware.Steam`. Started there, the
+  game should keep its player files in that sandbox's own folders
+  (`~/.var/app/com.valvesoftware.Steam/data/backbreaker-recomp`, Flatpak's `$XDG_DATA_HOME`). Not
+  tried with Flathub's Steam yet: only the files it writes, under a temporary HOME.
+- **Leaving it out:** `--no-steam` leaves the shortcut out, and `--progress` never adds one, since
+  RecompLauncher has its own Add to Steam and the game would be there twice. Removing the game in
+  Steam removes the shortcut. Library artwork (cover, banner, logo) stays empty for now (#160).
 
 `install` checks the image (below), copies the game's files, runs XenonRecomp, compiles `ppc/` and
 links the game, into `~/.local/share/backbreaker-recomp/install` by default (`$XDG_DATA_HOME`; the
@@ -101,8 +138,8 @@ file takes 11 s instead of 13 s. The optimisation level stays the kit's `-O2`: `
 started on the same folder while one is working
 stops with a message (`<prefix>/.lock`).
 
-**From Steam**: in "Add a Non-Steam Game", pick Backbreaker from the list (the menu entry, with its
-icon), or browse to `<prefix>/bin/backbreaker` (by default
+**From Steam by hand**: without `add-to-steam`, in "Add a Non-Steam Game", pick Backbreaker from the
+list (the menu entry, with its icon), or browse to `<prefix>/bin/backbreaker` (by default
 `~/.local/share/backbreaker-recomp/install/bin/backbreaker`) or the AppImage, with no launch options;
 a shortcut made by browsing has no icon until one is picked in its properties
 (`<prefix>/game/icon.png`). The game finds its files from its own path, `<prefix>/game` beside its
@@ -110,8 +147,8 @@ a shortcut made by browsing has no icon until one is picked in its properties
 matter. The AppImage also relinks after a runtime update; `bin/backbreaker` keeps the runtime it was
 linked with until `play` runs. On the maintainer's Steam Deck (2026-11-18), after `install` in a
 terminal, Steam's list had Backbreaker without browsing, its library entry shows the icon beside the
-name, and it started. Steam's library artwork (the cover and banner) stays empty: Steam takes that
-only from the shortcut, so it belongs with Add to Steam (ROADMAP, phase 10, part 5).
+name, and it started. Steam's library artwork (the cover and banner) stays empty either way: Steam
+takes it only from files named after the shortcut's id (ROADMAP, phase 10, part 5).
 
 Everything it builds with comes from its bundle, `build-installer/AppDir/usr/lib/backbreaker-installer`
 (`installer/build.h` has the layout), made in the portable build container by

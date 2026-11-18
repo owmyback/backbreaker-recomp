@@ -8,6 +8,7 @@
 #include "disc.h"
 #include "game_check.h"
 #include "menu_entry.h"
+#include "steam_shortcut.h"
 #include "xex.h"
 
 #include <cctype>
@@ -34,6 +35,18 @@ namespace
     enum Exit { kOk = 0, kFailed = 1, kUsage = 2, kCannotOpen = 3, kNotXbox360 = 4, kOtherGame = 5, kDamaged = 6,
                 kNotInstalled = 7, kBuildFailed = 8 };
 
+    // One word for a shell, quoted when it needs it
+    std::string shellWord(const std::string& s)
+    {
+        bool plain = !s.empty();
+        for (char c : s)
+            if (!std::isalnum(static_cast<unsigned char>(c)) && !std::strchr("/._+-=:", c)) plain = false;
+        if (plain) return s;
+        std::string quoted = "'";
+        for (char c : s) quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+        return quoted + "'";
+    }
+
     // How the player runs this program again, for the messages that tell them: the AppImage's own
     // path (its runtime sets APPIMAGE), else this program's. Nothing named backbreaker-installer is
     // on their PATH. Quoted for a shell when the path needs it.
@@ -46,13 +59,7 @@ namespace
             path = std::filesystem::read_symlink("/proc/self/exe", ec).string();
             if (path.empty()) return "backbreaker-installer";
         }
-        bool plain = true;
-        for (char c : path)
-            if (!std::isalnum(static_cast<unsigned char>(c)) && !std::strchr("/._+-", c)) plain = false;
-        if (plain) return path;
-        std::string quoted = "'";
-        for (char c : path) quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
-        return quoted + "'";
+        return shellWord(path);
     }
 
     // After the usage line, which names selfCommand()
@@ -70,11 +77,13 @@ namespace
         "  install <image> [options]         check, copy the game's files, build the game\n"
         "  play [options] [-- <game options>]  build what changed (a new runtime relinks in seconds), start the game\n"
         "  rebuild [options]                 translate, compile and link again\n"
+        "  add-to-steam [--prefix <dir>]     Backbreaker in Steam's library, with its icon (close Steam first)\n"
         "options: --prefix <dir>   where the game is installed (default: ~/.local/share/backbreaker-recomp/install)\n"
         "         --jobs <n>       parallel compiles (default: by CPU threads and free memory)\n"
         "         --progress       'progress <0-1> <step>' lines for a launcher\n"
         "         --bundle <dir>   the toolchain, runtime kit and XenonRecomp (default: beside this program)\n"
         "         --no-menu-entry  install: no Backbreaker in the applications menu (--progress never adds one)\n"
+        "         --no-steam       install: not added to Steam (--progress never adds it)\n"
         "exit codes: 0 done, 1 failed, 2 usage, 3 the image can't be opened, 4 not an Xbox 360 game disc,\n"
         "            5 another game, 6 damaged image or unknown release, 7 not installed, 8 the build failed\n";
 
@@ -83,11 +92,17 @@ namespace
         std::fprintf(to, "usage: %s <command> ...\n%s", selfCommand().c_str(), kUsageText);
     }
 
-    // `play`, `rebuild`: what to run first
+    // " --prefix <dir>" for a command the player runs next, unless it's the default
+    std::string prefixOption(const std::string& prefix)
+    {
+        return prefix == defaultPrefix() ? "" : " --prefix " + shellWord(prefix);
+    }
+
+    // `play`, `rebuild`, `add-to-steam`: what to run first
     std::string notInstalled(const std::string& prefix)
     {
         return "the game isn't installed in " + prefix + " (install it from your disc image first: " +
-               selfCommand() + " install <your disc image>" + (prefix == defaultPrefix() ? "" : " --prefix " + prefix) + ")";
+               selfCommand() + " install <your disc image>" + prefixOption(prefix) + ")";
     }
 
     int fail(int code, const std::string& message)
@@ -163,6 +178,85 @@ namespace
             std::printf("[installer] no applications-menu entry: %s\n", error.c_str());
         else
             std::printf("[installer] added Backbreaker to your applications menu (%s)\n", path.c_str());
+    }
+
+    // install from a terminal, and add-to-steam: Backbreaker as a non-Steam game in every Steam
+    // account on this machine, starting <prefix>/bin/backbreaker with the title's icon
+    // (installer/steam_shortcut.h). Steam has to be closed: it writes its list back when it closes.
+    // Not with --progress: a launcher has its own Add to Steam, and the game would be there twice.
+    int addToSteam(const std::string& prefix, bool required)
+    {
+        auto note = [&](const std::string& why) -> int {
+            if (required) return fail(kFailed, why);
+            std::printf("[installer] not added to Steam: %s\n", why.c_str());
+            return kOk;
+        };
+        const std::vector<SteamInstall> installs = findSteamInstalls();
+        if (installs.empty()) return note("Steam isn't installed, or hasn't been started yet");
+        if (steamRunning())
+            return note("Steam is running, and it would write its own list of games over the shortcut when it closes. "
+                        "Exit Steam (its Steam menu, Exit; on a Steam Deck, in Desktop Mode), then run: " + selfCommand() +
+                        " add-to-steam" + prefixOption(prefix));
+        SteamShortcut s;
+        s.name = "Backbreaker";
+        s.exe = prefix + "/bin/backbreaker";
+        s.startDir = prefix + "/bin";
+        std::error_code ec;
+        if (std::filesystem::exists(prefix + "/game/icon.png", ec)) s.icon = prefix + "/game/icon.png";
+        unsigned added = 0, updated = 0, unchanged = 0;
+        bool flatpak = false, failed = false;
+        for (const SteamInstall& install : installs) {
+            for (const std::string& config : steamAccountConfigs(install.root)) {
+                const std::string file = config + "/shortcuts.vdf";
+                std::vector<uint8_t> old, out;
+                std::string error;
+                if (std::filesystem::exists(file, ec) && !readFile(file, old, error)) {
+                    std::printf("[installer] not added to Steam for %s: %s\n", config.c_str(), error.c_str());
+                    failed = true;
+                    continue;
+                }
+                uint32_t appId = 0;
+                const ShortcutChange change = addShortcut(old, s, out, appId, error);
+                if (change == ShortcutChange::Failed) {
+                    std::printf("[installer] left %s as it is: %s\n", file.c_str(), error.c_str());
+                    failed = true;
+                    continue;
+                }
+                if (change == ShortcutChange::Unchanged) {
+                    unchanged++;
+                    flatpak = flatpak || install.flatpak;
+                    continue;
+                }
+                // The file as it was before this installer first changed it
+                const std::string backup = file + ".before-backbreaker";
+                if (!old.empty() && !std::filesystem::exists(backup, ec) && !writeFile(backup, old.data(), old.size(), error)) {
+                    std::printf("[installer] left %s as it is: %s\n", file.c_str(), error.c_str());
+                    failed = true;
+                    continue;
+                }
+                if (!replaceFile(file, out.data(), out.size(), error)) {
+                    std::printf("[installer] not added to Steam for %s: %s\n", config.c_str(), error.c_str());
+                    failed = true;
+                    continue;
+                }
+                (change == ShortcutChange::Added ? added : updated)++;
+                flatpak = flatpak || install.flatpak;
+            }
+        }
+        const unsigned accounts = added + updated + unchanged;
+        if (!accounts) return failed ? (required ? kFailed : kOk) : note("nobody has signed in to Steam on this machine yet");
+        const std::string forWhom = accounts == 1 ? "" : " for " + std::to_string(accounts) + " Steam accounts";
+        if (added + updated == 0)
+            std::printf("[installer] Backbreaker is already in Steam%s\n", forWhom.c_str());
+        else
+            std::printf("[installer] %s%s: it's in the library when Steam starts\n",
+                        added ? "added Backbreaker to Steam" : "updated Backbreaker's Steam shortcut", forWhom.c_str());
+        // Flathub's Steam starts only programs its sandbox can see
+        if (flatpak)
+            std::printf("[installer] Steam from Flathub can start it once it may read the game's folder: "
+                        "flatpak override --user --filesystem=%s:ro %s\n",
+                        shellWord(prefix).c_str(), kFlatpakSteam);
+        return failed && required ? kFailed : kOk;
     }
 
     int exitFor(CheckStatus s)
@@ -364,6 +458,7 @@ namespace
         unsigned jobs = 0;
         bool progress = false;
         bool menuEntry = true; // install: --no-menu-entry
+        bool steam = true;     // install: --no-steam
         std::vector<std::string> gameArgs; // after --
     };
 
@@ -377,6 +472,7 @@ namespace
             }
             if (s == "--progress") o.progress = true;
             else if (s == "--no-menu-entry" && wantImage) o.menuEntry = false;
+            else if (s == "--no-steam" && wantImage) o.steam = false;
             else if ((s == "--prefix" || s == "--bundle" || s == "--jobs") && i + 1 < a.size()) {
                 const std::string& v = a[++i];
                 if (s == "--prefix") o.prefix = v;
@@ -426,11 +522,10 @@ namespace
         if (!o.progress) {
             std::printf("[installer] installed in %s\n", o.prefix.c_str());
             if (o.menuEntry) addMenuEntry(o.prefix);
-            std::printf("[installer] start it with: %s play%s\n", selfCommand().c_str(),
-                        o.prefix == defaultPrefix() ? "" : (" --prefix " + o.prefix).c_str());
+            if (o.steam) addToSteam(o.prefix, false);
+            std::printf("[installer] start it with: %s play%s\n", selfCommand().c_str(), prefixOption(o.prefix).c_str());
             // The game finds its files from its own path (runtime/paths.cpp), so it needs no options
-            std::printf("[installer] or start %s/bin/backbreaker itself, for example as a non-Steam game in Steam\n",
-                        o.prefix.c_str());
+            std::printf("[installer] or start %s/bin/backbreaker itself\n", o.prefix.c_str());
         }
         return kOk;
     }
@@ -446,6 +541,15 @@ namespace
         bo.recompile = true;
         bo.relink = true;
         return build(o, bo, makeProgress(o.progress), 0.0);
+    }
+
+    int cmdAddToSteam(const Options& o)
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(o.prefix + "/game/.complete", ec) || !std::filesystem::exists(o.prefix + "/bin/backbreaker", ec))
+            return fail(kNotInstalled, notInstalled(o.prefix));
+        ensureIcon(o.prefix + "/game"); // an install from before the icon
+        return addToSteam(o.prefix, true);
     }
 
     // The launcher's start step: builds whatever a new bundle changed, then becomes the game
@@ -510,6 +614,7 @@ int main(int argc, char** argv)
     if (c == "install" && parseOptions(a, true, o)) return cmdInstall(o);
     if (c == "play" && parseOptions(a, false, o)) return cmdPlay(o);
     if (c == "rebuild" && parseOptions(a, false, o)) return cmdRebuild(o);
+    if (c == "add-to-steam" && parseOptions(a, false, o) && o.gameArgs.empty()) return cmdAddToSteam(o);
     printUsage(stderr);
     return kUsage;
 }

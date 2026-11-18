@@ -2,14 +2,18 @@
 // SHA-256 against the standards' test vectors, and the disc reader, the XEX decoder, the import
 // glue generator, the title icon and the image check on images and executables built here by hand.
 // The same code is checked byte for byte against the Python tools on a real disc (see the PR).
+// Also the applications-menu entry, and the Steam shortcut's shortcuts.vdf against files written
+// here byte by byte, with a temporary HOME and a made-up /proc (never the machine's own Steam).
 // Build:
 //   clang++ -std=c++20 -Wall -Wextra -O2 -I third_party/XenonRecomp/XenonUtils tests/installer_test.cpp \
-//       installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp -o build/installer_test
+//       installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp \
+//       installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp -o build/installer_test
 #include "../installer/crypto.h"
 #include "../installer/disc.h"
 #include "../installer/build.h"
 #include "../installer/game_check.h"
 #include "../installer/menu_entry.h"
+#include "../installer/steam_shortcut.h"
 #include "../installer/xex.h"
 
 #include <algorithm>
@@ -63,6 +67,51 @@ struct Bytes
     void str(const std::string& s) { for (char c : s) u8(uint8_t(c)); }
     void pad(size_t to) { b.resize(to, 0); }
 };
+
+// Binary KeyValues written by hand, as Steam writes shortcuts.vdf (installer/steam_shortcut.h)
+struct Kv
+{
+    std::vector<uint8_t> b;
+    Kv& key(uint8_t type, const std::string& k) { b.push_back(type); b.insert(b.end(), k.begin(), k.end()); b.push_back(0); return *this; }
+    Kv& map(const std::string& k) { return key(0x00, k); }
+    Kv& str(const std::string& k, const std::string& v) { key(0x01, k); b.insert(b.end(), v.begin(), v.end()); b.push_back(0); return *this; }
+    Kv& i32(const std::string& k, uint32_t v) { key(0x02, k); for (int i = 0; i < 4; i++) b.push_back(uint8_t(v >> (8 * i))); return *this; }
+    Kv& u64(const std::string& k, uint64_t v) { key(0x07, k); for (int i = 0; i < 8; i++) b.push_back(uint8_t(v >> (8 * i))); return *this; }
+    Kv& end() { b.push_back(0x08); return *this; }
+    Kv& add(const Kv& o) { b.insert(b.end(), o.b.begin(), o.b.end()); return *this; }
+};
+
+// One game's entry with the keys, order and spelling Steam's own "Add a Non-Steam Game" writes
+static Kv steamEntry(const std::string& index, uint32_t appid, const std::string& name, const std::string& exe,
+                     const std::string& dir, const std::string& icon, const std::string& options)
+{
+    Kv e;
+    e.map(index).i32("appid", appid).str("appname", name).str("exe", exe).str("StartDir", dir).str("icon", icon)
+        .str("ShortcutPath", "").str("LaunchOptions", options).i32("IsHidden", 0).i32("AllowDesktopConfig", 1)
+        .i32("AllowOverlay", 1).i32("OpenVR", 0).i32("Devkit", 0).str("DevkitGameID", "").i32("DevkitOverrideAppID", 0)
+        .i32("LastPlayTime", 0).str("FlatpakAppID", "").str("sortas", "").map("tags").end().end();
+    return e;
+}
+
+// The entry `index` of a shortcuts.vdf, parsed
+static const VdfNode* shortcutEntry(const std::vector<VdfNode>& top, const std::string& index)
+{
+    for (const VdfNode& list : top)
+        if (list.key == "shortcuts")
+            for (const VdfNode& e : list.children)
+                if (e.key == index) return &e;
+    return nullptr;
+}
+
+static std::string field(const VdfNode* e, const std::string& key)
+{
+    if (e)
+        for (const VdfNode& n : e->children)
+            if (n.key == key) return n.value;
+    return "<missing>";
+}
+
+static std::string le32s(uint32_t v) { return {char(v), char(v >> 8), char(v >> 16), char(v >> 24)}; }
 
 static void le16(std::vector<uint8_t>& d, size_t at, uint32_t v) { d[at] = uint8_t(v); d[at + 1] = uint8_t(v >> 8); }
 static void le32(std::vector<uint8_t>& d, size_t at, uint32_t v) { le16(d, at, v); le16(d, at + 2, v >> 16); }
@@ -393,6 +442,130 @@ int main()
         expect(menuEntryPath() == "/home/deck/.local/share/applications/backbreaker-recomp.desktop" &&
                    defaultPrefix() == "/home/deck/.local/share/backbreaker-recomp/install",
                "a relative $XDG_DATA_HOME is ignored, as the game ignores it");
+    }
+
+    // --- Steam's non-Steam game (installer/steam_shortcut.h, #160) -----------------------------
+    {
+        expect(crc32("123456789", 9) == 0xCBF43926u && crc32("", 0) == 0, "CRC-32's check value (zlib's)");
+        const std::string exe = "/home/deck/.local/share/backbreaker-recomp/install/bin/backbreaker";
+        const std::string quotedExe = "\"" + exe + "\"";
+        const std::string bin = "/home/deck/.local/share/backbreaker-recomp/install/bin";
+        const std::string icon = "/home/deck/.local/share/backbreaker-recomp/install/game/icon.png";
+        const SteamShortcut s{"Backbreaker", exe, bin, icon};
+        const std::string idKey = quotedExe + "Backbreaker";
+        const uint32_t newId = crc32(idKey.data(), idKey.size()) | 0x80000000u;
+
+        // Another game, as Steam wrote it, with a tag and a uint64 this doesn't use
+        Kv other = steamEntry("0", 0xC0FFEE01u, "Other", "\"/usr/bin/other\"", "\"/usr/bin/\"", "", "-x");
+        other.b.resize(other.b.size() - 2); // reopen its tags
+        other.str("0", "favorite").end().u64("Big", 1ull << 40).end();
+        Kv file;
+        file.map("shortcuts").add(other).end().end();
+        std::vector<VdfNode> top;
+        expect(parseVdf(file.b, top) && writeVdf(top) == file.b, "a Steam-written shortcuts.vdf reads and writes back byte for byte");
+
+        std::vector<uint8_t> out;
+        uint32_t id = 0;
+        std::string error;
+        ShortcutChange change = addShortcut(file.b, s, out, id, error);
+        Kv want;
+        want.map("shortcuts").add(other)
+            .add(steamEntry("1", newId, "Backbreaker", quotedExe, "\"" + bin + "\"", icon, "")).end().end();
+        expect(change == ShortcutChange::Added && out == want.b && id == newId,
+               "added after the other game, as entry 1, with Steam's keys and crc32(Exe + AppName) | 0x80000000 as its id");
+        const std::vector<uint8_t> added = out;
+        change = addShortcut(added, s, out, id, error);
+        expect(change == ShortcutChange::Unchanged && id == newId, "added again: nothing changes");
+
+        Kv none;
+        none.map("shortcuts").add(steamEntry("0", newId, "Backbreaker", quotedExe, "\"" + bin + "\"", icon, "")).end().end();
+        expect(addShortcut({}, s, out, id, error) == ShortcutChange::Added && out == none.b, "no file yet: one with only the game");
+
+        // Added before through Steam's own dialog (browsed to: the file's name, an id of Steam's
+        // own, no icon), with the player's launch options
+        Kv mine;
+        mine.map("shortcuts").add(steamEntry("0", 0x9234ABCDu, "backbreaker", quotedExe, "\"" + bin + "/\"", "", "BB_PERF=1 %command%"))
+            .end().end();
+        change = addShortcut(mine.b, s, out, id, error);
+        expect(change == ShortcutChange::Updated && id == 0x9234ABCDu, "the same program: updated, its id kept");
+        expect(parseVdf(out, top) && field(shortcutEntry(top, "0"), "appname") == "Backbreaker" &&
+                   field(shortcutEntry(top, "0"), "icon") == icon &&
+                   field(shortcutEntry(top, "0"), "StartDir") == "\"" + bin + "\"" &&
+                   field(shortcutEntry(top, "0"), "LaunchOptions") == "BB_PERF=1 %command%" && !shortcutEntry(top, "1"),
+               "its name and icon set, the player's launch options kept, no second entry");
+
+        // The portable AppImage added as Backbreaker, with options for it: the same name
+        Kv appImage;
+        appImage.map("shortcuts").add(steamEntry("0", 0x8111AAAAu, "BACKBREAKER", "\"/home/deck/Backbreaker.AppImage\"",
+                                                 "\"/home/deck/\"", "", "--fullscreen"))
+            .end().end();
+        change = addShortcut(appImage.b, s, out, id, error);
+        expect(change == ShortcutChange::Updated && id == 0x8111AAAAu && parseVdf(out, top) &&
+                   field(shortcutEntry(top, "0"), "exe") == quotedExe && field(shortcutEntry(top, "0"), "LaunchOptions").empty() &&
+                   !shortcutEntry(top, "1"),
+               "the same name, another program: that entry starts the game now, without the other program's options");
+
+        // From a Steam that stored no appid (it worked it out from Exe and AppName): that id is kept
+        Kv legacy;
+        legacy.map("shortcuts").map("0").str("AppName", "Backbreaker").str("Exe", "\"/old/bin/backbreaker\"").end().end().end();
+        const std::string oldKey = "\"/old/bin/backbreaker\"Backbreaker";
+        const uint32_t oldId = crc32(oldKey.data(), oldKey.size()) | 0x80000000u;
+        change = addShortcut(legacy.b, s, out, id, error);
+        expect(change == ShortcutChange::Updated && id == oldId && parseVdf(out, top) &&
+                   field(shortcutEntry(top, "0"), "appid") == le32s(oldId) && field(shortcutEntry(top, "0"), "Exe") == quotedExe,
+               "no stored id: the one Steam derived from the old Exe is stored, the keys keep their spelling");
+
+        Kv wide;
+        wide.map("shortcuts").map("0").key(0x05, "name").b.insert(wide.b.end(), {'x', 0, 0, 0});
+        wide.end().end().end();
+        expect(addShortcut(wide.b, s, out, id, error) == ShortcutChange::Failed && error.find("can't read") != std::string::npos,
+               "a type it doesn't know: the file is left alone (" + error + ")");
+        std::vector<uint8_t> cut = added;
+        if (!cut.empty()) cut.pop_back();
+        expect(!parseVdf(cut, top) && addShortcut(cut, s, out, id, error) == ShortcutChange::Failed, "a file cut short: left alone");
+        std::vector<uint8_t> trailing = added;
+        trailing.push_back(0);
+        expect(!parseVdf(trailing, top), "bytes after the end: refused");
+        expect(addShortcut({}, {"Backbreaker", "/home/$x/bin/backbreaker", "/home/$x/bin", ""}, out, id, error) ==
+                   ShortcutChange::Failed,
+               "a path it can't quote: no shortcut");
+        expect(steamQuoted("/home/a b/it's") == "\"/home/a b/it's\"" && steamQuoted("/a\"b").empty() &&
+                   steamQuoted("/a`b").empty() && steamQuoted("/a\\b").empty() && steamQuoted("/a\nb").empty(),
+               "Exe in quotes; \", `, \\ or a newline: not written");
+
+        // Where Steam is, under a temporary HOME
+        const std::string home = dir + "/home";
+        namespace fs = std::filesystem;
+        fs::create_directories(home + "/.local/share/Steam/userdata/123/config");
+        fs::create_directories(home + "/.local/share/Steam/userdata/0/config");
+        fs::create_directories(home + "/.local/share/Steam/userdata/anonymous");
+        fs::create_directories(home + "/.steam");
+        fs::create_directory_symlink(home + "/.local/share/Steam", home + "/.steam/steam");
+        fs::create_directory_symlink(home + "/.local/share/Steam", home + "/.steam/root");
+        fs::create_directories(home + "/Steam"); // no userdata/
+        fs::create_directories(home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam/userdata/456");
+        setenv("HOME", home.c_str(), 1);
+        unsetenv("XDG_DATA_HOME");
+        const std::vector<SteamInstall> installs = findSteamInstalls();
+        expect(installs.size() == 2 && installs[0].root == home + "/.steam/steam" && !installs[0].flatpak &&
+                   installs[1].root == home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam" && installs[1].flatpak,
+               "native Steam once (through its links) and Flathub's");
+        const auto accounts = installs.size() == 2 ? steamAccountConfigs(installs[0].root) : std::vector<std::string>{};
+        expect(accounts.size() == 1 && accounts[0] == home + "/.steam/steam/userdata/123/config",
+               "accounts: numbered folders, not 0");
+
+        // A made-up /proc: Steam's helpers aren't Steam, Steam is
+        const std::string proc = dir + "/proc";
+        auto process = [&](const std::string& pid, const std::string& comm) {
+            fs::create_directories(proc + "/" + pid);
+            std::ofstream(proc + "/" + pid + "/comm") << comm << "\n";
+        };
+        process("10", "bash");
+        process("11", "steamwebhelper");
+        process("self", "steam");
+        expect(!steamRunning(proc), "no process named steam: not running");
+        process("12", "steam");
+        expect(steamRunning(proc), "a process named steam: running");
     }
 
     std::filesystem::remove_all(dir);
