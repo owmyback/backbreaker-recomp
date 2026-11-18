@@ -1,4 +1,4 @@
-The AppImage runtime: the first part of Backbreaker-Installer-x86_64.AppImage, the program that
+The AppImage runtime: the first part of Backbreaker-Recompiled-x86_64.AppImage, the program that
 mounts the rest. It is AppImage's static type2 runtime, release 20251108
 (https://github.com/AppImage/type2-runtime/releases/tag/20251108), used unchanged; the build
 container checks its SHA-256 (packaging/portable/Containerfile). It was built on Alpine Linux 3.21

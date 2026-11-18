@@ -68,11 +68,11 @@ no game content.
 `backbreaker-installer` (`installer/`) takes a player from their own disc image to a built game
 with nothing from the host but glibc, a Vulkan driver and the kernel: no Python, OpenSSL or compiler.
 
-    ./Backbreaker-Installer-x86_64.AppImage install <image> [--prefix <dir>] [--jobs <n>] [--progress]
-    ./Backbreaker-Installer-x86_64.AppImage play [--prefix <dir>] [-- <game options>]
-    ./Backbreaker-Installer-x86_64.AppImage rebuild [--prefix <dir>]
-    ./Backbreaker-Installer-x86_64.AppImage add-to-steam [--prefix <dir>]
-    ./Backbreaker-Installer-x86_64.AppImage
+    ./Backbreaker-Recompiled-x86_64.AppImage install <image> [--prefix <dir>] [--jobs <n>] [--progress]
+    ./Backbreaker-Recompiled-x86_64.AppImage play [--prefix <dir>] [-- <game options>]
+    ./Backbreaker-Recompiled-x86_64.AppImage rebuild [--prefix <dir>]
+    ./Backbreaker-Recompiled-x86_64.AppImage add-to-steam [--prefix <dir>]
+    ./Backbreaker-Recompiled-x86_64.AppImage
 
 The program inside is `backbreaker-installer`, but nothing puts it on the PATH: it runs as the
 AppImage, and its messages name the AppImage's own path (`$APPIMAGE`). With no command it plays,
@@ -164,7 +164,7 @@ build does. `MANIFEST.txt` lists every package and version in it, and `NOTICES.t
 files of the Ubuntu and apt.llvm.org packages, the licences of what the container builds from source
 (`/usr/local/share/licenses`), XenonRecomp's and FFmpeg's from their checkouts, and the AppImage
 runtime's from `packaging/installer/licenses/`. The bundle is about 420 MB, and the
-AppImage, `build-installer/Backbreaker-Installer-x86_64.AppImage`, about 110 MB; it holds no game
+AppImage, `build-installer/Backbreaker-Recompiled-x86_64.AppImage`, about 110 MB; it holds no game
 content. `packaging/portable/test_distros.sh --installer <AppImage> --image <your image>` installs and
 runs the game with it in each distribution's container, none of which has a compiler.
 
@@ -193,7 +193,7 @@ to a **draft** release, with `packaging/installer/release_notes.md` as its text.
 looks the draft over and publishes it on GitHub. Run again for the same tag, it replaces a draft's
 files; a published release is left alone. Before the draft:
 - **The AppImage is checked:** it starts (unpacked, since a runner has no FUSE), its manifest names
-  `Backbreaker-Installer-x86_64.AppImage`, the name RecompLauncher looks for, and it holds no disc
+  `Backbreaker-Recompiled-x86_64.AppImage`, the name RecompLauncher looks for, and it holds no disc
   image, executable, translated code or title image.
 - **The sources archive** (`packaging/installer/sources.sh`): the source of the GPL and LGPL parts
   that no distribution keeps, so it comes from the same place as the AppImage: XenonRecomp at its
@@ -209,13 +209,16 @@ files; a published release is left alone. Before the draft:
 A pull request that changes `packaging/`, the decoder's build or the workflow builds and checks the
 AppImage the same way, and uploads nothing.
 
-To try it before there is a release: put `Backbreaker-Installer-x86_64.AppImage` alone in a folder
-whose name has the word "Installer" in it (`Backbreaker Installer`, say), then in RecompLauncher
-(0.90 beta 63 or newer) Settings, Bring Your Games, "Pick a Folder…", that folder, and "Add Without
-Updates" when it asks which game it is. Its folder scan skips a program named like an installer
-unless the folder's name has that word too (its `install.rs`, `NOT_THE_GAME`), and says "There's no
-program in that folder." It reads the manifest from the AppImage, and shows the game as
-"Backbreaker" with our settings page when it did; named after the folder, with no settings, it
+To try it before there is a release: put `Backbreaker-Recompiled-x86_64.AppImage` alone in a folder,
+then in RecompLauncher (0.90 beta 63 or newer) Settings, Bring Your Games, "Pick a Folder…", that
+folder, and "Add Without Updates" when it asks which game it is. The AppImage's name has no
+"install" or "setup" in it on purpose: RecompLauncher reads such a name as an installer's in several
+places. Its folder scan skips the program then, unless the folder's name has the word too (its
+`install.rs`, `NOT_THE_GAME`), and says "There's no program in that folder."; and a download
+whose own program looks like a setup goes back to being treated as one (`own_setup.rs`). Until
+2026-11-18 it was `Backbreaker-Installer-x86_64.AppImage`, which needed a folder named with
+"Installer". It reads the manifest from the AppImage, and shows the game as "Backbreaker" with our
+settings page when it did; named after the folder, with no settings, it
 didn't. On the Deck (2026-11-18, RecompLauncher 0.90.0-beta.64) the first try was the second
 kind: its AppImage reader (the backhand crate, 0.21) can't read an extended symlink inode, which
 `mksquashfs` writes for a symlink with extended attributes, and every file built on the

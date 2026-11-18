@@ -13,7 +13,7 @@
     ]
   },
   "prepare": {
-    "program": ["Backbreaker-Installer-x86_64.AppImage"],
+    "program": ["Backbreaker-Recompiled-x86_64.AppImage"],
     "args": ["install", "{game}", "--prefix", "{install}/build", "--progress"],
     "label": "Building the game from your disc: under a minute on a fast PC, longer on a Steam Deck",
     "timeout": 7200,
@@ -21,7 +21,7 @@
     "version": "1"
   },
   "start": {
-    "program": ["Backbreaker-Installer-x86_64.AppImage"],
+    "program": ["Backbreaker-Recompiled-x86_64.AppImage"],
     "args": ["play", "--prefix", "{install}/build", "--"]
   },
   "config": [

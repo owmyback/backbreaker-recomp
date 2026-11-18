@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # dpkg-query's '${Field}' formats aren't shell expansions
-# Builds the installer (#138): build-installer/Backbreaker-Installer-x86_64.AppImage, and the same
+# Builds the installer (#138): build-installer/Backbreaker-Recompiled-x86_64.AppImage, and the same
 # bundle unpacked in build-installer/AppDir. It holds no game content - our runtime kit, the open-source
 # toolchain and XenonRecomp - so it can be published once the licences are settled (#138, part 5).
 #
@@ -63,7 +63,7 @@ fi
 git -C $XENON apply --reverse --check "$REPO/patches/xenonrecomp-backbreaker-instructions.patch" 2>/dev/null ||
     die "$XENON doesn't have patches/xenonrecomp-backbreaker-instructions.patch applied (scripts/setup.sh applies it)"
 
-rm -rf "$APPDIR" "$OUT/Backbreaker-Installer-x86_64.AppImage" "$OUT/MANIFEST.txt" "$OUT/NOTICES.txt"
+rm -rf "$APPDIR" "$OUT/Backbreaker-Recompiled-x86_64.AppImage" "$OUT/MANIFEST.txt" "$OUT/NOTICES.txt"
 mkdir -p "$APPDIR/usr/bin" "$B"
 
 say "the XMA decoder (FFmpeg), built once into third_party/ffmpeg-xma-portable"
@@ -186,10 +186,10 @@ install -m 644 packaging/installer/recomplauncher.json "$APPDIR/recomplauncher.j
 # published image, and they make mksquashfs write extended symlink inodes, which RecompLauncher's
 # reader (the backhand crate, 0.21) can't read: it then ignores the embedded recomplauncher.json
 mksquashfs "$APPDIR" $OUT/.fs.squashfs -root-owned -noappend -no-xattrs -comp zstd -Xcompression-level 15 -quiet >/dev/null
-cat /usr/local/share/appimage-runtime-x86_64 $OUT/.fs.squashfs >$OUT/Backbreaker-Installer-x86_64.AppImage
-chmod 755 $OUT/Backbreaker-Installer-x86_64.AppImage
+cat /usr/local/share/appimage-runtime-x86_64 $OUT/.fs.squashfs >$OUT/Backbreaker-Recompiled-x86_64.AppImage
+chmod 755 $OUT/Backbreaker-Recompiled-x86_64.AppImage
 rm -f $OUT/.fs.squashfs
 cp "$B/MANIFEST.txt" "$B/NOTICES.txt" $OUT/
 
-say "done: $OUT/Backbreaker-Installer-x86_64.AppImage ($(du -h $OUT/Backbreaker-Installer-x86_64.AppImage | cut -f1)), unpacked $(du -sh "$APPDIR" | cut -f1)"
+say "done: $OUT/Backbreaker-Recompiled-x86_64.AppImage ($(du -h $OUT/Backbreaker-Recompiled-x86_64.AppImage | cut -f1)), unpacked $(du -sh "$APPDIR" | cut -f1)"
 say "  toolchain $(du -sh "$T" | cut -f1), sysroot $(du -sh "$S" | cut -f1), kit $(du -sh "$B/kit" | cut -f1)"

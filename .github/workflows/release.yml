@@ -35,7 +35,7 @@ jobs:
     permissions:
       contents: write # the draft release, made only for a tag or a run by hand
     env:
-      APPIMAGE: build-installer/Backbreaker-Installer-x86_64.AppImage
+      APPIMAGE: build-installer/Backbreaker-Recompiled-x86_64.AppImage
       MANIFEST: build-installer/MANIFEST.txt
       NOTICES: build-installer/NOTICES.txt
       SOURCES: build-installer/third-party-sources.tar.xz

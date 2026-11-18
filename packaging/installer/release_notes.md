@@ -2,15 +2,15 @@ Backbreaker's installer: it builds the game on your machine from your own disc i
 
 **Needs:** Linux on an x86-64 CPU with AVX2 (2013 or newer), a Vulkan 1.3 driver (Mesa or NVIDIA) and glibc 2.35 or newer: the Steam Deck and any current distribution.
 
-**With RecompLauncher:** add this repository's link in RecompLauncher. It downloads `Backbreaker-Installer-x86_64.AppImage`, asks for your disc image, builds the game and adds it to Steam.
+**With RecompLauncher:** add this repository's link in RecompLauncher. It downloads `Backbreaker-Recompiled-x86_64.AppImage`, asks for your disc image, builds the game and adds it to Steam.
 
 **From a terminal:**
 ```
-chmod +x Backbreaker-Installer-x86_64.AppImage
-./Backbreaker-Installer-x86_64.AppImage install <your disc image>
+chmod +x Backbreaker-Recompiled-x86_64.AppImage
+./Backbreaker-Recompiled-x86_64.AppImage install <your disc image>
 ```
 That takes about 4 minutes on a Steam Deck. The game is then in the applications menu, and in Steam's library if Steam was closed (otherwise `add-to-steam` adds it later). On a Steam Deck, do this in Desktop Mode.
 
-**Updating from an earlier release:** replace the AppImage and run `./Backbreaker-Installer-x86_64.AppImage play` once. It rebuilds only what changed.
+**Updating from an earlier release:** replace the AppImage and run `./Backbreaker-Recompiled-x86_64.AppImage play` once. It rebuilds only what changed.
 
 Built from @COMMIT@. Backbreaker's code is under the GNU GPL, version 3 or later; the game itself belongs to its owners. `MANIFEST.txt` lists every package and version inside; `NOTICES.txt` has their licences and where their source is; `third-party-sources.tar.xz` holds the source of the GPL and LGPL parts no distribution keeps. More in [docs/runtime.md, "Installer tools"](https://github.com/@REPO@/blob/@COMMIT@/docs/runtime.md#installer-tools).

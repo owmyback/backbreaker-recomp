@@ -3,7 +3,7 @@
 # loader and Mesa, to check it starts and renders there. Needs podman; game content stays local.
 #
 #   packaging/portable/test_distros.sh [dist/Backbreaker-x86_64.AppImage] [distro ...]
-#   packaging/portable/test_distros.sh --installer <Backbreaker-Installer-x86_64.AppImage> --image <your disc image> [distro ...]
+#   packaging/portable/test_distros.sh --installer <Backbreaker-Recompiled-x86_64.AppImage> --image <your disc image> [distro ...]
 #
 # With --installer (#138), each distribution installs the game from the image with the installer
 # (packaging/installer/build_installer.sh) - its bundled clang, no compiler in the container - and then

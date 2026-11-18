@@ -43,7 +43,7 @@ comment() { sed -n '1,/\*\//p' "$1"; } # a source file's licence comment
     cat <<EOF
 Backbreaker installer: third-party notices
 
-Backbreaker-Installer-x86_64.AppImage builds the game from the player's own disc image. It holds
+Backbreaker-Recompiled-x86_64.AppImage builds the game from the player's own disc image. It holds
 no game content: its programs, the runtime kit the game links against, and the open-source
 toolchain and libraries below. Paths are inside the AppImage, under usr/lib/backbreaker-installer/
 unless they say otherwise; MANIFEST.txt beside this file lists every package and version.

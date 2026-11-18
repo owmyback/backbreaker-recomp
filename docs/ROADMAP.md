@@ -842,8 +842,10 @@ The parts, in order:
    `ui/app.js`, `devAllowed`); Settings, Bring Your Games, "Add Without Updates" adds a folder the
    same way (`devtools.rs`, `add_folder`) for anyone. Tried that way by the maintainer on the Steam
    Deck (RecompLauncher 0.90.0-beta.64), with no release yet:
-   - The folder's name needs the word "Installer": the launcher's folder scan skips programs named
-     like installers otherwise ("There's no program in that folder.").
+   - The AppImage, then `Backbreaker-Installer-x86_64.AppImage`, needed a folder named with
+     "Installer": the launcher's folder scan skips programs named like installers otherwise ("There's
+     no program in that folder."). It's `Backbreaker-Recompiled-x86_64.AppImage` now, a name the
+     launcher's installer and tool checks leave alone.
    - The first AppImage, built on the maintainer's Fedora PC, kept its files' SELinux labels, and the
      launcher's reader can't read the symlinks that makes, so it ignored the manifest: the game took
      the folder's name, had no settings page, and Play started the AppImage with no command. Built
