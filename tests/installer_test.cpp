@@ -7,7 +7,9 @@
 //       installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp -o build/installer_test
 #include "../installer/crypto.h"
 #include "../installer/disc.h"
+#include "../installer/build.h"
 #include "../installer/game_check.h"
+#include "../installer/menu_entry.h"
 #include "../installer/xex.h"
 
 #include <algorithm>
@@ -360,6 +362,37 @@ int main()
         expect(r.status == CheckStatus::Damaged && r.message.find("cut short") != std::string::npos,
                "a cut-short image: " + r.message);
         expect(kKnownReleaseCount >= 1 && std::strlen(kKnownReleases[0].xexSha256) == 64, "a known release is listed");
+    }
+
+    // --- The applications-menu entry (Desktop Entry Specification 1.5, "The Exec key") ----------
+    {
+        expect(desktopExecArg("/home/deck/.local/share/backbreaker-recomp/install/bin/backbreaker") ==
+                   "/home/deck/.local/share/backbreaker-recomp/install/bin/backbreaker",
+               "a plain path is written as it is");
+        expect(desktopExecArg("/home/a b/bin/backbreaker") == "\"/home/a b/bin/backbreaker\"", "a space: quoted");
+        expect(desktopExecArg("/home/it's/(1)/bin/backbreaker") == "\"/home/it's/(1)/bin/backbreaker\"",
+               "' and (): quoted");
+        expect(desktopExecArg("/games/100%/bin/backbreaker") == "/games/100%%/bin/backbreaker", "% doubled");
+        expect(desktopExecArg("/home/a\"b/backbreaker").empty() && desktopExecArg("/home/$x/backbreaker").empty() &&
+                   desktopExecArg("/home/a\\b/backbreaker").empty() && desktopExecArg("/home/`x`/backbreaker").empty() &&
+                   desktopExecArg("/home/a\nb/backbreaker").empty() && desktopExecArg("").empty(),
+               "\", $, \\, `, a newline or nothing: not written");
+        const std::string e = menuEntry("/home/a b/bin/backbreaker", "/home/a b/game/icon.png");
+        expect(e.rfind("[Desktop Entry]\n", 0) == 0, "the entry starts with its group");
+        expect(e.find("\nExec=\"/home/a b/bin/backbreaker\"\n") != std::string::npos, "Exec quoted");
+        expect(e.find("\nTryExec=/home/a b/bin/backbreaker\n") != std::string::npos, "TryExec as it is (a string)");
+        expect(e.find("\nIcon=/home/a b/game/icon.png\n") != std::string::npos, "the icon's path");
+        expect(e.find("\nStartupWMClass=backbreaker-recomp\n") != std::string::npos &&
+                   std::string(kAppId) == "backbreaker-recomp",
+               "the window's app id (runtime/video/presenter.cpp)");
+        expect(menuEntry("/home/$x/bin/backbreaker", "/home/$x/game/icon.png").empty(), "no entry for a path it can't write");
+        setenv("XDG_DATA_HOME", "/xdg/data", 1);
+        expect(menuEntryPath() == "/xdg/data/applications/backbreaker-recomp.desktop", "the entry's path ($XDG_DATA_HOME)");
+        setenv("XDG_DATA_HOME", "relative", 1);
+        setenv("HOME", "/home/deck", 1);
+        expect(menuEntryPath() == "/home/deck/.local/share/applications/backbreaker-recomp.desktop" &&
+                   defaultPrefix() == "/home/deck/.local/share/backbreaker-recomp/install",
+               "a relative $XDG_DATA_HOME is ignored, as the game ignores it");
     }
 
     std::filesystem::remove_all(dir);

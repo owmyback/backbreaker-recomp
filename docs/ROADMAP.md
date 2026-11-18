@@ -18,7 +18,8 @@ and the runtime builds as a library without game files, the "runtime kit" a play
 the game against; the extraction tools and the image check in C++; the installer builds the game
 from the player's image with its own clang and sysroot, in each distribution's container; the
 manifest that lets RecompLauncher set the game up and start it; on a Steam Deck the install takes
-about 4 minutes, and the game and the installer now start with no options, for a Steam shortcut). Before that,
+about 4 minutes, and the game and the installer now start with no options, for a Steam shortcut; the
+game's window has the title's icon, and a terminal install adds a menu entry with it). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -838,7 +839,10 @@ The parts, in order:
    path (`<prefix>/bin/backbreaker` beside a finished `<prefix>/game`), and the installer with no
    command plays once the game is installed, so either works as a shortcut with no launch options;
    the installer's messages name the AppImage's own path instead of a `backbreaker-installer` command
-   that isn't on the PATH. Publishing waits for the licence decision and for
+   that isn't on the PATH. The game's window has the title's own icon, made from the player's
+   executable (`game/icon.png`), and a terminal `install` adds an applications-menu entry with it,
+   which Steam's "Add a Non-Steam Game" lists (the maintainer saw no icon in the taskbar or in Steam).
+   Publishing waits for the licence decision and for
    the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
    from the sysroot, XenonRecomp with binutils' PowerPC disassembler, the AppImage runtime's libfuse).
 

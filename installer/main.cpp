@@ -7,6 +7,7 @@
 #include "crypto.h"
 #include "disc.h"
 #include "game_check.h"
+#include "menu_entry.h"
 #include "xex.h"
 
 #include <cctype>
@@ -73,6 +74,7 @@ namespace
         "         --jobs <n>       parallel compiles (default: by CPU threads and free memory)\n"
         "         --progress       'progress <0-1> <step>' lines for a launcher\n"
         "         --bundle <dir>   the toolchain, runtime kit and XenonRecomp (default: beside this program)\n"
+        "         --no-menu-entry  install: no Backbreaker in the applications menu (--progress never adds one)\n"
         "exit codes: 0 done, 1 failed, 2 usage, 3 the image can't be opened, 4 not an Xbox 360 game disc,\n"
         "            5 another game, 6 damaged image or unknown release, 7 not installed, 8 the build failed\n";
 
@@ -117,6 +119,50 @@ namespace
             return false;
         }
         return true;
+    }
+
+    // writeFile to <path>.tmp, then renamed: a desktop or the game never reads half a file
+    bool replaceFile(const std::string& path, const void* data, size_t size, std::string& error)
+    {
+        const std::string tmp = path + ".tmp";
+        std::error_code ec;
+        if (!writeFile(tmp, data, size, error)) return false;
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            std::filesystem::remove(tmp, ec);
+            error = "can't write " + path;
+            return false;
+        }
+        return true;
+    }
+
+    // <game dir>/icon.png, the title's own icon from the player's executable, for the game's window
+    // (runtime/video/presenter.cpp) and the menu entry. Made once; nothing when the title has none.
+    void ensureIcon(const std::string& gameDir)
+    {
+        const std::string icon = gameDir + "/icon.png";
+        std::error_code ec;
+        if (std::filesystem::exists(icon, ec)) return;
+        std::vector<uint8_t> pe;
+        std::string error;
+        if (!readFile(gameDir + "/extracted/default.pe", pe, error)) return;
+        const std::vector<uint8_t> png = titleIcon(pe);
+        if (!png.empty()) replaceFile(icon, png.data(), png.size(), error);
+    }
+
+    // install from a terminal: Backbreaker in the applications menu, with the title's icon
+    // (installer/menu_entry.h). Not with --progress: a launcher has its own entry for the game.
+    void addMenuEntry(const std::string& prefix)
+    {
+        const std::string text = menuEntry(prefix + "/bin/backbreaker", prefix + "/game/icon.png");
+        const std::string path = menuEntryPath();
+        std::string error;
+        if (text.empty())
+            std::printf("[installer] no applications-menu entry: the folder's path has a \", `, $ or \\ in it\n");
+        else if (!replaceFile(path, text.data(), text.size(), error))
+            std::printf("[installer] no applications-menu entry: %s\n", error.c_str());
+        else
+            std::printf("[installer] added Backbreaker to your applications menu (%s)\n", path.c_str());
     }
 
     int exitFor(CheckStatus s)
@@ -265,6 +311,7 @@ namespace
         const std::string complete = gameDir + "/.complete";
         std::vector<uint8_t> have;
         if (readFile(complete, have, error) && std::string(have.begin(), have.end()) == r.xexSha256 + "\n") {
+            ensureIcon(gameDir); // an install from before the icon
             progress(to, "the game's files are already there");
             return kOk;
         }
@@ -295,6 +342,7 @@ namespace
             return fail(kFailed, error);
         const std::string stamp = r.xexSha256 + "\n";
         if (!writeFile(complete, stamp.data(), stamp.size(), error)) return fail(kFailed, error);
+        ensureIcon(gameDir);
         progress(to, "the game's files are ready");
         return kOk;
     }
@@ -315,6 +363,7 @@ namespace
         std::string image, prefix, bundle;
         unsigned jobs = 0;
         bool progress = false;
+        bool menuEntry = true; // install: --no-menu-entry
         std::vector<std::string> gameArgs; // after --
     };
 
@@ -327,6 +376,7 @@ namespace
                 break;
             }
             if (s == "--progress") o.progress = true;
+            else if (s == "--no-menu-entry" && wantImage) o.menuEntry = false;
             else if ((s == "--prefix" || s == "--bundle" || s == "--jobs") && i + 1 < a.size()) {
                 const std::string& v = a[++i];
                 if (s == "--prefix") o.prefix = v;
@@ -375,6 +425,7 @@ namespace
         if (int rc = build(o, {}, progress, 0.12)) return rc;
         if (!o.progress) {
             std::printf("[installer] installed in %s\n", o.prefix.c_str());
+            if (o.menuEntry) addMenuEntry(o.prefix);
             std::printf("[installer] start it with: %s play%s\n", selfCommand().c_str(),
                         o.prefix == defaultPrefix() ? "" : (" --prefix " + o.prefix).c_str());
             // The game finds its files from its own path (runtime/paths.cpp), so it needs no options
@@ -413,6 +464,7 @@ namespace
             };
             if (int rc = build(o, {}, quiet, 0.0)) return rc;
         }
+        ensureIcon(o.prefix + "/game"); // an install from before the icon
         const std::string game = o.prefix + "/bin/backbreaker";
         std::vector<std::string> args{game, "--data-dir", o.prefix + "/game"};
         // RecompLauncher's Big Picture mode is played from a couch or a Steam Deck: full screen

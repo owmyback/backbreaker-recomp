@@ -404,12 +404,17 @@ namespace installer
         return true;
     }
 
+    std::string dataHome()
+    {
+        // Relative values are ignored, as the game does (runtime/paths.cpp), so both agree
+        if (const char* data = std::getenv("XDG_DATA_HOME"); data && data[0] == '/') return data;
+        const char* home = std::getenv("HOME");
+        return std::string(home && *home ? home : ".") + "/.local/share";
+    }
+
     std::string defaultPrefix()
     {
-        const char* data = std::getenv("XDG_DATA_HOME");
-        const char* home = std::getenv("HOME");
-        std::string base = data && *data ? data : std::string(home ? home : ".") + "/.local/share";
-        return base + "/backbreaker-recomp/install";
+        return dataHome() + "/backbreaker-recomp/install";
     }
 
     unsigned chooseJobs(std::string& why)

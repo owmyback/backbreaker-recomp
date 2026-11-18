@@ -36,6 +36,8 @@ game_data() { # $1 = the game/ directory to fill
     mkdir -p "$1/extracted"
     link_tree game/disc "$1/disc"
     for f in default.pe default.xex; do link_tree "game/extracted/$f" "$1/extracted/$f"; done
+    # The title's icon for the game's window (runtime/video/presenter.cpp); none is fine
+    python3 -I tools/title_icon.py game/extracted/default.pe "$1/icon.png" >/dev/null 2>&1 || true
 }
 
 rm -rf "$OUT" "$APPDIR" "dist/$NAME.tar.gz" dist/Backbreaker-x86_64.AppImage
@@ -84,6 +86,7 @@ Exec=backbreaker
 Icon=backbreaker-recomp
 Categories=Game;SportsGame;
 Terminal=false
+StartupWMClass=backbreaker-recomp
 DESK
 if python3 -I tools/title_icon.py game/extracted/default.pe "$APPDIR/backbreaker-recomp.png" >/dev/null; then
     say "icon: the title's own image"

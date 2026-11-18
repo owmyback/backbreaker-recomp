@@ -142,11 +142,12 @@ jobs:
       - name: Run settings file test
         run: ./build/settings_test
 
-      - name: Build installer test (#138, synthetic images and test vectors)
+      - name: Build installer test (#138, synthetic images, test vectors and the menu entry)
         # -I XenonUtils: the kernel's export tables come from the XenonRecomp clone above
         run: |
           clang++ -std=c++20 -Wall -Wextra -O2 -I third_party/XenonRecomp/XenonUtils tests/installer_test.cpp \
-            installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp -o build/installer_test
+            installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp \
+            installer/menu_entry.cpp installer/build.cpp -o build/installer_test
 
       - name: Run installer test
         run: ./build/installer_test

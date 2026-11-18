@@ -27,7 +27,8 @@ namespace installer
     // `dir` when given, else <this program's folder>/../lib/backbreaker-installer
     bool findBundle(const std::string& dir, Bundle& bundle, std::string& error);
 
-    std::string defaultPrefix(); // $XDG_DATA_HOME/backbreaker-recomp/install
+    std::string dataHome();      // $XDG_DATA_HOME when absolute (as the specification says), else ~/.local/share
+    std::string defaultPrefix(); // <dataHome()>/backbreaker-recomp/install
     // Parallel compiles that fit: the cores, and free memory at 1 GiB a job (the biggest ppc/ file
     // peaks at about 720 MB without debug info). `why` says which limit applied.
     unsigned chooseJobs(std::string& why);

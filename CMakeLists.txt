@@ -207,8 +207,9 @@ install(SCRIPT cmake/kit_version.cmake COMPONENT runtime)
 # The installer's game-file steps (#138, installer/): checks the player's image and does what
 # tools/xdvdfs.py, xex_decrypt.py, gen_imports.py and title_icon.py do, without Python or OpenSSL.
 # Builds without game files, SDL3 or Vulkan; the kernel's export tables come from XenonUtils/xbox/.
-set(INSTALLER_SOURCES installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp)
-add_executable(backbreaker-installer installer/main.cpp installer/build.cpp ${INSTALLER_SOURCES})
+set(INSTALLER_SOURCES installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp
+    installer/menu_entry.cpp installer/build.cpp)
+add_executable(backbreaker-installer installer/main.cpp ${INSTALLER_SOURCES})
 target_include_directories(backbreaker-installer PRIVATE ${XENON}/XenonUtils)
 target_compile_options(backbreaker-installer PRIVATE -Wall -Wextra)
 if (BB_PORTABLE) # the installer's own build (packaging/installer/build_installer.sh): only glibc from the host

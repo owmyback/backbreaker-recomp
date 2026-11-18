@@ -77,6 +77,14 @@ The program inside is `backbreaker-installer`, but nothing puts it on the PATH: 
 AppImage, and its messages name the AppImage's own path (`$APPIMAGE`). With no command it plays,
 once the game is installed in the default folder, and prints its help otherwise.
 
+`install` from a terminal also adds Backbreaker to the applications menu:
+`~/.local/share/applications/backbreaker-recomp.desktop` (`$XDG_DATA_HOME`, `installer/menu_entry.h`),
+which starts `<prefix>/bin/backbreaker` with the title's icon, `<prefix>/game/icon.png`. The icon is
+made from the player's own executable (the `icon` command's, `tools/title_icon.py`'s), by `install`
+or, for an older install, by `play`. `--no-menu-entry` leaves the entry out, and `--progress` (a
+launcher's install) never adds one, since the launcher has its own entry for the game. `TryExec` hides
+the entry once the game's folder is gone; deleting the `.desktop` file removes it.
+
 `install` checks the image (below), copies the game's files, runs XenonRecomp, compiles `ppc/` and
 links the game, into `~/.local/share/backbreaker-recomp/install` by default (`$XDG_DATA_HOME`; the
 player's saves and settings stay where the installed layout puts them, "Where files live"). That
@@ -93,9 +101,10 @@ file takes 11 s instead of 13 s. The optimisation level stays the kit's `-O2`: `
 started on the same folder while one is working
 stops with a message (`<prefix>/.lock`).
 
-**From Steam**: add `<prefix>/bin/backbreaker` (by default
-`~/.local/share/backbreaker-recomp/install/bin/backbreaker`) or the AppImage as a non-Steam game,
-with no launch options. The game finds its files from its own path, `<prefix>/game` beside its
+**From Steam**: in "Add a Non-Steam Game", pick Backbreaker from the list (the menu entry, with its
+icon), or browse to `<prefix>/bin/backbreaker` (by default
+`~/.local/share/backbreaker-recomp/install/bin/backbreaker`) or the AppImage, with no launch options;
+a shortcut made by browsing has no icon until one is picked in its properties (`<prefix>/game/icon.png`). The game finds its files from its own path, `<prefix>/game` beside its
 `bin/` once `game/.complete` is there ("Where files live"), so the folder Steam starts it in doesn't
 matter. The AppImage also relinks after a runtime update; `bin/backbreaker` keeps the runtime it was
 linked with until `play` runs. Neither has been tried in Steam yet; on the Steam Deck, before this, a
@@ -173,7 +182,13 @@ RecompLauncher shows as a progress bar. `scripts/setup.sh` still uses the Python
   the AppImage's `game/`), when a launcher passes `--data-dir <dir>` (a directory with `disc/` and
   `extracted/`), or when the program is the installer's `<prefix>/bin/backbreaker` and
   `<prefix>/game/.complete` exists (#138: found from `/proc/self/exe`, so a shortcut needs no options;
-  a checkout's `build/backbreaker` never matches). The game's files may then be read-only. The player's go to the per-user folders:
+  a checkout's `build/backbreaker` never matches). The game's files may then be read-only.
+
+The window's icon is `icon.png` in the game's files, when it's there: the title's own image, which the
+installer, `scripts/setup.sh` (`game/icon.png`) and `scripts/package_portable.sh` make from the
+player's executable. X11 and KDE Plasma (Wayland's `xdg_toplevel_icon_v1`) show it; GNOME shows the
+menu entry's icon, found by the window's app id, `backbreaker-recomp` (`SDL_SetAppMetadata`), the name
+of the installer's and the portable AppImage's `.desktop` files. The log says `[video] window icon`. The player's go to the per-user folders:
   `~/.config/backbreaker-recomp/settings.ini` and `~/.local/share/backbreaker-recomp/` (`saves/`,
   `cache/`, `achievements/`, `sounds/`, `mods/`, `screenshots/`, `captures/`, `logs/`), following
   `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME`. The log's `[paths]` line names all three.

@@ -118,6 +118,31 @@ namespace video
             settings::save(g_settings, paths::settingsFile());
         }
 
+        // The title's own icon, from the player's disc: <game files>/icon.png, which the installer
+        // and scripts/setup.sh write (#138); nothing is shipped. X11 and KDE Plasma's Wayland
+        // (xdg_toplevel_icon_v1) show it in the taskbar; GNOME takes the menu entry's icon, found by
+        // the app id set before SDL_Init. No file: the desktop's default icon, as before.
+        void setWindowIcon()
+        {
+#if SDL_VERSION_ATLEAST(3, 4, 0)
+            const std::string path = paths::data() + "/icon.png";
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec))
+                return;
+            SDL_Surface* icon = SDL_LoadPNG(path.c_str());
+            if (!icon)
+            {
+                warn("[video] window icon: can't read %s (%s)", path.c_str(), SDL_GetError());
+                return;
+            }
+            if (SDL_SetWindowIcon(vk.window, icon))
+                info("[video] window icon %s (%dx%d)", path.c_str(), icon->w, icon->h);
+            else
+                info("[video] no window icon here: %s", SDL_GetError());
+            SDL_DestroySurface(icon);
+#endif
+        }
+
         void setFullscreen(bool on)
         {
             if (on == g_fullscreen)
@@ -577,6 +602,9 @@ namespace video
     {
         debug::threadtimes::registerRole("window", nullptr); // the process's main thread: its name stays
         SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1"); // SIGINT/SIGTERM end the run (main.cpp)
+        // The window's app id (Wayland) and class (X11): the name of the menu entry, the installer's
+        // (installer/menu_entry.h) and the portable AppImage's, so a desktop puts them together
+        SDL_SetAppMetadata("Backbreaker", build_id::revision(), "backbreaker-recomp");
         if (!SDL_Init(SDL_INIT_VIDEO))
             fatal("[video] SDL_Init: %s (use --headless to run without a window)", SDL_GetError());
         g_settings = settings::load(paths::settingsFile());
@@ -587,6 +615,7 @@ namespace video
                                      SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
         if (!vk.window)
             fatal("[video] SDL_CreateWindow: %s (use --headless to run without a window)", SDL_GetError());
+        setWindowIcon();
         if (g_settings.hasPosition)
             SDL_SetWindowPosition(vk.window, g_settings.x, g_settings.y);
         if (startFullscreen || g_settings.fullscreen)

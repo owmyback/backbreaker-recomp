@@ -218,6 +218,20 @@ step_pe() {
     run_quiet python3 -I tools/xex_decrypt.py game/extracted/default.xex game/extracted/default.pe
 }
 
+step_icon() {
+    # The title's own icon, for the game's window (runtime/video/presenter.cpp, #138). Not every
+    # executable has one, and the game runs without it.
+    if [ $force -eq 0 ] && [ -s game/icon.png ] && [ game/icon.png -nt game/extracted/default.pe ]; then
+        done_step "game/icon.png (the title's icon)"
+        return
+    fi
+    if python3 -I tools/title_icon.py game/extracted/default.pe game/icon.png >/dev/null 2>&1; then
+        say "game/icon.png: the title's icon, for the game's window"
+    else
+        say "the executable has no title icon: the game's window keeps the desktop's default icon"
+    fi
+}
+
 disc_extracted() {
     # tools/xdvdfs.py leaves no marker, so this step has its own stamp file; an extraction
     # done by hand as README.md describes it counts too (the disc holds 24 files, so a
@@ -495,6 +509,7 @@ fi
 
 step_xex
 step_pe
+step_icon
 step_disc
 step_xenonrecomp
 step_recompile
