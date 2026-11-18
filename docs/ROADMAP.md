@@ -10,7 +10,7 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-17 (phase 9: the Deck is CPU-bound in matches, and a geometry cache cuts the command processor's work by
+Last updated: 2026-11-18 (phase 9: the Deck is CPU-bound in matches, and a geometry cache cuts the command processor's work by
 a quarter on the PC, #146, and thread timing reports the long frames that remain; phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
 achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
 a game-fps readout and a log file, #148; the installer, #138, started: RecompLauncher will be its front end,
@@ -22,7 +22,9 @@ about 4 minutes, and the game and the installer now start with no options, for a
 game's window has the title's icon, and a terminal install adds a menu entry with it; on the Deck
 Steam lists that entry with its icon and starts the game from it; a terminal install now adds the
 game to Steam itself while Steam is closed, and on the Deck that shortcut is in Gaming Mode's
-library with its icon and starts the game, #160). Before that,
+library with its icon and starts the game, #160; a workflow builds the installer AppImage into a
+draft GitHub release with its notices and third-party sources; the project's code is GPL-3.0-or-later).
+Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -92,7 +94,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck; Add to Steam, #160, tried on the Deck) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck; Add to Steam, #160, tried on the Deck; draft GitHub releases, #160) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -781,8 +783,9 @@ The plan:
 
 The binary and the AppImage contain the player's own recompiled game and disc files, so they are
 for moving your own build between your own machines and are never published. The repo and the
-container image hold no game content. The repo has no licence yet, which is the maintainer's
-decision before it goes public.
+container image hold no game content. The project's code is under the GNU GPL, version 3 or later
+(decided 2026-11-18; README, "Licence"), as Unleashed Recompiled, Zelda 64: Recompiled and
+RecompLauncher are; the licence covers that code only, never the game.
 
 **The installer (#138, started 2026-11-17):** for players who own the game. They choose their ISO, and
 the game code is translated and compiled on their machine against a prebuilt runtime; nothing made
@@ -867,11 +870,30 @@ The parts, in order:
      the file Steam wrote back on exit still held the entry as written, so nothing changed.
    - With Steam running, `add-to-steam` refused and wrote nothing.
 
-   Not tried: Flathub's Steam. Still to do: library artwork (decide), updates before releases
-   (decide), and the GitHub Releases workflow.
-   Publishing waits for the licence decision and for
-   the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
-   from the sysroot, XenonRecomp with binutils' PowerPC disassembler, the AppImage runtime's libfuse).
+   Not tried: Flathub's Steam.
+
+   Decided by the maintainer on 2026-11-18: library artwork stays empty (nothing from the game can
+   ship, and the title's 64x64 icon is too small for a cover), and there's no self-updating copy of
+   the installer before releases. A terminal player updates by replacing the AppImage and running
+   its `play` once; RecompLauncher downloads each release itself.
+
+   GitHub releases (#160): `.github/workflows/release.yml` builds the installer AppImage in the build
+   container for a `v*` tag or a run by hand, checks it, and attaches it, `MANIFEST.txt`,
+   `NOTICES.txt` and `third-party-sources.tar.xz` to a draft release (docs/runtime.md, "Releases").
+   `NOTICES.txt` (`packaging/installer/notices.sh`) has every third-party part's licence and where
+   its source is.
+   The run stops when what `ppc/` is built from changed since the last published release but
+   `recomplauncher.json`'s `prepare.version` didn't, since RecompLauncher would otherwise recompile
+   inside its start step. For that, the installer now keys XenonRecomp by its source (commit and
+   patch) rather than the program's bytes, which a newer container's clang changes: an install made
+   by an earlier AppImage recompiles `ppc/` once on its next `play`.
+   Decided by the maintainer on 2026-11-18: the licence is GPL-3.0-or-later (#134), and each release
+   carries the source of the GPL and LGPL parts that no distribution keeps,
+   `third-party-sources.tar.xz` (`packaging/installer/sources.sh`): XenonRecomp with binutils'
+   PowerPC disassembler and libmspack, and our patch; the FFmpeg fork; the AppImage runtime's
+   libfuse and its patch. glibc's and GCC's source (the sysroot, libstdc++) is Ubuntu's on
+   Launchpad, linked from `NOTICES.txt`; the Linux headers are source already. A release can be
+   published once the maintainer has looked a draft over.
 
 Also still open: an install prefix.
 

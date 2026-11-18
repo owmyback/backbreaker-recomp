@@ -11,6 +11,10 @@ current status are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - **Never say where to get the game.** To run anything you need an ISO image made from your own
   retail disc. Do not link to, name or hint at download sources in code, docs, issues or PRs.
 - Many tasks need no game files at all (look for the `no game files needed` label).
+- **Contributions come in under the project's licence,** the GNU GPL, version 3 or later
+  ([`LICENSE`](LICENSE)): opening a pull request means you agree to license your change that way.
+  Code from elsewhere needs a licence the GPL-3.0 accepts (BSD, MIT, Apache-2.0, LGPL), and keeps
+  its notice, as the Xenia-derived code does.
 
 ## Setting up
 

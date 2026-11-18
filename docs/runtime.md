@@ -120,7 +120,8 @@ entry, with its icon, and it started the game. Details:
   tried with Flathub's Steam yet: only the files it writes, under a temporary HOME.
 - **Leaving it out:** `--no-steam` leaves the shortcut out, and `--progress` never adds one, since
   RecompLauncher has its own Add to Steam and the game would be there twice. Removing the game in
-  Steam removes the shortcut. Library artwork (cover, banner, logo) stays empty for now (#160).
+  Steam removes the shortcut. Library artwork (cover, banner, logo) is left empty (decided
+  2026-11-18, #160): nothing from the game can ship, and the title's icon is too small for a cover.
 
 `install` checks the image (below), copies the game's files, runs XenonRecomp, compiles `ppc/` and
 links the game, into `~/.local/share/backbreaker-recomp/install` by default (`$XDG_DATA_HOME`; the
@@ -129,8 +130,11 @@ folder has the checkout's layout, which XenonRecomp's config expects: `config/`,
 `game/extracted`, `ppc/` (only its headers once compiled: XenonRecomp makes the sources again in
 seconds), `obj/` and `bin/backbreaker`. `play` builds whatever changed and starts the game with
 `--data-dir <prefix>/game`: a new runtime kit relinks in about a second, and `ppc/` is compiled again
-only when XenonRecomp, the config, the kit's compile arguments or the executable changed
-(`obj/build.stamp`). Parallel compiles: the CPU threads, or fewer when free memory is short (1 GB a
+only when XenonRecomp's source, the config, the kit's compile arguments or the executable changed
+(`obj/build.stamp`). XenonRecomp counts by `xenonrecomp/SOURCE`, its commit and the patch's SHA-256,
+not by the program's bytes: a newer build container's clang makes a different program from the same
+source, and it translates the same way. `ppc-inputs` prints the bundle's part of that as one hash
+(Releases, below). Parallel compiles: the CPU threads, or fewer when free memory is short (1 GB a
 job; the biggest file peaks at about 720 MB). `ppc/` is compiled with the kit's arguments plus
 `-g0`: crash backtraces use the exported symbol names, not debug info, and without it the biggest
 file takes 11 s instead of 13 s. The optimisation level stays the kit's `-O2`: `-O1` compiles `ppc/` with
@@ -155,7 +159,11 @@ Everything it builds with comes from its bundle, `build-installer/AppDir/usr/lib
 `packaging/installer/build_installer.sh`: the runtime kit (`BB_PORTABLE`), XenonRecomp with
 `patches/`, `config/`, clang and lld 23 with the libraries they load, and a sysroot of Ubuntu 22.04's
 glibc, libstdc++ and Vulkan loader packages, so the game it builds needs glibc 2.35, as the portable
-build does. `MANIFEST.txt` lists every package and version in it. The bundle is about 420 MB, and the
+build does. `MANIFEST.txt` lists every package and version in it, and `NOTICES.txt`
+(`packaging/installer/notices.sh`) every third-party part's licence and source: the Debian copyright
+files of the Ubuntu and apt.llvm.org packages, the licences of what the container builds from source
+(`/usr/local/share/licenses`), XenonRecomp's and FFmpeg's from their checkouts, and the AppImage
+runtime's from `packaging/installer/licenses/`. The bundle is about 420 MB, and the
 AppImage, `build-installer/Backbreaker-Installer-x86_64.AppImage`, about 110 MB; it holds no game
 content. `packaging/portable/test_distros.sh --installer <AppImage> --image <your image>` installs and
 runs the game with it in each distribution's container, none of which has a compiler.
@@ -178,6 +186,29 @@ tells it how, and `build_installer.sh` puts it at the AppImage's root, where the
 - `saves`, `folders` and `actions`: saves, achievements and settings for its backups; Open Mods
   Folder and Open Screenshots; the log folder for crash reports. `exit_codes` explain `play`'s 7 and 8.
 
+**Releases** (`.github/workflows/release.yml`, #160): a `v*` tag pushed, or the workflow run by hand
+(Actions, Release, Run workflow, with the tag to make), builds the AppImage in the build container
+(cached between runs) and attaches it, `MANIFEST.txt`, `NOTICES.txt` and `third-party-sources.tar.xz`
+to a **draft** release, with `packaging/installer/release_notes.md` as its text. The maintainer
+looks the draft over and publishes it on GitHub. Run again for the same tag, it replaces a draft's
+files; a published release is left alone. Before the draft:
+- **The AppImage is checked:** it starts (unpacked, since a runner has no FUSE), its manifest names
+  `Backbreaker-Installer-x86_64.AppImage`, the name RecompLauncher looks for, and it holds no disc
+  image, executable, translated code or title image.
+- **The sources archive** (`packaging/installer/sources.sh`): the source of the GPL and LGPL parts
+  that no distribution keeps, so it comes from the same place as the AppImage: XenonRecomp at its
+  pin with its submodules (binutils' disassembler, libmspack) and our patch, the FFmpeg fork at its
+  pin, and the libfuse release and patch the AppImage runtime is built with (checked against their
+  SHA-256). About 19 MB, and the same bytes from the same inputs. glibc's and GCC's come from
+  Ubuntu's source packages on Launchpad, which `NOTICES.txt` links at their versions.
+- **`prepare.version`:** RecompLauncher reruns `prepare` only when it changes, and its start step
+  runs `play`, which would recompile `ppc/` for minutes with nothing on screen. So when the
+  `ppc inputs` line of `MANIFEST.txt` differs from the last published release's and
+  `prepare.version` doesn't, the run stops and says to raise it in `recomplauncher.json`.
+
+A pull request that changes `packaging/`, the decoder's build or the workflow builds and checks the
+AppImage the same way, and uploads nothing.
+
 To try it before there is a release: put `Backbreaker-Installer-x86_64.AppImage` alone in a folder,
 then in RecompLauncher (0.90 beta 63 or newer) Settings, Bring Your Games, "Pick a Folder…", that
 folder, and "Add Without Updates" when it asks which game it is. It reads the manifest from the
@@ -193,6 +224,7 @@ The single steps are commands too:
     backbreaker-installer decrypt <default.xex> <default.pe>
     backbreaker-installer imports <default.xex> <default.pe> <imports.cpp>
     backbreaker-installer icon <default.pe> <icon.png>
+    backbreaker-installer ppc-inputs [--bundle <dir>]   the bundle's part of what ppc/ is built from (Releases)
 
 `list`, `extract`, `decrypt`, `imports` and `icon` write the same bytes as `tools/xdvdfs.py`,
 `xex_decrypt.py`, `gen_imports.py` and `title_icon.py` (AES-128 and SHA-256 are in

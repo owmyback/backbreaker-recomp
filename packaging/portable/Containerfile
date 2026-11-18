@@ -48,8 +48,14 @@ RUN git clone -q --depth 1 -b ${VULKAN_HEADERS_TAG} https://github.com/KhronosGr
 RUN git clone -q --depth 1 -b ${SDL3_TAG} https://github.com/libsdl-org/SDL /tmp/sdl \
     && cmake -S /tmp/sdl -B /tmp/sdl/b -G Ninja -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
         -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null \
-    && cmake --build /tmp/sdl/b >/dev/null && cmake --install /tmp/sdl/b >/dev/null && rm -rf /tmp/sdl
+    && cmake --build /tmp/sdl/b >/dev/null && cmake --install /tmp/sdl/b >/dev/null \
+    && echo "https://github.com/libsdl-org/SDL ${SDL3_TAG} ($(git -C /tmp/sdl rev-parse HEAD))" \
+        >/usr/local/share/licenses/SDL3/SOURCE \
+    && rm -rf /tmp/sdl
 
+# The installer's notices (packaging/installer/notices.sh) take every licence and source line from
+# /usr/local/share/licenses: libshaderc_combined.a holds shaderc, glslang and SPIRV-Tools, built
+# against SPIRV-Headers, each at the commit utils/git-sync-deps (DEPS) pins
 RUN git clone -q --depth 1 -b ${SHADERC_TAG} https://github.com/google/shaderc /tmp/shaderc \
     && cd /tmp/shaderc && python3 utils/git-sync-deps >/dev/null \
     && cmake -S . -B b -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON \
@@ -58,6 +64,15 @@ RUN git clone -q --depth 1 -b ${SHADERC_TAG} https://github.com/google/shaderc /
     && cmake --build b --target shaderc_combined >/dev/null \
     && install -D -m 644 b/libshaderc/libshaderc_combined.a /usr/local/lib/libshaderc_combined.a \
     && cp -r libshaderc/include/shaderc /usr/local/include/ \
+    && L=/usr/local/share/licenses \
+    && install -D -m 644 LICENSE $L/shaderc/LICENSE \
+    && echo "https://github.com/google/shaderc ${SHADERC_TAG} ($(git rev-parse HEAD))" >$L/shaderc/SOURCE \
+    && for d in glslang:glslang:LICENSE.txt spirv-tools:SPIRV-Tools:LICENSE spirv-headers:SPIRV-Headers:LICENSE; do \
+           src=${d%%:*}; rest=${d#*:}; name=${rest%%:*}; file=${rest#*:}; \
+           install -D -m 644 third_party/$src/$file $L/$name/$file \
+           && echo "$(git -C third_party/$src remote get-url origin) $(git -C third_party/$src rev-parse HEAD)," \
+                "as shaderc ${SHADERC_TAG} pins it" >$L/$name/SOURCE || exit 1; \
+       done \
     && cd / && rm -rf /tmp/shaderc
 
 RUN curl -sSL -o /usr/local/share/appimage-runtime-x86_64 \

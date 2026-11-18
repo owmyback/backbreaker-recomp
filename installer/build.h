@@ -23,9 +23,19 @@ namespace installer
     struct Bundle
     {
         std::string root, kit, xenonRecomp, ppcContext, config, cxx, sysroot, toolchainLib;
+        std::string xenonRecompSource; // xenonrecomp/SOURCE: the commit and patch it was built from
     };
     // `dir` when given, else <this program's folder>/../lib/backbreaker-installer
     bool findBundle(const std::string& dir, Bundle& bundle, std::string& error);
+
+    // A hash of what the bundle gives ppc/ (the game's code translated and compiled): XenonRecomp's
+    // source (xenonrecomp/SOURCE, or the program itself in a bundle without it) and ppc_context.h,
+    // the config, the kit's compile arguments and force-included header, and the installer's own
+    // flags. Not the XenonRecomp program's bytes: a new build container's clang makes a different
+    // file from the same source, and the translation is the same. A new bundle with the same hash
+    // only relinks; the release workflow compares it with the last release's (#160), since
+    // RecompLauncher reruns `install` only when prepare.version changes.
+    std::string bundlePpcInputs(const Bundle& bundle);
 
     std::string dataHome();      // $XDG_DATA_HOME when absolute (as the specification says), else ~/.local/share
     std::string defaultPrefix(); // <dataHome()>/backbreaker-recomp/install
@@ -43,8 +53,8 @@ namespace installer
 
     enum class BuildResult { UpToDate, Relinked, Rebuilt, Failed };
     // Makes <prefix>/bin/backbreaker current with the bundle, from <prefix>/game/extracted:
-    // ppc/ is recompiled only when its inputs changed (XenonRecomp, the config, the kit's compile
-    // arguments, the executable), and the game relinked only when the kit or ppc/ changed.
+    // ppc/ is recompiled only when its inputs changed (bundlePpcInputs and the executable), and the
+    // game relinked only when the kit or ppc/ changed.
     // Progress runs from `from` to `to`.
     BuildResult buildGame(const Bundle& bundle, const BuildOptions& options, const Progress& progress, double from,
                           double to, std::string& error);

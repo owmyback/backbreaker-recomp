@@ -568,6 +568,43 @@ int main()
         expect(steamRunning(proc), "a process named steam: running");
     }
 
+    // What a bundle gives ppc/ (#160): XenonRecomp's source, not its bytes, so a release built in a
+    // newer container doesn't make every player recompile; the config and kit still count
+    {
+        const std::string root = dir + "/bundle";
+        Bundle b;
+        b.root = root;
+        b.kit = root + "/kit";
+        b.xenonRecomp = root + "/xenonrecomp/XenonRecomp";
+        b.xenonRecompSource = root + "/xenonrecomp/SOURCE";
+        b.ppcContext = root + "/xenonrecomp/ppc_context.h";
+        b.config = root + "/config";
+        auto put = [](const std::string& path, const std::string& text) {
+            std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+            std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+        };
+        put(b.xenonRecomp, "a program");
+        put(b.ppcContext, "context");
+        put(b.config + "/backbreaker.toml", "config");
+        put(b.config + "/backbreaker_switch_tables.toml", "tables");
+        put(b.kit + "/share/backbreaker-runtime/ppc-compile.args", "-O2\n");
+        put(b.kit + "/include/ppc_hooks.h", "hooks");
+        const std::string byProgram = bundlePpcInputs(b);
+        put(b.xenonRecomp, "the same source, another compiler");
+        expect(bundlePpcInputs(b) != byProgram, "no SOURCE: the program's bytes count");
+        put(b.xenonRecompSource, "XenonRecomp ddd128b\npatch 1\n");
+        const std::string bySource = bundlePpcInputs(b);
+        put(b.xenonRecomp, "a third build");
+        expect(bundlePpcInputs(b) == bySource, "with SOURCE: a rebuilt program changes nothing");
+        put(b.xenonRecompSource, "XenonRecomp ddd128b\npatch 2\n");
+        expect(bundlePpcInputs(b) != bySource, "a new patch changes it");
+        put(b.xenonRecompSource, "XenonRecomp ddd128b\npatch 1\n");
+        put(b.config + "/backbreaker.toml", "config, changed");
+        expect(bundlePpcInputs(b) != bySource, "a new config changes it");
+        put(b.config + "/backbreaker.toml", "config");
+        expect(bundlePpcInputs(b) == bySource, "and back again");
+    }
+
     std::filesystem::remove_all(dir);
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

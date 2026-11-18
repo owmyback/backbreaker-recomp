@@ -4,10 +4,11 @@
 # hardware works in. Upstream FFmpeg has no such decoder; it comes from the fork Xenia uses
 # (xenia-canary's third_party/FFmpeg submodule, branch "xmaframes").
 #
-#   scripts/build_xma_decoder.sh [--force] [-j N] [--prefix DIR] [--build-dir DIR]
+#   scripts/build_xma_decoder.sh [--force] [-j N] [--prefix DIR] [--build-dir DIR] [--fetch]
 #
 # --prefix installs somewhere else (the portable build's container uses its own, #134);
-# --build-dir builds from a clean copy of the source there instead of in third_party/FFmpeg.
+# --build-dir builds from a clean copy of the source there instead of in third_party/FFmpeg;
+# --fetch only fetches the source (for the release's sources archive, packaging/installer/sources.sh).
 #
 # Fetches the fork at a pinned commit into third_party/FFmpeg (shallow, about 20 MB) and
 # installs a static, decoder-only libavcodec + libavutil into third_party/ffmpeg-xma/, which
@@ -26,6 +27,7 @@ STAMP=$PREFIX/.rev
 BUILD_DIR=
 
 force=0
+fetch=0
 jobs=$(nproc 2>/dev/null || echo 4)
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -34,7 +36,8 @@ while [ $# -gt 0 ]; do
         -j*) jobs=${1#-j} ;;
         --prefix) shift; PREFIX=$(mkdir -p "$1" && cd "$1" && pwd); STAMP=$PREFIX/.rev ;;
         --build-dir) shift; BUILD_DIR=$1 ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        --fetch) fetch=1 ;;
+        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -42,12 +45,18 @@ done
 
 say() { printf '[xma-decoder] %s\n' "$*"; }
 
-if [ $force -eq 0 ] && [ -f "$PREFIX/lib/libavcodec.a" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$FFMPEG_REV" ]; then
+# Its licence and source go with it, for the installer's notices (packaging/installer/notices.sh)
+LICENCES=$PREFIX/share/licenses/FFmpeg
+
+if [ $fetch -eq 0 ] && [ $force -eq 0 ] && [ -f "$PREFIX/lib/libavcodec.a" ] && [ -f "$LICENCES/SOURCE" ] &&
+    [ "$(cat "$STAMP" 2>/dev/null)" = "$FFMPEG_REV" ]; then
     say "already built at ${FFMPEG_REV:0:10} ($PREFIX)"
     exit 0
 fi
 
-for tool in git make clang pkg-config; do
+tools="git make clang pkg-config"
+[ $fetch -eq 1 ] && tools=git
+for tool in $tools; do
     command -v "$tool" >/dev/null 2>&1 || { echo "[xma-decoder] ERROR: $tool is not installed" >&2; exit 1; }
 done
 
@@ -60,6 +69,7 @@ if [ "$(git -C "$SRC" rev-parse -q --verify HEAD 2>/dev/null)" != "$FFMPEG_REV" 
     git -C "$SRC" fetch -q --depth 1 origin "$FFMPEG_REV"
     git -C "$SRC" checkout -q --detach FETCH_HEAD
 fi
+[ $fetch -eq 1 ] && exit 0
 
 # Assembly needs nasm; the C fallbacks are fine for a few dozen voices.
 asm=--disable-x86asm
@@ -85,5 +95,8 @@ grep -q "^CONFIG_XMAFRAMES_DECODER=yes" ffbuild/config.mak ||
 say "building with $jobs jobs"
 make -s -j"$jobs" >/dev/null
 make -s install >/dev/null
+mkdir -p "$LICENCES"
+cp LICENSE.md COPYING.LGPLv2.1 "$LICENCES/"
+echo "$FFMPEG_URL at $FFMPEG_REV (branch xmaframes)" >"$LICENCES/SOURCE"
 echo "$FFMPEG_REV" >"$STAMP"
 say "installed to $PREFIX ($(du -sh "$PREFIX/lib" | cut -f1) of static libraries)"

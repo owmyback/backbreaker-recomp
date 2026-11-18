@@ -78,6 +78,7 @@ namespace
         "  play [options] [-- <game options>]  build what changed (a new runtime relinks in seconds), start the game\n"
         "  rebuild [options]                 translate, compile and link again\n"
         "  add-to-steam [--prefix <dir>]     Backbreaker in Steam's library, with its icon (close Steam first)\n"
+        "  ppc-inputs [--bundle <dir>]       a hash of what this bundle translates and compiles the game with\n"
         "options: --prefix <dir>   where the game is installed (default: ~/.local/share/backbreaker-recomp/install)\n"
         "         --jobs <n>       parallel compiles (default: by CPU threads and free memory)\n"
         "         --progress       'progress <0-1> <step>' lines for a launcher\n"
@@ -552,6 +553,17 @@ namespace
         return addToSteam(o.prefix, true);
     }
 
+    // The release workflow's check (#160): what this bundle gives ppc/, which a release has to
+    // match the last one's in unless it bumps recomplauncher.json's prepare.version
+    int cmdPpcInputs(const Options& o)
+    {
+        Bundle bundle;
+        std::string error;
+        if (!findBundle(o.bundle, bundle, error)) return fail(kFailed, error);
+        std::printf("%s\n", bundlePpcInputs(bundle).c_str());
+        return kOk;
+    }
+
     // The launcher's start step: builds whatever a new bundle changed, then becomes the game
     int cmdPlay(const Options& o)
     {
@@ -615,6 +627,7 @@ int main(int argc, char** argv)
     if (c == "play" && parseOptions(a, false, o)) return cmdPlay(o);
     if (c == "rebuild" && parseOptions(a, false, o)) return cmdRebuild(o);
     if (c == "add-to-steam" && parseOptions(a, false, o) && o.gameArgs.empty()) return cmdAddToSteam(o);
+    if (c == "ppc-inputs" && parseOptions(a, false, o) && o.gameArgs.empty()) return cmdPpcInputs(o);
     printUsage(stderr);
     return kUsage;
 }

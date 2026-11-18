@@ -24,9 +24,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build shellcheck zlib1g-dev
 
-      - name: Lint the setup script
+      - name: Lint the shell scripts
         # Before the slow steps: a script mistake should not cost a XenonRecomp build.
-        run: shellcheck scripts/setup.sh
+        run: |
+          shellcheck scripts/setup.sh scripts/build_xma_decoder.sh packaging/installer/build_installer.sh \
+            packaging/installer/notices.sh packaging/installer/sources.sh
 
       - name: Build patched XenonRecomp
         run: |

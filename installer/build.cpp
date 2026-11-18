@@ -182,18 +182,10 @@ namespace installer
             fs::rename(path + ".tmp", path, ec);
         }
 
-        // ppc/ depends on: XenonRecomp and its header, the config, the executable, and how it is
-        // compiled (the kit's arguments and force-included header, and the installer's own flags)
+        // ppc/ depends on the bundle's part (bundlePpcInputs) and the player's executable
         std::string ppcInputs(const Bundle& b, const std::string& prefix)
         {
-            std::string all;
-            for (const std::string& f : {b.xenonRecomp, b.ppcContext, b.config + "/backbreaker.toml",
-                                         b.config + "/backbreaker_switch_tables.toml",
-                                         b.kit + "/share/backbreaker-runtime/ppc-compile.args",
-                                         b.kit + "/include/ppc_hooks.h", prefix + "/game/extracted/default.xex"})
-                all += fileHash(f) + "\n";
-            for (const std::string& f : kPpcExtraFlags) all += f + "\n";
-            return textHash(all);
+            return textHash(bundlePpcInputs(b) + "\n" + fileHash(prefix + "/game/extracted/default.xex") + "\n");
         }
 
         // The link depends on every file of the kit (by name, size and time: a new bundle has new
@@ -390,6 +382,7 @@ namespace installer
         b.kit = root + "/kit";
         b.xenonRecomp = root + "/xenonrecomp/XenonRecomp";
         b.ppcContext = root + "/xenonrecomp/ppc_context.h";
+        b.xenonRecompSource = root + "/xenonrecomp/SOURCE";
         b.config = root + "/config";
         b.cxx = root + "/toolchain/bin/clang++";
         b.sysroot = root + "/sysroot";
@@ -402,6 +395,20 @@ namespace installer
             }
         }
         return true;
+    }
+
+    std::string bundlePpcInputs(const Bundle& b)
+    {
+        std::error_code ec;
+        std::string all;
+        for (const std::string& f : {fs::exists(b.xenonRecompSource, ec) ? b.xenonRecompSource : b.xenonRecomp,
+                                     b.ppcContext, b.config + "/backbreaker.toml",
+                                     b.config + "/backbreaker_switch_tables.toml",
+                                     b.kit + "/share/backbreaker-runtime/ppc-compile.args",
+                                     b.kit + "/include/ppc_hooks.h"})
+            all += fileHash(f) + "\n";
+        for (const std::string& f : kPpcExtraFlags) all += f + "\n";
+        return textHash(all);
     }
 
     std::string dataHome()

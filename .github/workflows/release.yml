@@ -1,0 +1,167 @@
+# The installer AppImage (#160): built in the portable build container, then, for a version tag or
+# a run by hand, attached with MANIFEST.txt, NOTICES.txt and third-party-sources.tar.xz to a DRAFT
+# release. Nothing here publishes: the maintainer looks the draft over and publishes it on GitHub.
+# A pull request that changes how the AppImage is made builds it too, and uploads nothing.
+#
+# No game files: the AppImage holds the runtime kit, the toolchain and XenonRecomp, and the game is
+# built from the player's own disc on the player's machine.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag, made when the draft is published (v0.1.0, say)"
+        required: true
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - scripts/build_xma_decoder.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write # the draft release, made only for a tag or a run by hand
+    env:
+      APPIMAGE: build-installer/Backbreaker-Installer-x86_64.AppImage
+      MANIFEST: build-installer/MANIFEST.txt
+      NOTICES: build-installer/NOTICES.txt
+      SOURCES: build-installer/third-party-sources.tar.xz
+    steps:
+      # No credentials left in .git/config: the checkout is mounted into the build container
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Which release
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          case $GITHUB_EVENT_NAME in
+            workflow_dispatch) tag=$INPUT_TAG ;;
+            push) tag=$GITHUB_REF_NAME ;;
+            *) tag= ;;
+          esac
+          if [ -n "$tag" ] && ! [[ $tag =~ ^v[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::a release's tag is v and a version (v0.1.0, v1.2.0-beta.1), not '$tag'"
+            exit 1
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "container=backbreaker-portable:$(sha256sum packaging/portable/Containerfile | cut -c1-12)" >>"$GITHUB_OUTPUT"
+
+      - name: Patched XenonRecomp (scripts/setup.sh's pin)
+        run: |
+          rev=$(sed -n 's/^XENON_REV=\([0-9a-f]*\).*/\1/p' scripts/setup.sh)
+          [ -n "$rev" ]
+          git clone -q --recursive https://github.com/hedge-dev/XenonRecomp.git third_party/XenonRecomp
+          git -C third_party/XenonRecomp checkout -q "$rev"
+          git -C third_party/XenonRecomp submodule update -q --init --recursive
+          git -C third_party/XenonRecomp apply ../../patches/xenonrecomp-backbreaker-instructions.patch
+
+      - uses: docker/setup-buildx-action@v4
+
+      # About 20 minutes when packaging/portable/Containerfile changes; cached otherwise
+      - name: The build container
+        uses: docker/build-push-action@v7
+        with:
+          context: packaging/portable
+          file: packaging/portable/Containerfile
+          tags: ${{ steps.release.outputs.container }}
+          load: true
+          cache-from: type=gha,scope=portable
+          cache-to: type=gha,scope=portable,mode=max
+
+      - name: The XMA decoder, from an earlier run
+        uses: actions/cache@v5
+        with:
+          path: third_party/ffmpeg-xma-portable
+          key: xma-${{ steps.release.outputs.container }}-${{ hashFiles('scripts/build_xma_decoder.sh') }}
+
+      - name: The installer AppImage
+        env:
+          BB_CONTAINER_ENGINE: docker
+        run: packaging/installer/build_installer.sh
+
+      - name: Check it
+        run: |
+          # The AppImage itself, unpacked to a temporary folder: a runner has no FUSE
+          "$APPIMAGE" --appimage-extract-and-run --help | grep -q '^  add-to-steam '
+          [ "$("$APPIMAGE" --appimage-extract-and-run ppc-inputs)" = "$(sed -n 's/^ppc inputs //p' "$MANIFEST")" ]
+          # RecompLauncher finds the manifest at the AppImage's root and runs the file by this name
+          m=build-installer/AppDir/recomplauncher.json
+          [ "$(jq -r '.prepare.program[0]' $m)" = "$(basename "$APPIMAGE")" ]
+          [ "$(jq -r '.start.program[0]' $m)" = "$(basename "$APPIMAGE")" ]
+          for part in XenonRecomp 'FFmpeg (libavcodec' 'SDL 3' 'shaderc,' 'The AppImage runtime' 'Ubuntu 22.04'; do
+            grep -q "^$part" "$NOTICES" || { echo "::error::NOTICES.txt has no $part"; exit 1; }
+          done
+          # Nothing from a game: no disc image, executable, translated code or title image
+          found=$(find build-installer/AppDir \( -iname '*.iso' -o -iname '*.xex' -o -iname '*.pe' \
+            -o -name 'ppc_recomp*' -o -name 'ppc_func_mapping*' -o -name icon.png -o -path '*/game/*' \) -print)
+          if [ -n "$found" ]; then echo "::error::game files in the AppImage: $found"; exit 1; fi
+          ls -l "$APPIMAGE" "$MANIFEST" "$NOTICES"
+
+      # The GPL and LGPL parts' source that no distribution keeps, from the same place as the AppImage
+      - name: The sources archive
+        run: |
+          packaging/installer/sources.sh "$SOURCES"
+          for part in XenonRecomp/thirdparty/disasm/ppc-dis.c XenonRecomp/thirdparty/libmspack/ \
+            xenonrecomp-backbreaker-instructions.patch FFmpeg/libavcodec/wmaprodec.c \
+            libfuse/fuse-3.15.0.tar.xz libfuse/mount.c.diff README.txt; do
+            tar -tJf "$SOURCES" "sources/$part" >/dev/null || { echo "::error::no $part in the sources"; exit 1; }
+          done
+
+      # RecompLauncher reruns install (prepare) only when prepare.version changes; its start step
+      # runs play, which would otherwise recompile for minutes with no progress shown
+      - name: prepare.version against the last release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          inputs=$(sed -n 's/^ppc inputs //p' "$MANIFEST")
+          version=$(sed -n 's/^prepare.version //p' "$MANIFEST")
+          last=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // empty')
+          if [ -z "$last" ]; then echo "No release yet: nothing to compare."; exit 0; fi
+          gh release download "$last" --pattern MANIFEST.txt --output "$RUNNER_TEMP/last-MANIFEST.txt"
+          last_inputs=$(sed -n 's/^ppc inputs //p' "$RUNNER_TEMP/last-MANIFEST.txt")
+          last_version=$(sed -n 's/^prepare.version //p' "$RUNNER_TEMP/last-MANIFEST.txt")
+          echo "ppc inputs $inputs, prepare.version $version; $last: $last_inputs, $last_version"
+          if [ "$inputs" != "$last_inputs" ] && [ "$version" = "$last_version" ]; then
+            echo "::error::what the game's code is translated and compiled with changed since $last, but prepare.version is still $version: raise it in packaging/installer/recomplauncher.json"
+            exit 1
+          fi
+
+      - name: Draft release
+        if: steps.release.outputs.tag != ''
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sed -e "s|@COMMIT@|$GITHUB_SHA|g" -e "s|@REPO@|$GITHUB_REPOSITORY|g" \
+            packaging/installer/release_notes.md >"$RUNNER_TEMP/notes.md"
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "::error::$TAG is already published; a new build needs a new tag"
+              exit 1
+            fi
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "Backbreaker installer $TAG" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          gh release upload "$TAG" "$APPIMAGE" "$MANIFEST" "$NOTICES" "$SOURCES" --clobber
+          {
+            echo "Draft release **$TAG** made from \`$GITHUB_SHA\`, with the AppImage, MANIFEST.txt, NOTICES.txt and third-party-sources.tar.xz."
+            echo "Look it over and publish it on GitHub: publishing makes the tag, if the run was started by hand."
+          } >>"$GITHUB_STEP_SUMMARY"

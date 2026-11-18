@@ -258,3 +258,17 @@ To report a bug: open an issue here with what you expected, what you got, and th
 for anything that looks wrong on screen, also attach the F10 capture taken at that moment (its
 `summary.txt` and `draws.txt` are what make a rendering bug fixable). Both folders are gitignored:
 attach the files to the issue, never commit them.
+
+## Licence
+This project's code is free software: you can redistribute it and modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, version 3 or (at your
+option) any later version ([`LICENSE`](LICENSE)). It comes with no warranty. Files derived from
+Xenia keep its BSD 3-Clause licence ([`docs/licenses/xenia-LICENSE.txt`](docs/licenses/xenia-LICENSE.txt)).
+The installer's AppImage also holds open-source tools and libraries under their own licences:
+`NOTICES.txt`, attached to each release, lists them and where their source is. The source of the
+GPL and LGPL ones no distribution keeps (XenonRecomp, the FFmpeg fork, the AppImage runtime's
+libfuse) is attached too, as `third-party-sources.tar.xz`.
+
+The licence covers this project's own code, never the game. Backbreaker and everything on its disc
+belong to their owners. This project isn't affiliated with or endorsed by them, includes none of
+the game, and needs your own copy of it.
