@@ -17,7 +17,8 @@ a game-fps readout and a log file, #148; the installer, #138, started: RecompLau
 and the runtime builds as a library without game files, the "runtime kit" a player's machine links
 the game against; the extraction tools and the image check in C++; the installer builds the game
 from the player's image with its own clang and sysroot, in each distribution's container; the
-manifest that lets RecompLauncher set the game up and start it). Before that,
+manifest that lets RecompLauncher set the game up and start it; on a Steam Deck the install takes
+about 4 minutes, and the game and the installer now start with no options, for a Steam shortcut). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -87,7 +88,7 @@ timing hid (#129).
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done) | `100ec86` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck) | `100ec86` |
 | 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
@@ -820,14 +821,24 @@ The parts, in order:
    and spins (the headless Exhibition route with `BB_PERF=1`, runs alternating `-O2`, `-O1`, `-O2`,
    `-O1`; both pairs agree). The Deck is short of CPU in matches already (#146). To redo if
    XenonRecomp's register options are turned on in `config/backbreaker.toml` (written up on #146):
-   every `ppc/` file changes with them. Still open from part 6: the time on a Steam Deck.
+   every `ppc/` file changes with them.
+   On a Steam Deck (the maintainer, 2026-11-17, `install` in a terminal) the install took nearly 4
+   minutes and the game ran; on an HP EliteDesk 800 SFF, 2 minutes. A non-Steam game shortcut didn't
+   start it there: the installer with no command only printed its help, and `bin/backbreaker` without
+   `--data-dir` looked for `game/` in the folder Steam started it in. Both now start the game with no
+   options (part 5), not yet tried in Steam.
 4. **RecompLauncher's `recomplauncher.json`** (written, not yet tried in the launcher itself): in the
    installer AppImage, valid against the launcher's schema. RecompLauncher's own steps, run by hand
    from the manifest (a folder with a space, as its "Recomp Library" has) build the game in 33 s and
-   start it, full screen in Big Picture mode (docs/runtime.md, "Installer tools"). Next: the
-   maintainer's run of the launcher on the Steam Deck, Gaming Mode included, which also gives the
-   Deck's build time.
-5. Add to Steam, a menu entry and GitHub releases. Publishing waits for the licence decision and for
+   start it, full screen in Big Picture mode (docs/runtime.md, "Installer tools"). Not tried yet:
+   RecompLauncher's "Add a build" is under Settings, Developers, which only a verified developer's
+   account sees (its `ui/app.js`, `devAllowed`). Settings, Bring Your Games, "Add Without Updates"
+   adds a folder the same way (`devtools.rs`, `add_folder`) for anyone; that route is next.
+5. Add to Steam, a menu entry and GitHub releases. Started: the game finds its files from its own
+   path (`<prefix>/bin/backbreaker` beside a finished `<prefix>/game`), and the installer with no
+   command plays once the game is installed, so either works as a shortcut with no launch options;
+   the installer's messages name the AppImage's own path instead of a `backbreaker-installer` command
+   that isn't on the PATH. Publishing waits for the licence decision and for
    the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
    from the sysroot, XenonRecomp with binutils' PowerPC disassembler, the AppImage runtime's libfuse).
 

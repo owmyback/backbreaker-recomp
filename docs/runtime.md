@@ -68,9 +68,14 @@ no game content.
 `backbreaker-installer` (`installer/`) takes a player from their own disc image to a built game
 with nothing from the host but glibc, a Vulkan driver and the kernel: no Python, OpenSSL or compiler.
 
-    backbreaker-installer install <image> [--prefix <dir>] [--jobs <n>] [--progress]
-    backbreaker-installer play [--prefix <dir>] [-- <game options>]
-    backbreaker-installer rebuild [--prefix <dir>]
+    ./Backbreaker-Installer-x86_64.AppImage install <image> [--prefix <dir>] [--jobs <n>] [--progress]
+    ./Backbreaker-Installer-x86_64.AppImage play [--prefix <dir>] [-- <game options>]
+    ./Backbreaker-Installer-x86_64.AppImage rebuild [--prefix <dir>]
+    ./Backbreaker-Installer-x86_64.AppImage
+
+The program inside is `backbreaker-installer`, but nothing puts it on the PATH: it runs as the
+AppImage, and its messages name the AppImage's own path (`$APPIMAGE`). With no command it plays,
+once the game is installed in the default folder, and prints its help otherwise.
 
 `install` checks the image (below), copies the game's files, runs XenonRecomp, compiles `ppc/` and
 links the game, into `~/.local/share/backbreaker-recomp/install` by default (`$XDG_DATA_HOME`; the
@@ -87,6 +92,14 @@ file takes 11 s instead of 13 s. The optimisation level stays the kit's `-O2`: `
 23% less CPU but makes the game's threads need 28-40% more (ROADMAP, phase 10). A second installer
 started on the same folder while one is working
 stops with a message (`<prefix>/.lock`).
+
+**From Steam**: add `<prefix>/bin/backbreaker` (by default
+`~/.local/share/backbreaker-recomp/install/bin/backbreaker`) or the AppImage as a non-Steam game,
+with no launch options. The game finds its files from its own path, `<prefix>/game` beside its
+`bin/` once `game/.complete` is there ("Where files live"), so the folder Steam starts it in doesn't
+matter. The AppImage also relinks after a runtime update; `bin/backbreaker` keeps the runtime it was
+linked with until `play` runs. Neither has been tried in Steam yet; on the Steam Deck, before this, a
+shortcut to either didn't start the game (ROADMAP, phase 10).
 
 Everything it builds with comes from its bundle, `build-installer/AppDir/usr/lib/backbreaker-installer`
 (`installer/build.h` has the layout), made in the portable build container by
@@ -116,10 +129,12 @@ tells it how, and `build_installer.sh` puts it at the AppImage's root, where the
 - `saves`, `folders` and `actions`: saves, achievements and settings for its backups; Open Mods
   Folder and Open Screenshots; the log folder for crash reports. `exit_codes` explain `play`'s 7 and 8.
 
-To try it before there is a release: in RecompLauncher (0.90 beta 63 or newer), Settings,
-Developers, turn on Developer tools, then "Add a build" and pick a folder holding just
-`Backbreaker-Installer-x86_64.AppImage`. Its Developer tab lists what it read from the manifest;
-setting it up asks for the disc image.
+To try it before there is a release: put `Backbreaker-Installer-x86_64.AppImage` alone in a folder,
+then in RecompLauncher (0.90 beta 63 or newer) Settings, Bring Your Games, "Pick a Folder…", that
+folder, and "Add Without Updates" when it asks which game it is. It reads the manifest from the
+AppImage. Not tried yet. A verified developer's account can use Settings, Developers, "Add a build"
+instead, which adds the folder the same way (its `devtools.rs`, `add_folder`) and has a Developer tab
+listing what it read; other accounts don't see the Developers section (its `ui/app.js`, `devAllowed`).
 
 The single steps are commands too:
 
@@ -155,8 +170,10 @@ RecompLauncher shows as a progress bar. `scripts/setup.sh` still uses the Python
   partition (`game/cache`), achievements and a custom unlock sound (`game/sounds/achievement.wav`) are
   in `game/`; screenshots and captures go to `screenshots/` and `captures/` beside it.
 - **Installed**: inside an AppImage (its runtime sets `APPIMAGE` and `APPDIR`; the game's files are
-  the AppImage's `game/`), or when a launcher passes `--data-dir <dir>` (a directory with `disc/` and
-  `extracted/`). The game's files may then be read-only. The player's go to the per-user folders:
+  the AppImage's `game/`), when a launcher passes `--data-dir <dir>` (a directory with `disc/` and
+  `extracted/`), or when the program is the installer's `<prefix>/bin/backbreaker` and
+  `<prefix>/game/.complete` exists (#138: found from `/proc/self/exe`, so a shortcut needs no options;
+  a checkout's `build/backbreaker` never matches). The game's files may then be read-only. The player's go to the per-user folders:
   `~/.config/backbreaker-recomp/settings.ini` and `~/.local/share/backbreaker-recomp/` (`saves/`,
   `cache/`, `achievements/`, `sounds/`, `mods/`, `screenshots/`, `captures/`, `logs/`), following
   `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME`. The log's `[paths]` line names all three.

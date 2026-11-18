@@ -33,8 +33,30 @@ namespace
     enum Exit { kOk = 0, kFailed = 1, kUsage = 2, kCannotOpen = 3, kNotXbox360 = 4, kOtherGame = 5, kDamaged = 6,
                 kNotInstalled = 7, kBuildFailed = 8 };
 
+    // How the player runs this program again, for the messages that tell them: the AppImage's own
+    // path (its runtime sets APPIMAGE), else this program's. Nothing named backbreaker-installer is
+    // on their PATH. Quoted for a shell when the path needs it.
+    std::string selfCommand()
+    {
+        std::string path;
+        if (const char* a = std::getenv("APPIMAGE"); a && a[0] == '/') path = a;
+        else {
+            std::error_code ec;
+            path = std::filesystem::read_symlink("/proc/self/exe", ec).string();
+            if (path.empty()) return "backbreaker-installer";
+        }
+        bool plain = true;
+        for (char c : path)
+            if (!std::isalnum(static_cast<unsigned char>(c)) && !std::strchr("/._+-", c)) plain = false;
+        if (plain) return path;
+        std::string quoted = "'";
+        for (char c : path) quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+        return quoted + "'";
+    }
+
+    // After the usage line, which names selfCommand()
     const char kUsageText[] =
-        "usage: backbreaker-installer <command> ...\n"
+        "  (no command)                      play, once the game is installed in the default folder\n"
         "  check <image>                     is it Backbreaker, the release this project supports?\n"
         "  list <image>                      the disc's files (tools/xdvdfs.py's listing)\n"
         "  extract <image> <dir> --all       every file, under <dir> (tools/xdvdfs.py --all)\n"
@@ -53,6 +75,18 @@ namespace
         "         --bundle <dir>   the toolchain, runtime kit and XenonRecomp (default: beside this program)\n"
         "exit codes: 0 done, 1 failed, 2 usage, 3 the image can't be opened, 4 not an Xbox 360 game disc,\n"
         "            5 another game, 6 damaged image or unknown release, 7 not installed, 8 the build failed\n";
+
+    void printUsage(FILE* to)
+    {
+        std::fprintf(to, "usage: %s <command> ...\n%s", selfCommand().c_str(), kUsageText);
+    }
+
+    // `play`, `rebuild`: what to run first
+    std::string notInstalled(const std::string& prefix)
+    {
+        return "the game isn't installed in " + prefix + " (install it from your disc image first: " +
+               selfCommand() + " install <your disc image>" + (prefix == defaultPrefix() ? "" : " --prefix " + prefix) + ")";
+    }
 
     int fail(int code, const std::string& message)
     {
@@ -341,8 +375,11 @@ namespace
         if (int rc = build(o, {}, progress, 0.12)) return rc;
         if (!o.progress) {
             std::printf("[installer] installed in %s\n", o.prefix.c_str());
-            std::printf("[installer] start it with: backbreaker-installer play%s\n",
+            std::printf("[installer] start it with: %s play%s\n", selfCommand().c_str(),
                         o.prefix == defaultPrefix() ? "" : (" --prefix " + o.prefix).c_str());
+            // The game finds its files from its own path (runtime/paths.cpp), so it needs no options
+            std::printf("[installer] or start %s/bin/backbreaker itself, for example as a non-Steam game in Steam\n",
+                        o.prefix.c_str());
         }
         return kOk;
     }
@@ -350,7 +387,7 @@ namespace
     int cmdRebuild(const Options& o)
     {
         if (!std::filesystem::exists(o.prefix + "/game/.complete"))
-            return fail(kNotInstalled, "the game isn't installed in " + o.prefix + " (install it from your disc image first)");
+            return fail(kNotInstalled, notInstalled(o.prefix));
         InstallLock lock;
         std::string error;
         if (!lock.acquire(o.prefix, error)) return fail(kFailed, error);
@@ -364,7 +401,7 @@ namespace
     int cmdPlay(const Options& o)
     {
         if (!std::filesystem::exists(o.prefix + "/game/.complete"))
-            return fail(kNotInstalled, "the game isn't installed in " + o.prefix + " (install it from your disc image first)");
+            return fail(kNotInstalled, notInstalled(o.prefix));
         {
             InstallLock lock;
             std::string error;
@@ -395,9 +432,18 @@ namespace
 int main(int argc, char** argv)
 {
     std::vector<std::string> a(argv + 1, argv + argc);
-    if (a.empty() || a[0] == "--help" || a[0] == "-h") {
-        std::fputs(kUsageText, a.empty() ? stderr : stdout);
-        return a.empty() ? kUsage : kOk;
+    if (a.empty()) {
+        // Double-clicked, or a shortcut with no launch options (Steam's non-Steam game): the game,
+        // once it's installed where install puts it by default
+        Options o;
+        parseOptions({"play"}, false, o);
+        if (std::filesystem::exists(o.prefix + "/game/.complete")) return cmdPlay(o);
+        printUsage(stderr);
+        return kUsage;
+    }
+    if (a[0] == "--help" || a[0] == "-h") {
+        printUsage(stdout);
+        return kOk;
     }
     const std::string& c = a[0];
     if (c == "check" && a.size() == 2) return cmdCheck(a[1]);
@@ -412,6 +458,6 @@ int main(int argc, char** argv)
     if (c == "install" && parseOptions(a, true, o)) return cmdInstall(o);
     if (c == "play" && parseOptions(a, false, o)) return cmdPlay(o);
     if (c == "rebuild" && parseOptions(a, false, o)) return cmdRebuild(o);
-    std::fputs(kUsageText, stderr);
+    printUsage(stderr);
     return kUsage;
 }

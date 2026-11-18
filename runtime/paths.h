@@ -4,9 +4,10 @@
 // game's files and the player's settings, saves, cache partition and achievements in game/,
 // screenshots/ and captures/ beside it. Run from the checkout's root.
 //
-// Installed layout: inside an AppImage (the AppImage runtime sets APPIMAGE and APPDIR) or when a
-// launcher passes --data-dir. The game's files are read from the AppImage's game/ or that
-// directory and may be read-only; the player's go to the per-user folders:
+// Installed layout: inside an AppImage (the AppImage runtime sets APPIMAGE and APPDIR), when a
+// launcher passes --data-dir, or when the program is the installer's <prefix>/bin/backbreaker with a
+// finished <prefix>/game/.complete (#138). The game's files are read from the AppImage's game/, that
+// directory or <prefix>/game and may be read-only; the player's go to the per-user folders:
 //   ~/.config/backbreaker-recomp/settings.ini        ($XDG_CONFIG_HOME)
 //   ~/.local/share/backbreaker-recomp/               ($XDG_DATA_HOME): saves/, cache/, achievements/,
 //                                                     sounds/, mods/, screenshots/, captures/, logs/

@@ -31,6 +31,19 @@ namespace
         if (const char* v = std::getenv(name); v && v[0] == '/') return v;
         return home() + "/" + fallback;
     }
+
+    // The installer's layout (#138): this program is <prefix>/bin/backbreaker and the game's files
+    // are <prefix>/game, which the installer marks finished with game/.complete. Found from the
+    // program's own path, so a shortcut to it (Steam's non-Steam game) needs no --data-dir and no
+    // particular working directory. A checkout's build/backbreaker never matches.
+    std::string installerGameDir()
+    {
+        std::error_code ec;
+        const fs::path self = fs::read_symlink("/proc/self/exe", ec);
+        if (ec || self.parent_path().filename() != "bin") return {};
+        const fs::path game = self.parent_path().parent_path() / "game";
+        return fs::exists(game / ".complete", ec) ? game.string() : std::string();
+    }
 }
 
 namespace paths
@@ -47,6 +60,11 @@ namespace paths
         else if (appImage && appDir && fs::is_directory(fs::path(appDir) / "game"))
         {
             g_data = (fs::path(appDir) / "game").string();
+            g_installed = true;
+        }
+        else if (std::string game = installerGameDir(); !game.empty())
+        {
+            g_data = std::move(game);
             g_installed = true;
         }
 
