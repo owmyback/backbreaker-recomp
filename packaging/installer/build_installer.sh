@@ -182,7 +182,10 @@ printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\
 ln -s backbreaker-installer.png "$APPDIR/.DirIcon"
 # RecompLauncher reads /recomplauncher.json from the AppImage itself (#138, part 4)
 install -m 644 packaging/installer/recomplauncher.json "$APPDIR/recomplauncher.json"
-mksquashfs "$APPDIR" $OUT/.fs.squashfs -root-owned -noappend -comp zstd -Xcompression-level 15 -quiet >/dev/null
+# -no-xattrs: the build machine's extended attributes (SELinux labels on Fedora) have no place in a
+# published image, and they make mksquashfs write extended symlink inodes, which RecompLauncher's
+# reader (the backhand crate, 0.21) can't read: it then ignores the embedded recomplauncher.json
+mksquashfs "$APPDIR" $OUT/.fs.squashfs -root-owned -noappend -no-xattrs -comp zstd -Xcompression-level 15 -quiet >/dev/null
 cat /usr/local/share/appimage-runtime-x86_64 $OUT/.fs.squashfs >$OUT/Backbreaker-Installer-x86_64.AppImage
 chmod 755 $OUT/Backbreaker-Installer-x86_64.AppImage
 rm -f $OUT/.fs.squashfs

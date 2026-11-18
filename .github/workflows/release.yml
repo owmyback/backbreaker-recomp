@@ -100,6 +100,29 @@ jobs:
           # The AppImage itself, unpacked to a temporary folder: a runner has no FUSE
           "$APPIMAGE" --appimage-extract-and-run --help | grep -q '^  add-to-steam '
           [ "$("$APPIMAGE" --appimage-extract-and-run ppc-inputs)" = "$(sed -n 's/^ppc inputs //p' "$MANIFEST")" ]
+          # No extended attributes: with them, symlinks become inodes RecompLauncher's reader can't
+          # read, and it ignores the manifest (build_installer.sh, -no-xattrs). The SquashFS starts
+          # after the runtime's ELF section table; its flags have NO_XATTRS, 0x200.
+          python3 -I - "$APPIMAGE" <<'EOF'
+          import struct, sys
+          f = open(sys.argv[1], "rb")
+          h = f.read(64)
+          shoff, = struct.unpack_from("<Q", h, 40)
+          shentsize, shnum = struct.unpack_from("<HH", h, 58)
+          f.seek(shoff)
+          table = f.read(shentsize * shnum)
+          end = shoff + shentsize * shnum
+          for i in range(shnum):
+              kind, = struct.unpack_from("<I", table, i * shentsize + 4)
+              off, size = struct.unpack_from("<QQ", table, i * shentsize + 24)
+              if kind != 8:
+                  end = max(end, off + size)
+          f.seek(end)
+          sb = f.read(96)
+          flags, = struct.unpack_from("<H", sb, 24)
+          if sb[:4] != b"hsqs" or not flags & 0x200:
+              sys.exit(f"::error::the AppImage's SquashFS keeps extended attributes (flags {flags:#x})")
+          EOF
           # RecompLauncher finds the manifest at the AppImage's root and runs the file by this name
           m=build-installer/AppDir/recomplauncher.json
           [ "$(jq -r '.prepare.program[0]' $m)" = "$(basename "$APPIMAGE")" ]

@@ -834,13 +834,28 @@ The parts, in order:
    start it there: the installer with no command only printed its help, and `bin/backbreaker` without
    `--data-dir` looked for `game/` in the folder Steam started it in. Both now start the game with no
    options (part 5), and on the Deck (2026-11-18) Steam started it from the installer's menu entry.
-4. **RecompLauncher's `recomplauncher.json`** (written, not yet tried in the launcher itself): in the
+4. **RecompLauncher's `recomplauncher.json`** (tried on the Steam Deck, 2026-11-18): in the
    installer AppImage, valid against the launcher's schema. RecompLauncher's own steps, run by hand
    from the manifest (a folder with a space, as its "Recomp Library" has) build the game in 33 s and
-   start it, full screen in Big Picture mode (docs/runtime.md, "Installer tools"). Not tried yet:
-   RecompLauncher's "Add a build" is under Settings, Developers, which only a verified developer's
-   account sees (its `ui/app.js`, `devAllowed`). Settings, Bring Your Games, "Add Without Updates"
-   adds a folder the same way (`devtools.rs`, `add_folder`) for anyone; that route is next.
+   start it, full screen in Big Picture mode (docs/runtime.md, "Installer tools"). RecompLauncher's
+   "Add a build" is under Settings, Developers, which only a verified developer's account sees (its
+   `ui/app.js`, `devAllowed`); Settings, Bring Your Games, "Add Without Updates" adds a folder the
+   same way (`devtools.rs`, `add_folder`) for anyone. Tried that way by the maintainer on the Steam
+   Deck (RecompLauncher 0.90.0-beta.64), with no release yet:
+   - The folder's name needs the word "Installer": the launcher's folder scan skips programs named
+     like installers otherwise ("There's no program in that folder.").
+   - The first AppImage, built on the maintainer's Fedora PC, kept its files' SELinux labels, and the
+     launcher's reader can't read the symlinks that makes, so it ignored the manifest: the game took
+     the folder's name, had no settings page, and Play started the AppImage with no command. Built
+     with `-no-xattrs`, it read the manifest:
+   - The game showed as Backbreaker with our settings page, which read the existing `settings.ini`
+     (1440p, 60 fps, full screen) and wrote changes back into it.
+   - Play asked for the disc image and built the game with its progress bar in 3-4 minutes, with
+     Wi-Fi off, then started it, with the title's icon on its window.
+   - Open Mods Folder and Open Screenshots opened the right folders.
+   - Its Add to Steam worked, and the game started from that entry in Gaming Mode. The entry has no
+     icon: the launcher takes one from its catalog or from a picture the player picks, and the
+     manifest has no field for it.
 5. Add to Steam, a menu entry and GitHub releases. Started: the game finds its files from its own
    path (`<prefix>/bin/backbreaker` beside a finished `<prefix>/game`), and the installer with no
    command plays once the game is installed, so either works as a shortcut with no launch options;

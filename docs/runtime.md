@@ -209,10 +209,22 @@ files; a published release is left alone. Before the draft:
 A pull request that changes `packaging/`, the decoder's build or the workflow builds and checks the
 AppImage the same way, and uploads nothing.
 
-To try it before there is a release: put `Backbreaker-Installer-x86_64.AppImage` alone in a folder,
-then in RecompLauncher (0.90 beta 63 or newer) Settings, Bring Your Games, "Pick a Folder…", that
-folder, and "Add Without Updates" when it asks which game it is. It reads the manifest from the
-AppImage. Not tried yet. A verified developer's account can use Settings, Developers, "Add a build"
+To try it before there is a release: put `Backbreaker-Installer-x86_64.AppImage` alone in a folder
+whose name has the word "Installer" in it (`Backbreaker Installer`, say), then in RecompLauncher
+(0.90 beta 63 or newer) Settings, Bring Your Games, "Pick a Folder…", that folder, and "Add Without
+Updates" when it asks which game it is. Its folder scan skips a program named like an installer
+unless the folder's name has that word too (its `install.rs`, `NOT_THE_GAME`), and says "There's no
+program in that folder." It reads the manifest from the AppImage, and shows the game as
+"Backbreaker" with our settings page when it did; named after the folder, with no settings, it
+didn't. On the Deck (2026-11-18, RecompLauncher 0.90.0-beta.64) the first try was the second
+kind: its AppImage reader (the backhand crate, 0.21) can't read an extended symlink inode, which
+`mksquashfs` writes for a symlink with extended attributes, and every file built on the
+maintainer's Fedora PC has an SELinux label. `build_installer.sh` now passes `-no-xattrs`, and the
+release workflow checks the image has none. Built that way, the whole flow worked on the Deck: the
+settings page, the disc image asked for and the game built (3-4 minutes, offline), Play, the folder
+actions, and its Add to Steam, from which the game started in Gaming Mode (ROADMAP, phase 10, part
+4). The Steam entry's icon is RecompLauncher's to set (its catalog's, or a picture the player
+picks under Pictures, such as `build/game/icon.png` in the game's folder), not the manifest's. A verified developer's account can use Settings, Developers, "Add a build"
 instead, which adds the folder the same way (its `devtools.rs`, `add_folder`) and has a Developer tab
 listing what it read; other accounts don't see the Developers section (its `ui/app.js`, `devAllowed`).
 

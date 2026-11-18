@@ -96,7 +96,8 @@ else
         > "$APPDIR/backbreaker-recomp.png"
 fi
 ln -s backbreaker-recomp.png "$APPDIR/.DirIcon"
-mksquashfs "$APPDIR" dist/.fs.squashfs -root-owned -noappend -comp zstd -Xcompression-level 3 -quiet >/dev/null
+# -no-xattrs, as packaging/installer/build_installer.sh: no SELinux labels from the build machine
+mksquashfs "$APPDIR" dist/.fs.squashfs -root-owned -noappend -no-xattrs -comp zstd -Xcompression-level 3 -quiet >/dev/null
 cat "$RUNTIME" dist/.fs.squashfs > dist/Backbreaker-x86_64.AppImage
 chmod 755 dist/Backbreaker-x86_64.AppImage
 rm -rf "$APPDIR" dist/.fs.squashfs
