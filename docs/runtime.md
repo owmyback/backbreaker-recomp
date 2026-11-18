@@ -104,11 +104,14 @@ stops with a message (`<prefix>/.lock`).
 **From Steam**: in "Add a Non-Steam Game", pick Backbreaker from the list (the menu entry, with its
 icon), or browse to `<prefix>/bin/backbreaker` (by default
 `~/.local/share/backbreaker-recomp/install/bin/backbreaker`) or the AppImage, with no launch options;
-a shortcut made by browsing has no icon until one is picked in its properties (`<prefix>/game/icon.png`). The game finds its files from its own path, `<prefix>/game` beside its
+a shortcut made by browsing has no icon until one is picked in its properties
+(`<prefix>/game/icon.png`). The game finds its files from its own path, `<prefix>/game` beside its
 `bin/` once `game/.complete` is there ("Where files live"), so the folder Steam starts it in doesn't
 matter. The AppImage also relinks after a runtime update; `bin/backbreaker` keeps the runtime it was
-linked with until `play` runs. Neither has been tried in Steam yet; on the Steam Deck, before this, a
-shortcut to either didn't start the game (ROADMAP, phase 10).
+linked with until `play` runs. On the maintainer's Steam Deck (2026-11-18), after `install` in a
+terminal, Steam's list had Backbreaker without browsing, its library entry shows the icon beside the
+name, and it started. Steam's library artwork (the cover and banner) stays empty: Steam takes that
+only from the shortcut, so it belongs with Add to Steam (ROADMAP, phase 10, part 5).
 
 Everything it builds with comes from its bundle, `build-installer/AppDir/usr/lib/backbreaker-installer`
 (`installer/build.h` has the layout), made in the portable build container by

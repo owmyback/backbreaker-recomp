@@ -19,7 +19,8 @@ the game against; the extraction tools and the image check in C++; the installer
 from the player's image with its own clang and sysroot, in each distribution's container; the
 manifest that lets RecompLauncher set the game up and start it; on a Steam Deck the install takes
 about 4 minutes, and the game and the installer now start with no options, for a Steam shortcut; the
-game's window has the title's icon, and a terminal install adds a menu entry with it). Before that,
+game's window has the title's icon, and a terminal install adds a menu entry with it; on the Deck
+Steam lists that entry with its icon and starts the game from it). Before that,
 2026-11-16 (phase 10: portable build for Steam Deck and other distributions planned, an AppImage
 with a mods folder, #134). Before that, 2026-11-16 (phase 7 done: every movie stopped after a second or two because of the
 Win32 error codes, #132; `--fixed-seed` for test runs, #71). Before that, 2026-11-16 (phase 9 in progress: the frame-rate dips are fixed (#73), and heavy scenes
@@ -827,7 +828,7 @@ The parts, in order:
    minutes and the game ran; on an HP EliteDesk 800 SFF, 2 minutes. A non-Steam game shortcut didn't
    start it there: the installer with no command only printed its help, and `bin/backbreaker` without
    `--data-dir` looked for `game/` in the folder Steam started it in. Both now start the game with no
-   options (part 5), not yet tried in Steam.
+   options (part 5), and on the Deck (2026-11-18) Steam started it from the installer's menu entry.
 4. **RecompLauncher's `recomplauncher.json`** (written, not yet tried in the launcher itself): in the
    installer AppImage, valid against the launcher's schema. RecompLauncher's own steps, run by hand
    from the manifest (a folder with a space, as its "Recomp Library" has) build the game in 33 s and
@@ -841,7 +842,13 @@ The parts, in order:
    the installer's messages name the AppImage's own path instead of a `backbreaker-installer` command
    that isn't on the PATH. The game's window has the title's own icon, made from the player's
    executable (`game/icon.png`), and a terminal `install` adds an applications-menu entry with it,
-   which Steam's "Add a Non-Steam Game" lists (the maintainer saw no icon in the taskbar or in Steam).
+   which Steam's "Add a Non-Steam Game" lists. Tried by the maintainer on 2026-11-18:
+   - On the Steam Deck, after `install` in a terminal: Steam's list had Backbreaker without browsing
+     for it, its library entry shows the icon beside the name, and the game started.
+   - On a KDE Plasma desktop, the portable AppImage started from Steam: its window has the icon in
+     the taskbar (`scripts/package_portable.sh` puts `icon.png` in the AppImage's `game/`).
+   - Still empty: Steam's library artwork (cover, banner, logo). Steam reads it only from the
+     shortcut, so Add to Steam has to set it; the title's icon is 64x64, too small for a cover.
    Publishing waits for the licence decision and for
    the notices and sources of everything the kit and the builder ship (FFmpeg, glibc and libstdc++
    from the sysroot, XenonRecomp with binutils' PowerPC disassembler, the AppImage runtime's libfuse).
