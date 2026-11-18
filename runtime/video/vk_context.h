@@ -23,6 +23,7 @@ namespace vkctx
         bool stencilExport = false; // VK_EXT_shader_stencil_export (EDRAM depth transfers keep stencil)
         bool demoteHelper = false;  // VkPhysicalDeviceVulkan13Features::shaderDemoteToHelperInvocation
         bool samplerAnisotropy = false; // enabled when the GPU has it (texture fetch constants ask for up to 16:1)
+        bool sampleRateShading = false; // enabled when the GPU has it: interpolateAtCentroid (#166) needs it
         bool timelineSemaphore = false; // Vulkan 1.2 timeline semaphores: asynchronous guest fences (renderer.cpp)
         // VK_EXT_external_memory_host + vertexPipelineStoresAndAtomics: shaders can write guest
         // memory directly (Xenos memory export)

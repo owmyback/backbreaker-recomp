@@ -71,6 +71,10 @@ namespace gpu
         // Shader setup
         uint32_t vsRegisters = 0, psRegisters = 0, vsExportMode = 0, vsExportCount = 0, psExportMode = 0;
         bool paramGen = false;
+        // Where an MSAA pixel's interpolators are sampled (issue #166): SQ_CONTEXT_MISC sc_sample_cntl
+        // (xenos::SampleControl: 0 centroids only, 1 centers only, 2 per interpolator) and, for 2,
+        // SQ_INTERPOLATOR_CNTL sampling_pattern (a bit per interpolator, 1 = center, 0 = centroid)
+        uint32_t sampleControl = 0, samplingPattern = 0;
         uint32_t vsConstBase = 0, vsConstSize = 0, psConstBase = 0, psConstSize = 0;
     };
 

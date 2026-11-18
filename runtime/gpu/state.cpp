@@ -157,6 +157,8 @@ namespace gpu
         s.vsExportCount = pc.vs_export_count();
         s.psExportMode = pc.ps_export_mode();
         s.paramGen = pc.param_gen();
+        s.sampleControl = readReg<SQ_CONTEXT_MISC>().sc_sample_cntl();
+        s.samplingPattern = readReg<SQ_INTERPOLATOR_CNTL>().sampling_pattern();
         auto vsc = readReg<SQ_VS_CONST>();
         auto psc = readReg<SQ_PS_CONST>();
         s.vsConstBase = vsc.base(); s.vsConstSize = vsc.size();
@@ -213,9 +215,9 @@ namespace gpu
         snprintf(buf, sizeof(buf), "  scissor: window (%u,%u)-(%u,%u) screen (%u,%u)-(%u,%u)\n", s.scissorTL[0], s.scissorTL[1],
                  s.scissorBR[0], s.scissorBR[1], s.screenScissorTL[0], s.screenScissorTL[1], s.screenScissorBR[0], s.screenScissorBR[1]);
         out += buf;
-        snprintf(buf, sizeof(buf), "  shaders: vs %u regs export_mode=%u exports=%u, ps %u regs export_mode=%u%s, consts vs %u+%u ps %u+%u\n",
+        snprintf(buf, sizeof(buf), "  shaders: vs %u regs export_mode=%u exports=%u, ps %u regs export_mode=%u%s, consts vs %u+%u ps %u+%u, sample_cntl=%u pattern=%04X\n",
                  s.vsRegisters, s.vsExportMode, s.vsExportCount, s.psRegisters, s.psExportMode, s.paramGen ? " param_gen" : "",
-                 s.vsConstBase, s.vsConstSize, s.psConstBase, s.psConstSize);
+                 s.vsConstBase, s.vsConstSize, s.psConstBase, s.psConstSize, s.sampleControl, s.samplingPattern);
         out += buf;
         return out;
     }

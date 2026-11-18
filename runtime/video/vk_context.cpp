@@ -219,7 +219,7 @@ namespace vkctx
             features.features.independentBlend = have.features.independentBlend;
             features.features.fillModeNonSolid = have.features.fillModeNonSolid;
             features.features.samplerAnisotropy = c.samplerAnisotropy = have.features.samplerAnisotropy;
-            features.features.sampleRateShading = have.features.sampleRateShading;
+            features.features.sampleRateShading = c.sampleRateShading = have.features.sampleRateShading;
             // Xenos memory export writes guest memory from a vertex stage (see renderer.cpp).
             features.features.vertexPipelineStoresAndAtomics = have.features.vertexPipelineStoresAndAtomics;
             features.features.fragmentStoresAndAtomics = have.features.fragmentStoresAndAtomics;

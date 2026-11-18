@@ -120,10 +120,12 @@ namespace gpu::render
             ShaderType type;
             std::vector<uint32_t> words; // host order
             bool built = false;
-            std::string name;                        // ps_<hash>, as in the shader dump; variants add _m<mask>
+            std::string name;                        // ps_<hash>, as in the shader dump; variants add _m<mask>_c<mask>
             TranslatedShader t;
             VkShaderModule module = VK_NULL_HANDLE; // null if translation or compilation failed
-            VkShaderModule colorVariant[16]{};     // [mask] same shader, writing only the color slots in that mask
+            // Pixel shader variants by (centroid mask << 4 | color mask): the same shader, writing only
+            // the color slots in that mask, and reading those interpolators at the centroid (#166)
+            std::unordered_map<uint32_t, VkShaderModule> variants;
         };
         std::unordered_map<uint64_t, Shader> g_shaders;
         uint64_t g_current[2] = { 0, 0 }; // vertex, pixel
@@ -209,7 +211,7 @@ namespace gpu::render
             return g_shaderCacheDir;
         }
 
-        uint64_t shaderCacheKey(const std::string& glsl, shaderc_shader_kind kind, uint32_t colorMask)
+        uint64_t shaderCacheKey(const std::string& glsl, shaderc_shader_kind kind, uint32_t colorMask, uint32_t centroidMask)
         {
             uint64_t h = 1469598103934665603ull;
             auto mix = [&](const void* p, size_t n) {
@@ -221,6 +223,7 @@ namespace gpu::render
             mix(&g_targetEnv, sizeof g_targetEnv);
             mix(&k, sizeof k);
             mix(&colorMask, sizeof colorMask);
+            mix(&centroidMask, sizeof centroidMask);
             mix(glsl.data(), glsl.size());
             return h;
         }
@@ -262,9 +265,10 @@ namespace gpu::render
             if (!ok) remove(tmp.c_str());
         }
 
-        VkShaderModule compile(const std::string& glsl, shaderc_shader_kind kind, const char* name, std::string& error, uint32_t colorMask = 15)
+        VkShaderModule compile(const std::string& glsl, shaderc_shader_kind kind, const char* name, std::string& error, uint32_t colorMask = 15,
+                               uint32_t centroidMask = 0)
         {
-            uint64_t key = g_shaderCacheOff ? 0 : shaderCacheKey(glsl, kind, colorMask);
+            uint64_t key = g_shaderCacheOff ? 0 : shaderCacheKey(glsl, kind, colorMask, centroidMask);
             if (!g_shaderCacheOff)
             {
                 std::vector<uint32_t> spirv = loadCachedSpirv(key);
@@ -285,6 +289,12 @@ namespace gpu::render
                 char value[8];
                 snprintf(value, sizeof(value), "0x%X", colorMask);
                 shaderc_compile_options_add_macro_definition(options, "BB_COLOR_MASK", 13, value, strlen(value));
+            }
+            if (centroidMask) // see BB_CENTROID in the translated pixel shader
+            {
+                char value[12];
+                snprintf(value, sizeof(value), "0x%X", centroidMask);
+                shaderc_compile_options_add_macro_definition(options, "BB_CENTROID", 11, value, strlen(value));
             }
             double t0 = nowMs();
             shaderc_compilation_result_t r = shaderc_compile_into_spv(g_compiler, glsl.data(), glsl.size(), kind, name, "main", options);
@@ -2497,20 +2507,41 @@ void main()
         // in one of those slots needs the same shader without the outputs nobody reads. Which slots
         // have an image, not how many the pass carries, is what decides: a hole in the middle drops
         // that one output and keeps the ones after it.
-        VkShaderModule psModule(Shader* ps, uint32_t mask)
+        VkShaderModule psModule(Shader* ps, uint32_t mask, uint32_t centroid)
         {
             mask &= 15;
-            if (!(ps->t.colorOutputs & ~mask)) return ps->module;
-            VkShaderModule& m = ps->colorVariant[mask];
+            if (!(ps->t.colorOutputs & ~mask)) mask = 15; // writes every slot it has: as the plain shader
+            centroid &= 0xFFFF;
+            if (mask == 15 && !centroid) return ps->module;
+            VkShaderModule& m = ps->variants[centroid << 4 | mask];
             if (!m)
             {
                 char vname[64];
-                snprintf(vname, sizeof(vname), "%s_m%x", ps->name.c_str(), mask);
+                snprintf(vname, sizeof(vname), "%s_m%x_c%x", ps->name.c_str(), mask, centroid);
                 std::string error;
-                m = compile(ps->t.glsl, shaderc_fragment_shader, vname, error, mask);
+                m = compile(ps->t.glsl, shaderc_fragment_shader, vname, error, mask, centroid);
                 if (!m) warnOnce(std::string(vname) + " failed to compile: " + error);
             }
             return m ? m : ps->module;
+        }
+
+        // The interpolators a draw's pixel shader reads at the centroid of a pixel's covered samples
+        // instead of its center, as Xenia works it out (xenos::GetInterpolatorSamplingPattern): none
+        // without MSAA or when SQ_CONTEXT_MISC asks for centers only, all for centroids only, else
+        // those SQ_INTERPOLATOR_CNTL's sampling pattern gives 0 (#166). Only the registers the pixel
+        // shader has count, so a pattern bit nobody reads doesn't make another variant.
+        uint32_t centroidInterpolators(const DrawState& s, uint32_t samples)
+        {
+            if (samples <= 1 || s.sampleControl == 1) return 0;
+            // interpolateAtCentroid is the SPIR-V InterpolationFunction capability, which needs it
+            if (!C->sampleRateShading)
+            {
+                warnOnce("the GPU has no sampleRateShading: MSAA edges interpolate at pixel centers (#166)");
+                return 0;
+            }
+            uint32_t centers = s.sampleControl == 0 ? 0 : s.samplingPattern;
+            uint32_t used = s.psRegisters >= 16 ? 0xFFFFu : (1u << s.psRegisters) - 1;
+            return ~centers & used & 0xFFFFu;
         }
 
         struct PipelineDesc
@@ -2532,12 +2563,13 @@ void main()
                          p.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
             bool restart = strip && s.primitiveRestart;
             bool cullable = !p.rectangles && p.topology >= VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            uint32_t centroid = p.discard ? 0 : centroidInterpolators(s, p.samples);
             PipelineKey key;
             {
                 uint64_t* o = key.v.data();
                 for (uint64_t x : { uint64_t(p.discard), uint64_t(uintptr_t(p.vs->module)), uint64_t(uintptr_t(p.ps->module)), uint64_t(p.topology),
                                     uint64_t(p.rectangles), uint64_t(restart), uint64_t(p.colors[0]), uint64_t(p.colors[1]), uint64_t(p.colors[2]),
-                                    uint64_t(p.colors[3]), uint64_t(p.depth), uint64_t(p.samples) })
+                                    uint64_t(p.colors[3]), uint64_t(p.depth), uint64_t(p.samples), uint64_t(centroid) })
                     *o++ = x;
                 for (int i = 0; i < 4; i++)
                 {
@@ -2573,7 +2605,7 @@ void main()
             // (VUID-VkGraphicsPipelineCreateInfo-pStages-06894). The export is done by the vertex
             // shader, which still runs, so nothing here would have been read.
             if (!p.discard)
-                stage(VK_SHADER_STAGE_FRAGMENT_BIT, psModule(p.ps, colorMask(p.colors)));
+                stage(VK_SHADER_STAGE_FRAGMENT_BIT, psModule(p.ps, colorMask(p.colors), centroid));
 
             VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO }; // vertices fetched in the shader
             VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };

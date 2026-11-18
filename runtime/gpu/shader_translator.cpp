@@ -749,6 +749,9 @@ void xeMemExportFlush() {
                 // to the outputs it does not are left out, they would be undefined values (the
                 // renderer compiles a variant per mask it needs).
                 s += "#ifndef BB_COLOR_MASK\n#define BB_COLOR_MASK 15\n#endif\n";
+                // Which interpolators a pixel shader reads at the centroid of the pixel's covered samples
+                // rather than at its center (the renderer compiles a variant per mask; issue #166)
+                if (type != ShaderType::Vertex) s += "#ifndef BB_CENTROID\n#define BB_CENTROID 0\n#endif\n";
                 s += kPrelude;
                 s += "layout(set = 0, binding = 0, std430) readonly buffer GuestMemory { uint mem[]; };\n";
                 s += "layout(set = 0, binding = 1, std140) uniform VsConstants { vec4 c[256]; } vsc;\n";
@@ -787,7 +790,16 @@ void xeMemExportFlush() {
                 else
                 {
                     s += "  vec4 o_col[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));\n  vec4 o_depth = vec4(gl_FragCoord.z);\n";
-                    s += "  for (int i = 0; i < 16; i++) r[i] = xe_in.v[i];\n";
+                    // With MSAA, the game picks per interpolator whether an edge pixel interpolates at its
+                    // center or at the centroid of its covered samples (SQ_CONTEXT_MISC sc_sample_cntl,
+                    // SQ_INTERPOLATOR_CNTL sampling_pattern). At the center, a pixel only partly covered
+                    // reads the interpolator extrapolated outside the primitive: on the field's grass
+                    // blades squeezed thin around the controlled player, a clip-space W the shader
+                    // divides by went to 0 and left a row of black pixels (issue #166). The interface
+                    // stays one array in every stage; the ones in BB_CENTROID are read at the centroid.
+                    for (uint32_t i = 0; i < 16; i++)
+                        s += fmt("#if (BB_CENTROID & 0x%X)\n  r[%u] = interpolateAtCentroid(xe_in.v[%u]);\n#else\n  r[%u] = xe_in.v[%u];\n#endif\n",
+                                 1u << i, i, i, i, i);
                 }
                 s += "  vec4 o_unused = vec4(0.0);\n";
                 s += body;

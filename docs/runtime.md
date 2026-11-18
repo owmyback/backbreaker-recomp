@@ -537,7 +537,7 @@ What the renderer keeps in step for this:
   no format (`VK_FORMAT_UNDEFINED`) in the pipeline, and no image view in the pass, in which case the
   spec ignores the attachment's other members and discards writes to it.
 - A pixel shader used in a pass that has no image for one of the outputs it writes is compiled again
-  without that output (`BB_COLOR_MASK`, `Shader::colorVariant`): a write to a location the pass has
+  without that output (`BB_COLOR_MASK`, `Shader::variants`): a write to a location the pass has
   no attachment for is an undefined value, which the layer calls
   `Undefined-Value-ShaderOutputNotConsumed-DynamicRendering`.
 - `shaderDemoteToHelperInvocation` is enabled only when the GPU offers it, and shaderc is told to
@@ -1189,6 +1189,24 @@ interpolators). Check it over a shader dump:
 
 Unsupported features (loops, calls, LOD/gradient fetch ops)
 make translation fail with a reason instead of producing wrong code.
+
+**Centroid interpolation** (#166). With MSAA, the game chooses per interpolator whether a pixel
+that a primitive only partly covers interpolates at the pixel's center or at the centroid of its
+covered samples: `SQ_CONTEXT_MISC` `sc_sample_cntl` (centroids only, centers only, or per
+interpolator) and `SQ_INTERPOLATOR_CNTL` `sampling_pattern` (a bit per interpolator, 0 = centroid).
+The renderer works the set out as Xenia does (`xenos::GetInterpolatorSamplingPattern`):
+`centroidInterpolators` in `renderer.cpp`, none without MSAA, only the pixel shader's registers.
+The translated pixel shader reads those with `interpolateAtCentroid` (`BB_CENTROID`, a variant per
+mask, keyed in the pipeline and the SPIR-V cache). The interpolators stay one `vec4 v[16]` block in
+every stage: a block of separate members, or separate variables, trips the validation layer's
+component count for the rectangle-list geometry shader and its location matching against the
+array. `interpolateAtCentroid` needs `sampleRateShading`; without it, edges interpolate at centers
+(a warning says so). Before this, everything was read at the center: the grass detail layer
+(`bb_grass.fx`, `2bf5593d`) asks for its clip-space position at the centroid, and its blades
+squeezed into slivers around the controlled player read it extrapolated past the triangle, where
+W crossed 0, the screen-space lookup it divides by W for went to infinity, and the blade came out
+black: a flickering row of black pixels beside the player, down the field, most visible at
+resolution scale 1.
 
 Memory export (`eA`/`eM0-4`, used by the game's GPU skinning) writes guest memory from the shader
 through set 0 binding 4, flushed at each `alloc` and at the end as Xenia describes (xenos.h). The
