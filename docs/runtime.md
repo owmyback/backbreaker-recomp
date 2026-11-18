@@ -207,7 +207,9 @@ files; a published release is left alone. Before the draft:
   `prepare.version` doesn't, the run stops and says to raise it in `recomplauncher.json`.
 
 A pull request that changes `packaging/`, the decoder's build or the workflow builds and checks the
-AppImage the same way, and uploads nothing.
+AppImage the same way, and uploads nothing; so does a push to `main` that changes them. GitHub keeps
+caches per branch, and a pull request can use its own branch's and `main`'s, so `main`'s run keeps
+the build container (9-13 minutes to build) and the decoder cached for every new pull request.
 
 To try it before there is a release: put `Backbreaker-Recompiled-x86_64.AppImage` alone in a folder,
 then in RecompLauncher (0.90 beta 63 or newer) Settings, Bring Your Games, "Pick a Folder…", that

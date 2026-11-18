@@ -1,7 +1,10 @@
 # The installer AppImage (#160): built in the portable build container, then, for a version tag or
 # a run by hand, attached with MANIFEST.txt, NOTICES.txt and third-party-sources.tar.xz to a DRAFT
 # release. Nothing here publishes: the maintainer looks the draft over and publishes it on GitHub.
-# A pull request that changes how the AppImage is made builds it too, and uploads nothing.
+# A pull request that changes how the AppImage is made builds it too, and uploads nothing, and so
+# does a push to main that changes it: GitHub keeps caches per branch, and a pull request can use
+# its own branch's and main's, so main's run is what keeps the build container and the XMA decoder
+# cached for every new pull request (its first run otherwise builds the container: 9-13 minutes).
 #
 # No game files: the AppImage holds the runtime kit, the toolchain and XenonRecomp, and the game is
 # built from the player's own disc on the player's machine.
@@ -10,6 +13,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+    # The paths apply to main only: a tag push always runs
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - scripts/build_xma_decoder.sh
   workflow_dispatch:
     inputs:
       tag:
@@ -52,7 +61,7 @@ jobs:
         run: |
           case $GITHUB_EVENT_NAME in
             workflow_dispatch) tag=$INPUT_TAG ;;
-            push) tag=$GITHUB_REF_NAME ;;
+            push) if [[ $GITHUB_REF == refs/tags/* ]]; then tag=$GITHUB_REF_NAME; else tag=; fi ;;
             *) tag= ;;
           esac
           if [ -n "$tag" ] && ! [[ $tag =~ ^v[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.]+)?$ ]]; then
