@@ -300,9 +300,15 @@ disc. A file there replaces the disc's file at the same path, matched without re
 the disc itself, from the next launch, with no rebuild: `mods/media/Movies/Xbox360/505.wmv` replaces
 the 505 logo, for example. Only files are replaced; directory listings stay the disc's, so a mod
 can't add files the game finds by listing a directory. The log names each file a mod replaces
-(`[mods] ... replaces ...`). Most of the game's content is inside
-`packedfilesx360/PackedOutputX360.pkd`; the whole archive can be replaced this way, but editing what
-is inside it needs a tool that doesn't exist yet.
+(`[mods] ... replaces ...`), or adds where the disc has none (`adds`). Most of the game's content is
+inside the archive `packedfilesx360/PackedOutputX360` (`.pkh` index, `.pkd` data), and a file named
+like one of its entries replaces that entry (#169): `mods/media/PlayDatabase/Offense/Dagger.pd` for
+`media\PlayDatabase\Offense\Dagger.pd`. The file layer shows the game a rewritten index in which those
+entries point past the original data, and a data file with the replacements appended there at
+2048-byte boundaries (`runtime/kernel/pack_overlay.cpp`); the log names each replacement when the
+game opens the archive and again when it first reads it (`[mods] the game read ...`). The whole
+archive can still be replaced too. `tools/pkd.py` lists, extracts and repacks the archive, and makes
+and applies mods as changes; `docs/modding.md` is the guide.
 
 **Portable build** (`scripts/setup.sh --portable`, #134; README, "Steam Deck and other distributions"):
 - The container (`packaging/portable/Containerfile`): Ubuntu 22.04, so glibc 2.35 is the floor;
