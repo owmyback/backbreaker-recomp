@@ -746,9 +746,15 @@ the game does not even import `XamShowAchievementsUI`. The runtime draws one ins
 - **F1**, or the controller's **Guide (PS) button**, opens the achievements list over the game:
   every achievement with its icon (from the SPA), gamerscore, description, and the unlock date of
   the earned ones; secret ones show as "Secret achievement" until earned; totals at the top.
-  Up/Down (d-pad, left stick or arrow keys) moves, LB/RB or PgUp/PgDn a page, Home/End; B, Back,
-  Esc, F1 or Guide closes it. While it is open the game sees a neutral controller (scripted
-  `--press` input still goes through).
+  Up/Down (d-pad, left stick or arrow keys) moves, LB/RB or PgUp/PgDn a page, Home/End, and the
+  mouse wheel scrolls; B, Back, Esc, F1 or Guide closes it. While it is open the game sees a neutral
+  controller (scripted `--press` input still goes through).
+- **One achievement in full:** a row has room for one line of the name and one of the description,
+  cut with `..`, and some descriptions are longer. A, Enter (not Alt+Enter, which is full screen) or
+  a left click on a row opens that achievement on a card over the dimmed list: its large icon, the
+  whole name, gamerscore, the unlock date (or "Locked"), and the whole description, wrapped. B,
+  Back, Esc, Backspace, A, Enter or any click goes back to the list; Up/Down move to the previous or
+  next achievement with the card still open. A secret one that's still locked stays hidden there too.
 - **On a Steam Deck** the Guide button is the Steam button. Steam keeps it for its own menu and the
   game never sees the press, and the Deck has no F1 key. The way in is a back grip mapped to F1 in
   the game's Steam Input layout: R4 → keyboard F1, tested in Gaming Mode on 2026-11-17 (#145; README,
@@ -774,6 +780,8 @@ the game does not even import `XamShowAchievementsUI`. The runtime draws one ins
 - F12 screenshots include what the overlay shows.
 - `--overlay-preview <file.png>[@WxH]` draws the list and a pop-up over a grey backdrop into a PNG
   (default 1920x1080) and exits: the drawing can be checked without a window or a GPU.
+  `--overlay-preview-detail` draws the list with the achievement with the longest text open in full
+  instead, to check the card's wrapping.
 
 How it is drawn: on the CPU with SDL3's software renderer (its built-in 8x8 font, scaled by
 2/3/4/6 at 720p/1080p/1440p/2160p; icons decoded with `SDL_LoadPNG_IO`), only when what is shown

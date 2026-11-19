@@ -33,11 +33,15 @@ namespace overlay
     {
         using clock = std::chrono::steady_clock;
         constexpr double kToastSeconds = 5.0; // each pop-up; several unlocks at once take turns
-        constexpr uint16_t kUp = 0x0001, kDown = 0x0002, kBack = 0x0020, kLb = 0x0100, kRb = 0x0200, kB = 0x2000, kGuide = 0x0400;
+        constexpr uint16_t kUp = 0x0001, kDown = 0x0002, kBack = 0x0020, kLb = 0x0100, kRb = 0x0200, kA = 0x1000, kB = 0x2000,
+                           kGuide = 0x0400;
 
         // ---- what is shown ----
         bool g_listOpen = false;
+        bool g_detail = false; // the selected achievement in full, over the list
         int g_selected = 0, g_top = 0, g_rowsVisible = 1;
+        SDL_FRect g_rowsRect{}; // where the visible rows are, in surface pixels, for clicks
+        float g_rowH = 0;
         std::vector<kernel::AchievementView> g_list;
         uint64_t g_seenUnlocks = 0;
         bool g_toast = false;
@@ -81,6 +85,7 @@ namespace overlay
         {
             if (open == g_listOpen) return;
             g_listOpen = open;
+            g_detail = false;
             if (open) refreshList();
             hid::setInputCaptured(open);
             g_dirty = true;
@@ -92,6 +97,28 @@ namespace overlay
             if (g_list.empty()) return;
             int s = std::clamp(g_selected + delta, 0, int(g_list.size()) - 1);
             if (s != g_selected) { g_selected = s; g_dirty = true; }
+        }
+
+        // The selected achievement in full (A, Enter or a click), and back to the list
+        void setDetail(bool on)
+        {
+            if (on && g_list.empty()) return;
+            if (on == g_detail) return;
+            g_detail = on;
+            g_dirty = true;
+            if (on) info("[overlay] achievement %u in full", g_list[size_t(g_selected)].id);
+        }
+
+        // A left click at (x, y), in surface pixels, while the list is open: on a row, that
+        // achievement in full; anywhere while one is shown, back to the list
+        void click(float x, float y)
+        {
+            if (g_detail) { setDetail(false); return; }
+            if (g_rowH <= 0 || x < g_rowsRect.x || x >= g_rowsRect.x + g_rowsRect.w || y < g_rowsRect.y) return;
+            const int i = int((y - g_rowsRect.y) / g_rowH);
+            if (i >= g_rowsVisible || g_top + i >= int(g_list.size())) return;
+            if (g_top + i != g_selected) { g_selected = g_top + i; g_dirty = true; }
+            setDetail(true);
         }
 
         // ---- drawing helpers ----
@@ -144,6 +171,34 @@ namespace overlay
         }
 
         float textWidth(const std::string& s, int scale) { return ascii(s).size() * 8.0f * scale; }
+
+        // Lines of at most `width` characters, broken at spaces; a longer word is broken where it
+        // has to be
+        std::vector<std::string> wrap(const std::string& s, size_t width)
+        {
+            std::vector<std::string> lines;
+            const std::string t = ascii(s);
+            width = std::max<size_t>(width, 1);
+            std::string line;
+            size_t at = 0;
+            while (at < t.size()) {
+                if (t[at] == ' ') { at++; continue; }
+                size_t end = t.find(' ', at);
+                if (end == std::string::npos) end = t.size();
+                std::string word = t.substr(at, end - at);
+                at = end;
+                while (word.size() > width) {
+                    if (!line.empty()) { lines.push_back(line); line.clear(); }
+                    lines.push_back(word.substr(0, width));
+                    word.erase(0, width);
+                }
+                if (line.empty()) line = word;
+                else if (line.size() + 1 + word.size() <= width) line += " " + word;
+                else { lines.push_back(line); line = word; }
+            }
+            if (!line.empty()) lines.push_back(line);
+            return lines;
+        }
 
         SDL_Texture* icon(const kernel::AchievementView& a)
         {
@@ -222,6 +277,8 @@ namespace overlay
             if (g_selected >= g_top + g_rowsVisible) g_top = g_selected - g_rowsVisible + 1;
             g_top = std::clamp(g_top, 0, std::max(0, int(g_list.size()) - g_rowsVisible));
             const float rowX = P.x + pad, rowW = P.w - pad * 3; // room for the scroll bar
+            g_rowsRect = { rowX, listY, rowW, g_rowsVisible * rowH };
+            g_rowH = rowH;
             for (int i = 0; i < g_rowsVisible && g_top + i < int(g_list.size()); i++)
             {
                 const auto& a = g_list[size_t(g_top + i)];
@@ -262,8 +319,76 @@ namespace overlay
             // Footer
             fill({ P.x, P.y + P.h - footerH, P.w, footerH }, kHeader);
             text(P.x + pad * 1.5f, P.y + P.h - footerH + (footerH - 8.0f * small) / 2, small, kDim,
-                 "Up/Down: scroll   LB/RB, PgUp/PgDn: page   B, Esc, F1, Guide: close");
+                 "Up/Down: move   LB/RB: page   A, Enter, click: read   B, Esc, F1: close", // fits 2160p's 78
+                 P.w - pad * 3);
             outline(P, kBorder, std::max(2.0f, float(s)));
+        }
+
+        // The selected achievement in full, on a card over the dimmed list (inside its rectangle,
+        // which the present path blits): the large icon, the whole name, gamerscore and when it was
+        // unlocked, and the whole description, wrapped. A row has room for one line of each.
+        void drawDetail()
+        {
+            if (g_list.empty() || g_listRect.w <= 0) return;
+            const auto& a = g_list[size_t(g_selected)];
+            const SDL_FRect& P = g_listRect;
+            const int s = g_scale, small = std::max(1, s - 1), big = s + 1;
+            const float glyph = 8.0f * s, pad = glyph * 1.5f;
+
+            SDL_SetRenderDrawBlendMode(g_sw, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(g_sw, 0, 0, 0, 150);
+            SDL_RenderFillRect(g_sw, &P);
+            SDL_SetRenderDrawBlendMode(g_sw, SDL_BLENDMODE_NONE);
+
+            const bool hidden = a.secret && !a.unlocked;
+            const std::string name = hidden ? "Secret achievement" : a.label;
+            std::string body = hidden ? "Keep playing to unlock this secret achievement."
+                                      : (a.unlocked ? a.description : a.unachieved);
+            if (body.empty() && !hidden) body = a.unlocked ? a.unachieved : a.description;
+            char gsText[16];
+            std::snprintf(gsText, sizeof(gsText), "%u G", a.gamerscore);
+            const std::string status = a.unlocked ? "Unlocked " + date(a.unlockTime) : "Locked";
+            const std::string hint = "B, Esc, click: back   Up/Down: previous, next";
+
+            const float cardW = std::floor(std::min(P.w - glyph * 4, glyph * 66));
+            const float iconSize = glyph * 6, innerW = cardW - pad * 2;
+            const float titleX = pad + iconSize + glyph * 1.5f, titleW = cardW - titleX - pad;
+            const std::vector<std::string> title = wrap(name, size_t(titleW / (8.0f * big)));
+            const float titleLineH = 8.0f * big + glyph * 0.4f, lineH = 8.0f * s + glyph * 0.6f;
+            const float topH = std::max(iconSize, title.size() * titleLineH + glyph * 0.6f + 8.0f * s);
+            std::vector<std::string> lines = wrap(body, size_t(innerW / glyph));
+            // Never taller than the list: what doesn't fit ends with ".." (no description is that long)
+            const float fixedH = pad + topH + glyph * 1.4f + glyph * 1.2f + 8.0f * small + pad;
+            const size_t room = size_t(std::max(1.0f, (P.h - glyph * 4 - fixedH) / lineH));
+            if (lines.size() > room) {
+                lines.resize(room);
+                std::string& last = lines.back();
+                const size_t width = size_t(innerW / glyph);
+                if (last.size() + 2 > width) last.resize(width > 2 ? width - 2 : 0);
+                last += "..";
+            }
+            const float cardH = std::floor(fixedH + lines.size() * lineH);
+            const SDL_FRect C = { std::floor(P.x + (P.w - cardW) / 2), std::floor(P.y + (P.h - cardH) / 2), cardW, cardH };
+            fill(C, kPanel);
+
+            drawIcon(a, { C.x + pad, C.y + pad, iconSize, iconSize }, a.unlocked);
+            float y = C.y + pad;
+            for (const std::string& l : title) {
+                text(C.x + titleX, y, big, a.unlocked ? kText : kDim, l);
+                y += titleLineH;
+            }
+            y += glyph * 0.6f - glyph * 0.4f;
+            const float gsW = text(C.x + titleX, y, s, a.unlocked ? kGold : kDim, gsText);
+            text(C.x + titleX + gsW + glyph * 2, y, s, a.unlocked ? kGreen : kDim, status,
+                 titleW - gsW - glyph * 2);
+
+            y = C.y + pad + topH + glyph * 1.4f;
+            for (const std::string& l : lines) {
+                text(C.x + pad, y, s, kText, l);
+                y += lineH;
+            }
+            text(C.x + pad, C.y + C.h - pad - 8.0f * small, small, kDim, hint, innerW);
+            outline(C, a.unlocked ? kGold : kBorder, std::max(2.0f, float(s)));
         }
 
         void drawToast(float W, float H)
@@ -344,6 +469,7 @@ namespace overlay
             }
             g_listRect = g_toastRect = g_fpsRect = {};
             if (g_listOpen) drawList(float(w), float(h));
+            if (g_listOpen && g_detail) drawDetail();
             if (g_toast) drawToast(float(w), float(h));
             if (g_showFps && !g_listOpen) drawFps(); // last: on top, as its own upload and blit leave it
             SDL_FlushRenderer(g_sw);
@@ -476,6 +602,25 @@ namespace overlay
 
     bool handleEvent(const SDL_Event& e)
     {
+        // The mouse, while the list is open: a click reads a row or goes back, the wheel scrolls
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL)
+        {
+            if (!g_listOpen) return false;
+            if (e.type == SDL_EVENT_MOUSE_WHEEL)
+            {
+                int n = e.wheel.integer_y;
+                if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) n = -n;
+                if (n) move(-n);
+                return true;
+            }
+            // Window coordinates to the overlay's pixels: it is the swapchain's size, the window's
+            // in pixels (more than its size in points on a scaled display)
+            SDL_Window* window = SDL_GetWindowFromID(e.button.windowID);
+            int w = 0, h = 0;
+            if (e.button.button == SDL_BUTTON_LEFT && window && g_surface && SDL_GetWindowSize(window, &w, &h) && w > 0 && h > 0)
+                click(e.button.x * float(g_surface->w) / float(w), e.button.y * float(g_surface->h) / float(h));
+            return true;
+        }
         if (e.type != SDL_EVENT_KEY_DOWN) return false;
         SDL_Keycode k = e.key.key;
         if (k == SDLK_F1)
@@ -486,7 +631,16 @@ namespace overlay
         if (!g_listOpen) return false;
         switch (k)
         {
-        case SDLK_ESCAPE: setOpen(false); return true;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER:
+            if (e.key.mod & SDL_KMOD_ALT) return false; // Alt+Enter: full screen (presenter.cpp)
+            if (!e.key.repeat) setDetail(!g_detail);
+            return true;
+        case SDLK_BACKSPACE: setDetail(false); return true;
+        case SDLK_ESCAPE:
+            if (g_detail) setDetail(false);
+            else setOpen(false);
+            return true;
         case SDLK_UP: move(-1); return true;
         case SDLK_DOWN: move(1); return true;
         case SDLK_PAGEUP: move(-g_rowsVisible); return true;
@@ -502,7 +656,13 @@ namespace overlay
         if (!presses) return;
         if (presses & kGuide) { setOpen(!g_listOpen); return; }
         if (!g_listOpen) return;
-        if (presses & (kB | kBack)) { setOpen(false); return; }
+        if (presses & (kB | kBack))
+        {
+            if (g_detail) setDetail(false);
+            else setOpen(false);
+            return;
+        }
+        if (presses & kA) { setDetail(!g_detail); return; }
         if (presses & kUp) move(-1);
         if (presses & kDown) move(1);
         if (presses & kLb) move(-g_rowsVisible);
@@ -601,7 +761,7 @@ namespace overlay
         g_surface = nullptr;
     }
 
-    bool writePreview(const char* path, uint32_t width, uint32_t height)
+    bool writePreview(const char* path, uint32_t width, uint32_t height, bool detail)
     {
         if (!ensureSurface(width, height)) return false;
         refreshList();
@@ -609,7 +769,19 @@ namespace overlay
         g_selected = 0;
         for (size_t i = 0; i < g_list.size(); i++)
             if (g_list[i].unlocked) { g_selected = int(i); break; }
-        g_toast = !g_list.empty();
+        if (detail)
+        {
+            // The one with the longest text it would show, to check the wrapping
+            size_t longest = 0;
+            for (size_t i = 0; i < g_list.size(); i++)
+            {
+                const auto& a = g_list[i];
+                const size_t n = (a.secret && !a.unlocked) ? 0 : (a.unlocked ? a.description : a.unachieved).size();
+                if (n > longest) { longest = n; g_selected = int(i); }
+            }
+            g_detail = !g_list.empty();
+        }
+        g_toast = !g_list.empty() && !g_detail; // the card is what's being checked
         g_toastQueue.clear();
         if (g_toast) g_toastItem = g_list[size_t(g_selected)];
         if (g_list.size() > 1) g_toastQueue.push_back(g_list[0]); // shows "+1 more"

@@ -18,11 +18,12 @@ namespace vkctx { struct Context; }
 namespace overlay
 {
     // A window event. Returns true if the overlay used it (F1, and while the list is open its
-    // navigation keys).
+    // navigation keys, Enter, and the mouse's clicks and wheel).
     bool handleEvent(const SDL_Event& e);
 
     // Controller presses from hid::takeMenuPresses() (Guide toggles the list; while it is open:
-    // d-pad / left stick to move, LB/RB a page, B or Back to close).
+    // d-pad / left stick to move, LB/RB a page, A to read the selected achievement in full and
+    // back, B or Back to go back to the list, then to close it).
     void handlePad(uint32_t presses);
 
     // Present path: dst holds the game's picture in TRANSFER_DST_OPTIMAL and stays in that layout.
@@ -39,6 +40,7 @@ namespace overlay
     void destroy(VkDevice device);
 
     // --overlay-preview: draws the list and a pop-up over a grey backdrop into a PNG, with no
-    // window or GPU. Needs the achievements loaded (kernel::initAchievements).
-    bool writePreview(const char* path, uint32_t width, uint32_t height);
+    // window or GPU. Needs the achievements loaded (kernel::initAchievements). `detail`
+    // (--overlay-preview-detail): with the achievement with the longest text open in full.
+    bool writePreview(const char* path, uint32_t width, uint32_t height, bool detail = false);
 }

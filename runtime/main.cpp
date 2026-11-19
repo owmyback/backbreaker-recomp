@@ -273,6 +273,7 @@ int main(int argc, char** argv)
     int skipIntroArg = -1;  // --skip-intro 0|1, the same way
     int showFpsArg = -1;    // --show-fps 0|1, the same way (#146)
     std::string overlayPreview;
+    bool overlayPreviewDetail = false;
     std::string audioDump;
     for (int i = 1; i < argc; i++)
     {
@@ -300,8 +301,11 @@ int main(int argc, char** argv)
             audio = true; // play audio in a headless run too
         else if (a == "--audio-dump" && i + 1 < argc)
             audioDump = argv[++i]; // the stereo output as a 32-bit float WAV
-        else if (a == "--overlay-preview" && i + 1 < argc)
+        else if ((a == "--overlay-preview" || a == "--overlay-preview-detail") && i + 1 < argc)
+        {
             overlayPreview = argv[++i]; // file.png or file.png@WxH: draw the achievements overlay into a PNG, then exit
+            overlayPreviewDetail = a == "--overlay-preview-detail"; // with one achievement open in full
+        }
         else if (a == "--achievements")
             listAchievements = true; // print the list with what is unlocked, then exit
         else if (a == "--fullscreen")
@@ -450,7 +454,7 @@ int main(int argc, char** argv)
             std::sscanf(overlayPreview.c_str() + at + 1, "%ux%u", &w, &h);
             overlayPreview.resize(at);
         }
-        return overlay::writePreview(overlayPreview.c_str(), w, h) ? 0 : 1;
+        return overlay::writePreview(overlayPreview.c_str(), w, h, overlayPreviewDetail) ? 0 : 1;
     }
 
     g_mainThread = kernel::createGuestThread(g_mainCtx, 0x100000);
