@@ -68,12 +68,15 @@ namespace
         auto* si = (StartInfo*)arg;
         kernel::Thread* th = si->thread;
 
-        // Per-thread alternate stack so the crash handler works here too.
+#ifndef _WIN32
+        // Per-thread alternate stack so the crash handler works here too. (Windows runs its
+        // exception handlers on the faulting thread's own stack.)
         static thread_local std::vector<uint8_t> altStack(1 << 16);
         stack_t ss{};
         ss.ss_sp = altStack.data();
         ss.ss_size = altStack.size();
         sigaltstack(&ss, nullptr);
+#endif
 
         kernel::setCurrentThread(th->guestThread); // also records the host thread for the sampler
         kernel::adoptExistingThread(th);

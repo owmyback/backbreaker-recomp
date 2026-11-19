@@ -270,6 +270,49 @@ It doesn't read the rest of the disc, so damage elsewhere goes unnoticed until t
 Messages never contain the image's path. `--progress` prints `progress <0-1> <step>` lines, the form
 RecompLauncher shows as a progress bar. `scripts/setup.sh` still uses the Python tools.
 
+## Windows (experimental, #174)
+The runtime and the game build for Windows by cross-compiling on Linux with llvm-mingw (clang, lld
+and MinGW-w64 with the UCRT, all redistributable). `ppc/` is the same generated C++ as on Linux, from
+`scripts/setup.sh`'s recompile.
+
+    scripts/windows_deps.sh      # llvm-mingw, and SDL3, shaderc, the Vulkan headers and the XMA decoder for Windows
+    cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-mingw.cmake -DBB_PORTABLE=ON \
+          -DFFMPEG_XMA=$PWD/third_party/win64/ffmpeg-xma
+    ninja -C build-win backbreaker   # build-win/backbreaker.exe: 147 MB with debug information, 54 MB stripped
+
+`backbreaker.exe` is linked statically: it needs only Windows' own DLLs, the UCRT that Windows 10
+and 11 have, and `vulkan-1.dll`, which the GPU driver installs. Like every build it holds the game's
+code, so it's never shared. What's different there:
+- **Guest memory** (`runtime/memory.cpp`): one 4 GB placeholder reservation (`VirtualAlloc2`), with
+  the 512 MB of physical memory as a section viewed at 0xA0000000 and 0xC0000000 (`MapViewOfFile3`),
+  and the rest committed. Windows maps views only at 64 KB boundaries, so the console's 0xE0000000
+  view, which starts at physical 0x1000, isn't there: the range stays reserved. On Linux, with that
+  view made inaccessible, the match route (boot, menus, Exhibition, 240 s) never touched it
+  (2026-11-19). Windows 10 1803 or newer.
+- **The write watch** (`mem::watch`): `VirtualProtect`, and a vectored exception handler in
+  `runtime/main.cpp` that takes a write to a watched page before anything else sees it.
+- **Crashes, `--timeout`, Ctrl+C**: an unhandled-exception filter prints the same report as the
+  Linux signal handler (host frames as offsets into the program), a thread ends a `--timeout` run,
+  and a console handler takes Ctrl+C.
+- **Files**: the CRT opens everything in binary mode, `runtime/platform.h` has `pread`, `pwrite`,
+  `fnmatch` and `timegm`, and the manifest (`runtime/windows/`) makes UTF-8 the process's code page,
+  so paths are UTF-8 as on Linux.
+- **The player's files**: `%LOCALAPPDATA%\backbreaker-recomp` holds what `~/.local/share` and
+  `~/.config` do on Linux.
+- **Not there yet**: the per-thread timing reports (`BB_PERF`) and the guest thread sampler, which
+  use Linux's `/proc` and signals (`runtime/debug/debug_win.cpp` stands in); the installer; a release.
+
+**Tested** (2026-11-19, under GE-Proton 11-12 on Linux; the system's Wine 11.21 hung setting up its
+prefix): boot, the menus and the match route headless, its screenshots rendered like the Linux
+build's; XMA sound through WASAPI with no underruns; a window, its Vulkan device and the boot movie.
+To run it that way, `proton run` once creates a prefix, then Proton's own Wine runs the program with
+its console output:
+
+    export STEAM_COMPAT_DATA_PATH=/tmp/bb-pfx STEAM_COMPAT_CLIENT_INSTALL_PATH=~/.local/share/Steam
+    P=~/.local/share/Steam/compatibilitytools.d/GE-Proton11-12
+    "$P/proton" run build-win/backbreaker.exe --version
+    WINEPREFIX=/tmp/bb-pfx/pfx "$P/files/bin/wine" build-win/backbreaker.exe --headless --timeout 30
+
 ## Where files live
 `runtime/paths.cpp` (#134). Two layouts:
 - **Checkout** (the default, as before): everything relative to the working directory, so run from

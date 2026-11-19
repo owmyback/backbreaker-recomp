@@ -1,6 +1,7 @@
 // File system imports. Guest paths (game:\, d:\, \Device\Cdrom0\, cache:\ ...) map to host
 // directories; lookups are case-insensitive like the Xbox file systems.
 #include "objects.h"
+#include "../platform.h"
 #include "import_support.h"
 #include "pack_overlay.h"
 #include "../log.h"
@@ -11,7 +12,9 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
-#include <fnmatch.h>
+#ifndef _WIN32
+#include <fnmatch.h> // Windows: runtime/platform.h
+#endif
 #include <map>
 #include <memory>
 #include <mutex>
@@ -161,7 +164,7 @@ namespace
                     // "adds": a file the disc doesn't have, such as a new play the game looks for
                     // here once its archive doesn't have it either (#169)
                     if (g_loggedOverlay.insert(o.string()).second)
-                        info("[mods] %s %s %s", o.c_str(), fs::exists(out, ec) ? "replaces" : "adds", guest.c_str());
+                        info("[mods] %s %s %s", o.string().c_str(), fs::exists(out, ec) ? "replaces" : "adds", guest.c_str());
                     out = o;
                 }
             }
@@ -214,7 +217,11 @@ namespace
 
     uint64_t fileTime(const struct stat& st)
     {
+#ifdef _WIN32
+        return 116444736000000000ull + uint64_t(st.st_mtime) * 10000000ull; // whole seconds only there
+#else
         return 116444736000000000ull + uint64_t(st.st_mtim.tv_sec) * 10000000ull + st.st_mtim.tv_nsec / 100;
+#endif
     }
 
     uint32_t attributesOf(const struct stat& st, bool writable)
@@ -305,10 +312,10 @@ namespace
             if (!exists) { flags |= O_CREAT; result = 2; } // FILE_CREATED
             if (exists && (disposition == FILE_SUPERSEDE || disposition == FILE_OVERWRITE || disposition == FILE_OVERWRITE_IF)) { flags |= O_TRUNC; result = 3; }
             if (!exists) fs::create_directories(hostPath.parent_path());
-            f->fd = ::open(hostPath.c_str(), flags, 0644);
+            f->fd = ::open(hostPath.string().c_str(), flags, 0644);
             if (f->fd < 0)
             {
-                warn("open \"%s\" -> %s failed: %s", guest.c_str(), hostPath.c_str(), strerror(errno));
+                warn("open \"%s\" -> %s failed: %s", guest.c_str(), hostPath.string().c_str(), strerror(errno));
                 delete f;
                 setIoStatus(iosb, STATUS_ACCESS_DENIED, 0);
                 return STATUS_ACCESS_DENIED;
@@ -481,7 +488,7 @@ GUEST_IMPORT(NtQueryInformationFile)
     File* f = fileFromHandle(ctx.r3.u32);
     if (!f) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
     struct stat st{};
-    if (f->fd >= 0) fstat(f->fd, &st); else stat(f->hostPath.c_str(), &st);
+    if (f->fd >= 0) fstat(f->fd, &st); else stat(f->hostPath.string().c_str(), &st);
     if (f->pack) st.st_size = off_t(f->pack->size(f->packIndex));
     uint32_t written = 0;
     switch (cls)
@@ -549,7 +556,7 @@ GUEST_IMPORT(NtQueryFullAttributesFile)
         std::lock_guard guard(g_fsLock);
         ok = resolve(guest, p, writable);
     }
-    if (!ok || stat(p.c_str(), &st) != 0)
+    if (!ok || stat(p.string().c_str(), &st) != 0)
     {
         info("query attributes \"%s\": not found", guest.c_str());
         ctx.r3.u64 = STATUS_OBJECT_NAME_NOT_FOUND;
@@ -627,7 +634,7 @@ GUEST_IMPORT(NtQueryDirectoryFile)
     std::string name = p.filename().string();
     if (len < 0x40 + name.size()) { ctx.r3.u64 = STATUS_INFO_LENGTH_MISMATCH; return; }
     struct stat st{};
-    stat(p.c_str(), &st);
+    stat(p.string().c_str(), &st);
     write32(out + 0x00, 0); // NextEntryOffset
     write32(out + 0x04, uint32_t(f->dirIndex - 1));
     for (int i = 0; i < 4; i++) write64(out + 0x08 + i * 8, fileTime(st));

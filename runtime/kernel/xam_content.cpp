@@ -267,7 +267,7 @@ GUEST_IMPORT(XamContentCreateEx)
         kernel::addSymbolicLink("\\??\\" + root + ":", device);
         g_open[key] = device;
         info("[xam] content %s: %s \"%s\" as %s: (%s)", disposition == 1 ? "created" : "opened", c.fileName.c_str(),
-             toUtf8(c.displayName).c_str(), root.c_str(), path.c_str());
+             toUtf8(c.displayName).c_str(), root.c_str(), path.string().c_str());
     }
     else
         info("[xam] content create/open of \"%s\" (flags %X) failed: %u", c.fileName.c_str(), flags, result);

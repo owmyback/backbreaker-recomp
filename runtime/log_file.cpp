@@ -1,5 +1,6 @@
 // The run's log as a file (#146): see log_file.h.
 #include "log_file.h"
+#include "platform.h"
 #include "log.h"
 
 #include <algorithm>
@@ -99,7 +100,11 @@ namespace log_file
             writeAll(STDERR_FILENO, note, sizeof note - 1);
             copyNew();
             int to = g_console.load();
+#ifdef _WIN32
+            if (to < 0) to = open("NUL", O_WRONLY | O_CLOEXEC);
+#else
             if (to < 0) to = open("/dev/null", O_WRONLY | O_CLOEXEC);
+#endif
             if (to >= 0) dup2(to, STDERR_FILENO); // the file stops here; copyNew() still sends what raced in
         }
 
@@ -146,9 +151,13 @@ namespace log_file
             close(fd);
             return {};
         }
-        std::signal(SIGPIPE, SIG_IGN);
         std::fflush(stderr);
+#ifdef _WIN32
+        g_console.store(_dup(STDERR_FILENO)); // -1 if the process had no stderr (no pipes to break here)
+#else
+        std::signal(SIGPIPE, SIG_IGN);
         g_console.store(fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3)); // -1 if the process had no stderr
+#endif
         dup2(fd, STDERR_FILENO);
         close(fd);
         g_started.store(true);

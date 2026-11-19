@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include "../platform.h"
+
 #include <fcntl.h>
 #include <fstream>
 #include <map>
@@ -155,7 +157,7 @@ namespace kernel::pack
             index.assign(std::istreambuf_iterator<char>(in), {});
         }
         struct stat st{};
-        if (index.empty() || stat(pkd.c_str(), &st) != 0)
+        if (index.empty() || stat(pkd.string().c_str(), &st) != 0)
         {
             log.push_back("[mods] can't read " + archive + "'s index or data, so its entries can't be replaced");
             return nullptr;
@@ -176,7 +178,7 @@ namespace kernel::pack
             auto found = byName.find(lower(e.name));
             if (found == byName.end())
                 continue;
-            int fd = ::open(found->second.c_str(), O_RDONLY | O_CLOEXEC);
+            int fd = ::open(found->second.string().c_str(), O_RDONLY | O_CLOEXEC);
             struct stat fst{};
             if (fd < 0 || fstat(fd, &fst) != 0)
             {
@@ -201,7 +203,7 @@ namespace kernel::pack
         }
         if (o->m_files.empty())
             return nullptr;
-        o->m_dataFd = ::open(pkd.c_str(), O_RDONLY | O_CLOEXEC);
+        o->m_dataFd = ::open(pkd.string().c_str(), O_RDONLY | O_CLOEXEC);
         if (o->m_dataFd < 0)
         {
             log.push_back("[mods] can't open " + pkd.string() + ": " + strerror(errno));

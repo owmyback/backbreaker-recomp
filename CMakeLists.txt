@@ -16,6 +16,12 @@ set(COMMON_INCLUDES ${CMAKE_SOURCE_DIR}/ppc ${XENON}/XenonUtils ${XENON}/thirdpa
 set(COMMON_FLAGS -march=x86-64-v3 -fno-strict-aliasing)
 set(PPC_FLAGS ${COMMON_FLAGS} -O2 -Wno-everything)
 set(RUNTIME_FLAGS ${COMMON_FLAGS} -Wall -Wno-unused-function)
+# Windows (#174), cross-compiled with llvm-mingw: mingw's localtime_r/gmtime_r, 64-bit off_t and
+# stat, and windows.h without min/max macros. runtime/platform.h has the rest.
+if (WIN32)
+    add_compile_definitions(_POSIX_THREAD_SAFE_FUNCTIONS _FILE_OFFSET_BITS=64 WIN32_LEAN_AND_MEAN NOMINMAX)
+    enable_language(RC)
+endif()
 
 # The build is split in two (#138): the runtime, a library that needs no game files and can be
 # shipped prebuilt as the "runtime kit" (see the end of this file), and the game, which is the
@@ -78,6 +84,15 @@ file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/runtime/generated/*.cpp)
 set(IMPORT_GLUE ${CMAKE_SOURCE_DIR}/runtime/generated/imports.cpp)
 list(REMOVE_ITEM RUNTIME_SOURCES ${IMPORT_GLUE})
+# Windows has its own platform shims; the Linux-only debugging aids (signals, /proc) stay out and
+# runtime/debug/debug_win.cpp stands in for them
+set(WINDOWS_ONLY_SOURCES ${CMAKE_SOURCE_DIR}/runtime/platform_win.cpp ${CMAKE_SOURCE_DIR}/runtime/debug/debug_win.cpp)
+set(LINUX_ONLY_SOURCES ${CMAKE_SOURCE_DIR}/runtime/debug/sampler.cpp ${CMAKE_SOURCE_DIR}/runtime/debug/thread_times.cpp)
+if (WIN32)
+    list(REMOVE_ITEM RUNTIME_SOURCES ${LINUX_ONLY_SOURCES})
+else()
+    list(REMOVE_ITEM RUNTIME_SOURCES ${WINDOWS_ONLY_SOURCES})
+endif()
 add_library(backbreaker_runtime STATIC ${RUNTIME_SOURCES})
 target_include_directories(backbreaker_runtime PRIVATE ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/runtime/sdk ${XENON}/XenonUtils ${XENON}/thirdparty/simde)
@@ -107,9 +122,9 @@ find_package(Vulkan REQUIRED)
 option(BB_PORTABLE "Link SDL3, shaderc and the C++ runtime statically (scripts/setup.sh --portable)" OFF)
 if (BB_PORTABLE)
     find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3-static)
-    target_link_libraries(backbreaker_runtime PUBLIC Vulkan::Vulkan SDL3::SDL3-static shaderc_combined)
-    set(GAME_LINK_OPTIONS -static-libstdc++ -static-libgcc)
     find_library(SHADERC_COMBINED shaderc_combined REQUIRED)
+    target_link_libraries(backbreaker_runtime PUBLIC Vulkan::Vulkan SDL3::SDL3-static ${SHADERC_COMBINED})
+    set(GAME_LINK_OPTIONS -static-libstdc++ -static-libgcc)
     set(KIT_STATIC_LIBS $<TARGET_FILE:SDL3::SDL3-static> ${SHADERC_COMBINED})
     set(KIT_LINK -lvulkan @KIT@/lib/$<TARGET_FILE_NAME:SDL3::SDL3-static> @KIT@/lib/libshaderc_combined.a
         -static-libstdc++ -static-libgcc -pthread)
@@ -129,6 +144,9 @@ if (EXISTS ${FFMPEG_XMA}/lib/libavcodec.a AND EXISTS ${FFMPEG_XMA}/lib/libavutil
     target_include_directories(backbreaker_runtime PRIVATE ${FFMPEG_XMA}/include)
     target_compile_definitions(backbreaker_runtime PRIVATE BB_XMA_DECODER=1)
     target_link_libraries(backbreaker_runtime PUBLIC ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a m)
+    if (WIN32)
+        target_link_libraries(backbreaker_runtime PUBLIC bcrypt) # libavutil's random seed (BCryptGenRandom)
+    endif()
     list(APPEND KIT_STATIC_LIBS ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a)
     list(APPEND KIT_LINK @KIT@/lib/libavcodec.a @KIT@/lib/libavutil.a)
     message(STATUS "XMA decoder: ${FFMPEG_XMA}")
@@ -148,8 +166,15 @@ if (NOT BB_RUNTIME_ONLY)
     target_include_directories(backbreaker PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
     target_compile_options(backbreaker PRIVATE ${RUNTIME_FLAGS})
     target_link_libraries(backbreaker PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,backbreaker_runtime>" backbreaker_ppc)
-    # export symbols so crash backtraces show guest function names
-    target_link_options(backbreaker PRIVATE -rdynamic ${GAME_LINK_OPTIONS})
+    if (WIN32)
+        # The manifest (UTF-8 code page, per-monitor DPI awareness), and everything linked in: the
+        # program needs only Windows' own DLLs and vulkan-1.dll, which the GPU driver installs
+        target_sources(backbreaker PRIVATE ${CMAKE_SOURCE_DIR}/runtime/windows/backbreaker.rc)
+        target_link_options(backbreaker PRIVATE -static -pthread)
+    else()
+        # export symbols so crash backtraces show guest function names
+        target_link_options(backbreaker PRIVATE -rdynamic ${GAME_LINK_OPTIONS})
+    endif()
 endif()
 
 # Shader disassembler / coverage tool for captured Xenos microcode (no game data needed to build)
