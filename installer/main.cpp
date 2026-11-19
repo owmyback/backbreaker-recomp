@@ -181,6 +181,33 @@ namespace
             std::printf("[installer] added Backbreaker to your applications menu (%s)\n", path.c_str());
     }
 
+    // A launcher's install (--progress) and a launcher's start (RECOMPLAUNCHER_MODE): the same file,
+    // hidden, so the game's window still gets its name and icon. KDE Plasma and GNOME take them
+    // from the entry the window's app id names; without one, a game started from RecompLauncher had
+    // no Backbreaker icon in Plasma's taskbar. Never in place of an entry for a game that's still
+    // there (installer/menu_entry.h). On stderr: a launcher reads stdout for progress lines.
+    void addHiddenEntry(const std::string& prefix)
+    {
+        const std::string game = prefix + "/bin/backbreaker";
+        const std::string text = menuEntry(game, prefix + "/game/icon.png", true);
+        if (text.empty()) return; // a path it can't write: the window goes without, as before
+        const std::string path = menuEntryPath();
+        std::vector<uint8_t> old;
+        std::string error;
+        const std::string existing = readFile(path, old, error) ? std::string(old.begin(), old.end()) : std::string();
+        if (existing == text) return;
+        const auto exists = [](const std::string& p) {
+            std::error_code ec;
+            return std::filesystem::exists(p, ec);
+        };
+        if (!launcherEntryReplaces(existing, game, exists)) return;
+        if (replaceFile(path, text.data(), text.size(), error))
+            std::fprintf(stderr, "[installer] a hidden applications entry gives the game's window its name and icon (%s)\n",
+                         path.c_str());
+        else
+            std::fprintf(stderr, "[installer] no hidden applications entry for the game's window: %s\n", error.c_str());
+    }
+
     // install from a terminal, and add-to-steam: Backbreaker as a non-Steam game in every Steam
     // account on this machine, starting <prefix>/bin/backbreaker with the title's icon
     // (installer/steam_shortcut.h). Steam has to be closed: it writes its list back when it closes.
@@ -520,7 +547,8 @@ namespace
         progress(0.01, r.message);
         if (int rc = copyGameFiles(image, r, o.prefix + "/game", progress, 0.01, 0.12)) return rc;
         if (int rc = build(o, {}, progress, 0.12)) return rc;
-        if (!o.progress) {
+        if (o.progress) addHiddenEntry(o.prefix);
+        else {
             std::printf("[installer] installed in %s\n", o.prefix.c_str());
             if (o.menuEntry) addMenuEntry(o.prefix);
             if (o.steam) addToSteam(o.prefix, false);
@@ -581,11 +609,13 @@ namespace
             if (int rc = build(o, {}, quiet, 0.0)) return rc;
         }
         ensureIcon(o.prefix + "/game"); // an install from before the icon
+        // RecompLauncher sets RECOMPLAUNCHER_MODE for every game it starts
+        const char* mode = std::getenv("RECOMPLAUNCHER_MODE");
+        if (mode) addHiddenEntry(o.prefix); // an install from before it, or one whose entry went
         const std::string game = o.prefix + "/bin/backbreaker";
         std::vector<std::string> args{game, "--data-dir", o.prefix + "/game"};
         // RecompLauncher's Big Picture mode is played from a couch or a Steam Deck: full screen
-        // whatever settings.ini says (it sets RECOMPLAUNCHER_MODE for every game it starts)
-        const char* mode = std::getenv("RECOMPLAUNCHER_MODE");
+        // whatever settings.ini says
         if (mode && std::string(mode) == "bigpicture") args.push_back("--fullscreen");
         args.insert(args.end(), o.gameArgs.begin(), o.gameArgs.end());
         std::vector<char*> argv;

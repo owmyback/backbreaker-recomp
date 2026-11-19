@@ -26,7 +26,7 @@ namespace installer
         return quote ? "\"" + out + "\"" : out;
     }
 
-    std::string menuEntry(const std::string& game, const std::string& icon)
+    std::string menuEntry(const std::string& game, const std::string& icon, bool hidden)
     {
         const std::string exec = desktopExecArg(game);
         // TryExec and Icon are plain strings: only a backslash or a control character would need care
@@ -40,6 +40,44 @@ namespace installer
                "Icon=" + icon + "\n" +
                "Terminal=false\n"
                "Categories=Game;SportsGame;\n"
-               "StartupWMClass=" + kAppId + "\n";
+               "StartupWMClass=" + kAppId + "\n" +
+               (hidden ? "NoDisplay=true\n" : "");
+    }
+
+    std::string entryValue(const std::string& entry, const std::string& key)
+    {
+        bool inGroup = false;
+        size_t at = 0;
+        while (at < entry.size()) {
+            size_t end = entry.find('\n', at);
+            if (end == std::string::npos) end = entry.size();
+            std::string line = entry.substr(at, end - at);
+            at = end + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty() && line[0] == '[') {
+                inGroup = line == "[Desktop Entry]";
+                continue;
+            }
+            const size_t eq = line.find('=');
+            if (!inGroup || eq == std::string::npos) continue;
+            // The specification allows spaces around the '='
+            size_t k = eq;
+            while (k > 0 && line[k - 1] == ' ') k--;
+            if (line.compare(0, k, key) != 0 || k != key.size()) continue;
+            size_t v = eq + 1;
+            while (v < line.size() && line[v] == ' ') v++;
+            return line.substr(v);
+        }
+        return {};
+    }
+
+    bool launcherEntryReplaces(const std::string& existing, const std::string& game,
+                               const std::function<bool(const std::string&)>& exists)
+    {
+        if (existing.empty()) return true;
+        const std::string target = entryValue(existing, "TryExec");
+        if (target.empty()) return false;
+        if (target == game) return entryValue(existing, "NoDisplay") == "true";
+        return !exists(target);
     }
 }

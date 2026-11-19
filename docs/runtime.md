@@ -83,8 +83,17 @@ once the game is installed in the default folder, and prints its help otherwise.
 which starts `<prefix>/bin/backbreaker` with the title's icon, `<prefix>/game/icon.png`. The icon is
 made from the player's own executable (the `icon` command's, `tools/title_icon.py`'s), by `install`
 or, for an older install, by `play`. `--no-menu-entry` leaves the entry out, and `--progress` (a
-launcher's install) never adds one, since the launcher has its own entry for the game. `TryExec` hides
+launcher's install) never puts one in the menu, since the launcher has its own entry for the game. `TryExec` hides
 the entry once the game's folder is gone; deleting the `.desktop` file removes it.
+
+**The window's name and icon with a launcher:** a launcher's install (`--progress`), and `play`
+started by RecompLauncher (it sets `RECOMPLAUNCHER_MODE`), write the same file hidden
+(`NoDisplay=true`): not in the menu, but KDE Plasma and GNOME take a window's name and icon from the
+entry its app id names, `backbreaker-recomp`. Without one, the game started from RecompLauncher had
+no Backbreaker icon in Plasma 6.8's taskbar on Wayland (2026-11-19), although its window had the
+icon set (`[video] window icon` in the log). The hidden entry never goes in place of an entry for a
+game that's still there (a terminal install's, or another launcher install's), nor of one without
+`TryExec`, which this installer didn't write; it replaces one whose game is gone.
 
 **Add to Steam** (#160): `install` from a terminal, and `add-to-steam` on its own, add Backbreaker
 to Steam as a non-Steam game, for every Steam account on the machine, in

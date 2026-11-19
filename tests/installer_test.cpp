@@ -435,6 +435,33 @@ int main()
                    std::string(kAppId) == "backbreaker-recomp",
                "the window's app id (runtime/video/presenter.cpp)");
         expect(menuEntry("/home/$x/bin/backbreaker", "/home/$x/game/icon.png").empty(), "no entry for a path it can't write");
+
+        // A launcher's hidden entry, for the window's name and icon only
+        const std::string g = "/lib/bin/backbreaker";
+        const std::string h = menuEntry(g, "/lib/game/icon.png", true);
+        expect(h.find("\nNoDisplay=true\n") != std::string::npos && e.find("NoDisplay") == std::string::npos,
+               "hidden: NoDisplay=true; the menu's entry has none");
+        expect(entryValue(h, "TryExec") == g && entryValue(h, "NoDisplay") == "true" &&
+                   entryValue(h, "StartupWMClass") == "backbreaker-recomp" && entryValue(h, "Hidden").empty() &&
+                   entryValue(h, "Exec") == g,
+               "entryValue reads the entry's keys");
+        expect(entryValue("[Other]\nTryExec=/x\n[Desktop Entry]\nName=B\n", "TryExec").empty() &&
+                   entryValue("[Desktop Entry]\r\nTryExec = /y\r\n", "TryExec") == "/y" &&
+                   entryValue("[Desktop Entry]\nTryExecX=/z\n", "TryExec").empty(),
+               "entryValue: only the [Desktop Entry] group, spaces around '=', CRLF, whole keys");
+        const auto there = [](const std::string& p) { return p == "/other/bin/backbreaker"; };
+        expect(launcherEntryReplaces("", g, there), "no entry yet: written");
+        expect(!launcherEntryReplaces(menuEntry("/other/bin/backbreaker", "/other/game/icon.png"), g, there) &&
+                   !launcherEntryReplaces(menuEntry("/other/bin/backbreaker", "/other/game/icon.png", true), g, there),
+               "another install that's still there, in the menu or hidden: left alone");
+        expect(launcherEntryReplaces(menuEntry("/gone/bin/backbreaker", "/gone/game/icon.png"), g, there) &&
+                   launcherEntryReplaces(menuEntry("/gone/bin/backbreaker", "/gone/game/icon.png", true), g, there),
+               "another install that's gone: replaced");
+        expect(launcherEntryReplaces(menuEntry(g, "/old/icon.png", true), g, there) &&
+                   !launcherEntryReplaces(menuEntry(g, "/lib/game/icon.png"), g, there),
+               "this game's own: rewritten while hidden, left alone in the menu");
+        expect(!launcherEntryReplaces("[Desktop Entry]\nType=Application\nName=Mine\nExec=mine\n", g, there),
+               "an entry with no TryExec isn't one of ours: left alone");
         setenv("XDG_DATA_HOME", "/xdg/data", 1);
         expect(menuEntryPath() == "/xdg/data/applications/backbreaker-recomp.desktop", "the entry's path ($XDG_DATA_HOME)");
         setenv("XDG_DATA_HOME", "relative", 1);
