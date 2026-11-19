@@ -12,7 +12,8 @@ The game's shader pack says which effect those bytes came from:
     ps_4834dce2860f4cb2  shaders\bbshaders\player_highlight.fx360  [exact]  45 dwords at 0x15d8
 
 The pack is `PackedOutputX360.pkh` (index) + `PackedOutputX360.pkd` (data), under
-`game/disc/packedfilesx360/`. Index layout, as verified against the shipped pack:
+`game/disc/packedfilesx360/`; tools/pkd.py reads its index (`parse_index`). Index layout, as
+verified against the shipped pack:
 
     u32 entry_count            2035 on the shipped pack
     u32 total_name_bytes       93754 = sum of the name_len fields below
@@ -64,8 +65,12 @@ Never commit anything from `game/`, nor the `.fx360` files that `--extract` writ
 import argparse
 import mmap
 import pathlib
-import struct
 import sys
+
+# The archive's index is read by tools/pkd.py, which documents its layout (#169). Named by path,
+# since `python3 -I` doesn't put the script's folder on sys.path.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from pkd import PackError, parse_index  # noqa: E402
 
 # The pack is extracted game data, and `game/` is a gitignored working copy of the disc. The
 # default is anchored to this file so the tool works whatever the current folder is.
@@ -79,72 +84,8 @@ WINDOW = 4 * WORD      # anchor width used to look for shared runs
 CACHE_MAX = 8 << 20    # entries up to this size are kept in memory (every .fx360 is)
 
 
-class PackError(Exception):
-    """The pack is missing, or its index does not parse in either byte order."""
-
-
 class InputError(Exception):
     """Something named on the command line is not a capture folder or a shader dump."""
-
-
-def parse_index(pkh, pkd_size):
-    """(entries, endian) with entries = [(name, offset, size), ...].
-
-    Tries little- then big-endian and keeps whichever reading is self-consistent: the entries
-    must end exactly at the end of the index, and every entry must lie inside the data file.
-    That settles the byte order by evidence rather than assumption, and fails loudly if the
-    layout ever changes instead of returning nonsense offsets.
-    """
-    if len(pkh) < 8:
-        raise PackError("pack index is too short to hold a header")
-    problems = []
-    for endian in "<>":
-        tag = "little" if endian == "<" else "big"
-        count = struct.unpack(endian + "I", pkh[:4])[0]
-        if count == 0 or count * 12 > len(pkh):
-            problems.append(f"{tag}-endian: {count} entries cannot fit in "
-                            f"{len(pkh)} index bytes")
-            continue
-        p, ents, why, name_bytes = 8, [], None, 0
-        total_name_bytes = struct.unpack(endian + "I", pkh[4:8])[0]
-        for _ in range(count):
-            if p + 4 > len(pkh):
-                why = "the entry list runs past the end of the index"
-                break
-            (nlen,) = struct.unpack(endian + "I", pkh[p:p + 4])
-            p += 4
-            if nlen == 0 or nlen > len(pkh) - p:
-                why = f"a name length of {nlen} does not fit in the index"
-                break
-            name = pkh[p:p + nlen].split(b"\0")[0].decode("latin1")
-            name_bytes += nlen
-            p += nlen
-            if p + 8 > len(pkh):
-                why = "an entry's offset/size pair runs past the end of the index"
-                break
-            off, size = struct.unpack(endian + "II", pkh[p:p + 8])
-            p += 8
-            if off + size > pkd_size:
-                why = (f"{name or '(unnamed)'} claims {size} bytes at {off}, past the "
-                       f"{pkd_size}-byte data file")
-                break
-            ents.append((name, off, size))
-        if why:
-            problems.append(f"{tag}-endian: {why}")
-            continue
-        if p != len(pkh):
-            problems.append(f"{tag}-endian: {count} entries cover {p} of {len(pkh)} "
-                            f"index bytes")
-            continue
-        if name_bytes != total_name_bytes:
-            problems.append(f"{tag}-endian: the header says {total_name_bytes} bytes of names, "
-                            f"the entries hold {name_bytes}")
-            continue
-        return ents, endian
-    raise PackError("the pack index parses in neither byte order:\n  " +
-                    "\n  ".join(problems) +
-                    "\n  if the pack layout has changed, parse_index() needs updating before "
-                    "anything this tool prints can be trusted")
 
 
 class Pack:

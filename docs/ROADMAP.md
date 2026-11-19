@@ -10,7 +10,9 @@ stands in for the Xbox 360 kernel, GPU, audio and input.
 Work that can be picked up is tracked as GitHub issues and linked from each phase below; see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md) for how to take one.
 
-Last updated: 2026-11-18 (phase 9: the Deck is CPU-bound in matches, and a geometry cache cuts the command processor's work by
+Last updated: 2026-11-18 (modding, #169: a file in the mods folder replaces a single entry of the
+game's archive, so a changed play shows up in a match, and `tools/pkd.py` extracts and repacks the
+archive and shares mods as changes, `docs/modding.md`; phase 9: the Deck is CPU-bound in matches, and a geometry cache cuts the command processor's work by
 a quarter on the PC, #146, and thread timing reports the long frames that remain; phase 10: the AppImage runs on the Steam Deck, play-tested in Gaming Mode; the
 achievements list opens there from R4 mapped to F1, #145; slow moments on the Deck, #146, now measurable with
 a game-fps readout and a log file, #148; the installer, #138, started: RecompLauncher will be its front end,
@@ -106,6 +108,7 @@ Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" an
 | Goal | Where | Notes |
 |------|-------|-------|
 | Higher internal resolution (1440p, 4K) | Phase 4 | Done for 16:9: `resolution_scale` 1-4 in `game/settings.ini` (#115) or `--resolution-scale` renders at that multiple while the game is still told 1280x720, and matches render at a native 1280x720 instead of a stretched 1152x640 (#128), so scale 2 is exactly 2560x1440. The game sizes its post-processing buffers from that view (640x360, 320x180). 2D UI scales as-is. Ultrawide (beyond 16:9) would need camera/layout patches. |
+| Modding (plays, AI, minigames, menus) | Phase 10 | Started (#169; `docs/modding.md`). A file in the mods folder replaces the game's file at the same path, inside the archive too: the runtime shows the game a rewritten index with the replacements appended to the data, leaving its archive reader alone. Tried on 2026-11-18: an edited kickoff play changed the kicking team's line-up in an Exhibition match, a moved title-screen control moved, and a new play listed in a playbook was opened from the mods folder. Plays and playbooks are read at boot, so a change needs a restart. `tools/pkd.py` lists, extracts and repacks the archive (the shipped one repacks byte for byte) and shares a mod as a unified diff applied to each player's own copy. Not yet: the binary formats (rosters in `clubdata.dat`, the AI's play selection tables). |
 | Higher frame rate (60+ fps) | Phase 9 | 60 fps is the default for windowed play (#89; `docs/runtime.md`, "Frame rate"). The cap was D3D's present interval (2 vblanks a frame) and a fixed 1/30 s gameplay tick; both are set for 60, and PhysX steps 1/60 s either way. Play speed was wrong before because the guest clock ran at the host TSC rate, which overflowed the game's 32-bit timer frequency. Above 60 would need a faster guest vblank and a matching tick. Play-testing so far: a match at the right speed; anything that runs too fast or slow only at 60 is a follow-up. Heavy scenes (rain at night, 2,000+ draws a frame) hold 60 at resolution scale 2 (#121). |
 
 ---

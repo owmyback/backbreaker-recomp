@@ -144,6 +144,12 @@ jobs:
       - name: Run settings file test
         run: ./build/settings_test
 
+      - name: Build archive entry override test (#169, made-up archives)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/pack_overlay_test.cpp runtime/kernel/pack_overlay.cpp -o build/pack_overlay_test
+
+      - name: Run archive entry override test
+        run: ./build/pack_overlay_test
+
       - name: Build installer test (#138, synthetic images, test vectors, the menu entry and the Steam shortcut)
         # -I XenonUtils: the kernel's export tables come from the XenonRecomp clone above
         run: |
@@ -218,7 +224,8 @@ jobs:
           if grep -qF 'speed mean' fps_report.txt; then exit 1; fi
 
       # The tools' unit tests, tests/test_*.py: capture_diff.py's comparison rules against the small
-      # capture pairs in tests/data (#79), and shader_effects.py against a hand-built pack (#80).
+      # capture pairs in tests/data (#79), shader_effects.py against a hand-built pack (#80), and
+      # pkd.py's archive and mod commands against made-up archives (#169).
       # No game files or built runtime needed; shader_effects.py's shipped-pack checks skip here.
       - name: Test the tools scripts
         run: python3 -m unittest discover -s tests -p 'test_*.py'

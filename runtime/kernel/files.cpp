@@ -2,6 +2,7 @@
 // directories; lookups are case-insensitive like the Xbox file systems.
 #include "objects.h"
 #include "import_support.h"
+#include "pack_overlay.h"
 #include "../log.h"
 #include "../debug/thread_times.h"
 
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <fnmatch.h>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
@@ -51,6 +53,10 @@ namespace
         std::vector<fs::path> dirEntries; // for NtQueryDirectoryFile
         size_t dirIndex = 0;
         bool dirListed = false;
+        // The game's archive with entries replaced from the mods folder (#169): reads and sizes
+        // come from it instead of fd. packIndex: this is its .pkh, otherwise its .pkd.
+        std::shared_ptr<const kernel::pack::Overlay> pack;
+        bool packIndex = false;
         File() : kernel::Object(Type::Other) {}
         ~File() override { if (fd >= 0) close(fd); }
     };
@@ -98,6 +104,10 @@ namespace
     }
 
     std::set<std::string> g_loggedOverlay; // replaced files already in the log (under g_fsLock)
+    fs::path g_discOverlay;                 // the mods folder, if there is one (under g_fsLock)
+    // Archives (.pkh + .pkd) whose entries the mods folder replaces (#169), by the host path of the
+    // .pkh; null for one it replaces nothing in. Built at the first open. Under g_fsLock.
+    std::map<std::string, std::shared_ptr<const kernel::pack::Overlay>> g_packs;
 
     // Guest path -> host path. Returns false if no mount matches. Called with g_fsLock held.
     bool resolve(std::string guest, fs::path& out, bool& writable)
@@ -148,14 +158,58 @@ namespace
                 fs::path o = walk(m.overlay);
                 if (fs::is_regular_file(o, ec))
                 {
+                    // "adds": a file the disc doesn't have, such as a new play the game looks for
+                    // here once its archive doesn't have it either (#169)
                     if (g_loggedOverlay.insert(o.string()).second)
-                        info("[mods] %s replaces %s", o.c_str(), guest.c_str());
+                        info("[mods] %s %s %s", o.c_str(), fs::exists(out, ec) ? "replaces" : "adds", guest.c_str());
                     out = o;
                 }
             }
             return true;
         }
         return false;
+    }
+
+    // The overlay for a read-only .pkh or .pkd, or null. `index`: guest is the .pkh. Under g_fsLock.
+    std::shared_ptr<const kernel::pack::Overlay> packFor(const std::string& guest, bool& index)
+    {
+        if (g_discOverlay.empty() || guest.size() < 4)
+            return nullptr;
+        std::string ext = lower(guest.substr(guest.size() - 4));
+        if (ext != ".pkh" && ext != ".pkd")
+            return nullptr;
+        index = ext == ".pkh";
+        std::string stem = guest.substr(0, guest.size() - 4);
+        fs::path pkh, pkd;
+        bool writableIndex = false, writableData = false;
+        if (!resolve(stem + ".pkh", pkh, writableIndex) || !resolve(stem + ".pkd", pkd, writableData) || writableIndex || writableData)
+            return nullptr;
+        auto [it, fresh] = g_packs.try_emplace(pkh.string());
+        if (fresh)
+        {
+            std::vector<std::string> log;
+            it->second = kernel::pack::Overlay::build(pkh, pkd, g_discOverlay, log);
+            for (auto& line : log)
+                info("%s", line.c_str());
+        }
+        return it->second;
+    }
+
+    // NtReadFile from an archive with replaced entries: into guest memory through a host buffer, as
+    // mem::readFile does, and the log names each replacement the first time the game reads it
+    long readPack(const File& f, uint32_t guest, uint32_t len, uint64_t offset)
+    {
+        static thread_local std::vector<uint8_t> buffer;
+        buffer.resize(len);
+        long n = f.pack->read(f.packIndex, buffer.data(), len, offset);
+        if (n > 0)
+        {
+            std::memcpy(host(guest), buffer.data(), size_t(n)); // faults on watched pages, as a game write would
+            if (!f.packIndex)
+                for (auto& entry : f.pack->firstReads(offset, uint32_t(n)))
+                    info("[mods] the game read %s from the mods folder", entry.c_str());
+        }
+        return n;
     }
 
     uint64_t fileTime(const struct stat& st)
@@ -209,7 +263,8 @@ namespace
     {
         std::string guest = pathFromAttributes(attr);
         fs::path hostPath;
-        bool writable = false;
+        bool writable = false, packIndex = false;
+        std::shared_ptr<const kernel::pack::Overlay> pack;
         {
             std::lock_guard guard(g_fsLock);
             if (!resolve(guest, hostPath, writable))
@@ -218,6 +273,7 @@ namespace
                 setIoStatus(iosb, STATUS_OBJECT_PATH_NOT_FOUND, 0);
                 return STATUS_OBJECT_PATH_NOT_FOUND;
             }
+            pack = packFor(guest, packIndex);
         }
 
         constexpr uint32_t FILE_SUPERSEDE = 0, FILE_OPEN = 1, FILE_CREATE = 2, FILE_OPEN_IF = 3, FILE_OVERWRITE = 4, FILE_OVERWRITE_IF = 5;
@@ -259,6 +315,11 @@ namespace
             }
         }
         (void)FILE_CREATE; (void)FILE_OPEN_IF;
+        if (!f->directory && !wantsWrite)
+        {
+            f->pack = std::move(pack);
+            f->packIndex = packIndex;
+        }
         write32(pHandle, kernel::registerObject(f));
         setIoStatus(iosb, STATUS_SUCCESS, result);
         info("open \"%s\"%s", guest.c_str(), f->directory ? " (directory)" : "");
@@ -287,7 +348,8 @@ namespace kernel
             if (m.prefix == "\\device\\cdrom0")
             {
                 m.overlay = dir;
-                info("[mods] files in %s replace the disc's at the same path", dir.c_str());
+                g_discOverlay = dir;
+                info("[mods] files in %s replace the disc's at the same path, and the archive's entries", dir.c_str());
             }
     }
 
@@ -358,7 +420,8 @@ GUEST_IMPORT(NtReadFile)
     if (!f || f->fd < 0) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
     uint64_t off = pOffset ? read64(pOffset) : f->position;
     debug::threadtimes::Timer timer(debug::threadtimes::kFile, uint32_t(ctx.lr));
-    ssize_t n = mem::readFile(f->fd, buf, len, off); // host buffer for watched physical pages
+    ssize_t n = f->pack ? readPack(*f, buf, len, off)
+                        : mem::readFile(f->fd, buf, len, off); // host buffer for watched physical pages
     if (n < 0) n = 0;
     f->position = off + n;
     uint32_t status = (n == 0 && len > 0) ? STATUS_END_OF_FILE : STATUS_SUCCESS;
@@ -381,7 +444,7 @@ GUEST_IMPORT(NtReadFileScatter)
     {
         uint32_t page = read32(segs + i * 8 + 4); // 64-bit element, low word is the address
         uint32_t chunk = std::min<uint32_t>(0x1000, len - total);
-        ssize_t n = mem::readFile(f->fd, page, chunk, off + total);
+        ssize_t n = f->pack ? readPack(*f, page, chunk, off + total) : mem::readFile(f->fd, page, chunk, off + total);
         if (n <= 0) break;
         total += n;
         if (uint32_t(n) < chunk) break;
@@ -419,6 +482,7 @@ GUEST_IMPORT(NtQueryInformationFile)
     if (!f) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
     struct stat st{};
     if (f->fd >= 0) fstat(f->fd, &st); else stat(f->hostPath.c_str(), &st);
+    if (f->pack) st.st_size = off_t(f->pack->size(f->packIndex));
     uint32_t written = 0;
     switch (cls)
     {
@@ -490,6 +554,12 @@ GUEST_IMPORT(NtQueryFullAttributesFile)
         info("query attributes \"%s\": not found", guest.c_str());
         ctx.r3.u64 = STATUS_OBJECT_NAME_NOT_FOUND;
         return;
+    }
+    {
+        std::lock_guard guard(g_fsLock);
+        bool index = false;
+        if (auto pack = packFor(guest, index))
+            st.st_size = off_t(pack->size(index));
     }
     writeNetworkOpenInfo(ctx.r4.u32, st, writable);
     ctx.r3.u64 = STATUS_SUCCESS;

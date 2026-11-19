@@ -6,11 +6,12 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
 ## Start here
 - `docs/ROADMAP.md` - phases, current status, what each phase did and what is next
 - `docs/runtime.md` - building and running the runtime, its layout and debugging aids
+- `docs/modding.md` - changing plays, the AI's audibles, minigames and menus, and sharing it as changes
 - `docs/feasibility.md` - the original analysis and recompiler notes
 - `CONTRIBUTING.md` - rules (no game files, ever), workflow and testing for contributors
 
 ## Layout
-- `tools/`        - our own helper scripts (disc extraction, XEX decryption, switch tables, function bounds)
+- `tools/`        - our own helper scripts (disc extraction, XEX decryption, switch tables, function bounds, the game's archive)
 - `scripts/`      - contributor setup (`setup.sh`: your image to a build in one step)
 - `config/`       - XenonRecomp configuration and generated switch tables
 - `patches/`      - our changes to XenonRecomp
@@ -173,6 +174,16 @@ see when one fails:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/ntstatus_test.cpp -o build/ntstatus_test && build/ntstatus_test
 
+Archive entries replaced from the mods folder (`runtime/kernel/pack_overlay.cpp`, #169), on archives
+the test makes up: the rewritten index, the appended data and reads across it, case-insensitive
+names, both byte orders, and an index that doesn't parse:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/pack_overlay_test.cpp runtime/kernel/pack_overlay.cpp -o build/pack_overlay_test && build/pack_overlay_test
+
+The tools' own tests (`tests/test_*.py`; `tests/test_pkd.py` for `tools/pkd.py`) need no game files either:
+
+    python3 -m unittest discover -s tests -p 'test_*.py'
+
 To test against a recompile of the real game, replace `-I tests/ppc_config_stub` with `-I ppc`.
 
 `scripts/setup.sh` is linted as well, with shellcheck (same CI file; `apt-get install shellcheck`
@@ -219,8 +230,11 @@ Headless runs use 30 unless given `--fps`. What 60 changes in the game, and how:
 `docs/runtime.md`, "Frame rate" ([issue #89](https://github.com/owmyback/backbreaker-recomp/issues/89)).
 
 Files in `game/mods/` replace the disc's files at the same path, without a rebuild: for example
-`game/mods/media/Movies/Xbox360/505.wmv` replaces the 505 logo movie. The log names each replaced
-file. More, including where an installed build keeps its files: `docs/runtime.md`, "Where files live".
+`game/mods/media/Movies/Xbox360/505.wmv` replaces the 505 logo movie, and
+`game/mods/media/PlayDatabase/Offense/Dagger.pd` replaces that play inside the game's archive
+(`tools/pkd.py extract --mods` copies it out to edit). The log names each replaced file. Editing
+and sharing mods: `docs/modding.md`; where an installed build keeps its files: `docs/runtime.md`,
+"Where files live".
 
 The game opens with two logo movies (505 Games, NaturalMotion; about 21 s). `skip_intro=1` in
 `game/settings.ini` (or `--skip-intro 1` for one run) leaves them out; headless runs skip them unless
