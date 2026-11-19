@@ -13,4 +13,6 @@ That takes about 4 minutes on a Steam Deck. The game is then in the applications
 
 **Updating from an earlier release:** replace the AppImage and run `./Backbreaker-Recompiled-x86_64.AppImage play` once. It rebuilds only what changed.
 
+**Achievements:** F1, or the controller's Guide (PS) button, opens the list of achievements over the game, and the same key or button closes it. On a Steam Deck the Steam button belongs to Steam and there's no F1 key: in Steam, open the game's controller settings and map the back grip R4 to the keyboard key F1.
+
 Built from @COMMIT@. Backbreaker's code is under the GNU GPL, version 3 or later; the game itself belongs to its owners. `MANIFEST.txt` lists every package and version inside; `NOTICES.txt` has their licences and where their source is; `third-party-sources.tar.xz` holds the source of the GPL and LGPL parts no distribution keeps. More in [docs/runtime.md, "Installer tools"](https://github.com/@REPO@/blob/@COMMIT@/docs/runtime.md#installer-tools).

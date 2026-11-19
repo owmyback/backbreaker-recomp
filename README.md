@@ -3,6 +3,18 @@
 Exploratory project to statically recompile Backbreaker (2010, NaturalMotion) for native Linux
 using XenonRecomp. Requires a legally owned disc image; no game data is in this repository.
 
+## Playing it
+- **With RecompLauncher:** add this repository's link in RecompLauncher. It downloads the installer
+  from the [latest release](https://github.com/owmyback/backbreaker-recomp/releases/latest), asks
+  for your disc image, builds the game on your machine and adds it to Steam.
+- **From a terminal:** the release's `Backbreaker-Recompiled-x86_64.AppImage install <your disc image>`
+  does the same; the release notes have the steps.
+- **Achievements:** F1, or the controller's Guide (PS) button, opens the list of achievements over
+  the game, and the same key or button closes it. On a Steam Deck the Steam button belongs to Steam
+  and there's no F1 key: in Steam, open the game's controller settings and map the back grip R4 to
+  the keyboard key F1 (#145).
+- **Mods:** plays, the AI's audibles, minigames and menus can be changed; see `docs/modding.md`.
+
 ## Start here
 - `docs/ROADMAP.md` - phases, current status, what each phase did and what is next
 - `docs/runtime.md` - building and running the runtime, its layout and debugging aids
