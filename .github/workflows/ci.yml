@@ -155,7 +155,8 @@ jobs:
         run: |
           clang++ -std=c++20 -Wall -Wextra -O2 -I third_party/XenonRecomp/XenonUtils tests/installer_test.cpp \
             installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp \
-            installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp -o build/installer_test
+            installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp installer/platform.cpp \
+            -o build/installer_test
 
       - name: Run installer test
         run: ./build/installer_test

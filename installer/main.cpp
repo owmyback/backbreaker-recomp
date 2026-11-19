@@ -8,6 +8,7 @@
 #include "disc.h"
 #include "game_check.h"
 #include "menu_entry.h"
+#include "platform.h"
 #include "steam_shortcut.h"
 #include "xex.h"
 
@@ -24,9 +25,6 @@
 #include <string>
 #include <vector>
 
-#include <sys/statvfs.h>
-#include <unistd.h>
-
 using namespace installer;
 
 namespace
@@ -38,6 +36,13 @@ namespace
     // One word for a shell, quoted when it needs it
     std::string shellWord(const std::string& s)
     {
+#ifdef _WIN32
+        // cmd and PowerShell: in double quotes (a path can't have one)
+        bool plain = !s.empty();
+        for (char c : s)
+            if (!std::isalnum(static_cast<unsigned char>(c)) && !std::strchr("\\/._+-=:", c)) plain = false;
+        return plain ? s : "\"" + s + "\"";
+#else
         bool plain = !s.empty();
         for (char c : s)
             if (!std::isalnum(static_cast<unsigned char>(c)) && !std::strchr("/._+-=:", c)) plain = false;
@@ -45,6 +50,13 @@ namespace
         std::string quoted = "'";
         for (char c : s) quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
         return quoted + "'";
+#endif
+    }
+
+    // A path with the system's own separators, for messages and for what Windows' shortcuts store
+    std::string nativePath(const std::string& path)
+    {
+        return std::filesystem::path(path).make_preferred().string();
     }
 
     // How the player runs this program again, for the messages that tell them: the AppImage's own
@@ -53,12 +65,11 @@ namespace
     std::string selfCommand()
     {
         std::string path;
+#ifndef _WIN32
         if (const char* a = std::getenv("APPIMAGE"); a && a[0] == '/') path = a;
-        else {
-            std::error_code ec;
-            path = std::filesystem::read_symlink("/proc/self/exe", ec).string();
-            if (path.empty()) return "backbreaker-installer";
-        }
+#endif
+        if (path.empty()) path = platform::selfPath();
+        if (path.empty()) return "backbreaker-installer";
         return shellWord(path);
     }
 
@@ -79,11 +90,21 @@ namespace
         "  rebuild [options]                 translate, compile and link again\n"
         "  add-to-steam [--prefix <dir>]     Backbreaker in Steam's library, with its icon (close Steam first)\n"
         "  ppc-inputs [--bundle <dir>]       a hash of what this bundle translates and compiles the game with\n"
-        "options: --prefix <dir>   where the game is installed (default: ~/.local/share/backbreaker-recomp/install)\n"
+        "options: --prefix <dir>   where the game is installed (default: "
+#ifdef _WIN32
+        "%LOCALAPPDATA%\\backbreaker-recomp\\install"
+#else
+        "~/.local/share/backbreaker-recomp/install"
+#endif
+        ")\n"
         "         --jobs <n>       parallel compiles (default: by CPU threads and free memory)\n"
         "         --progress       'progress <0-1> <step>' lines for a launcher\n"
         "         --bundle <dir>   the toolchain, runtime kit and XenonRecomp (default: beside this program)\n"
+#ifdef _WIN32
+        "         --no-menu-entry  install: no Backbreaker in the Start menu (--progress never adds one)\n"
+#else
         "         --no-menu-entry  install: no Backbreaker in the applications menu (--progress never adds one)\n"
+#endif
         "         --no-steam       install: not added to Steam (--progress never adds it)\n"
         "exit codes: 0 done, 1 failed, 2 usage, 3 the image can't be opened, 4 not an Xbox 360 game disc,\n"
         "            5 another game, 6 damaged image or unknown release, 7 not installed, 8 the build failed\n";
@@ -158,14 +179,50 @@ namespace
     {
         const std::string icon = gameDir + "/icon.png";
         std::error_code ec;
-        if (std::filesystem::exists(icon, ec)) return;
-        std::vector<uint8_t> pe;
         std::string error;
-        if (!readFile(gameDir + "/extracted/default.pe", pe, error)) return;
-        const std::vector<uint8_t> png = titleIcon(pe);
-        if (!png.empty()) replaceFile(icon, png.data(), png.size(), error);
+        if (!std::filesystem::exists(icon, ec)) {
+            std::vector<uint8_t> pe;
+            if (!readFile(gameDir + "/extracted/default.pe", pe, error)) return;
+            const std::vector<uint8_t> png = titleIcon(pe);
+            if (png.empty() || !replaceFile(icon, png.data(), png.size(), error)) return;
+        }
+#ifdef _WIN32
+        // <game dir>/icon.ico, the same picture for what takes only an .ico there: the Start-menu
+        // shortcut, and Steam's icon for the game
+        const std::string ico = gameDir + "/icon.ico";
+        std::vector<uint8_t> png;
+        if (!std::filesystem::exists(ico, ec) && readFile(icon, png, error))
+            if (const std::vector<uint8_t> data = icoFromPng(png); !data.empty()) replaceFile(ico, data.data(), data.size(), error);
+#endif
     }
 
+    // The icon a shortcut to the game names: the .ico on Windows, else the PNG; empty when there's none
+    std::string shortcutIcon(const std::string& prefix)
+    {
+#ifdef _WIN32
+        const std::string icon = nativePath(prefix + "/game/icon.ico");
+#else
+        const std::string icon = prefix + "/game/icon.png";
+#endif
+        std::error_code ec;
+        return std::filesystem::exists(icon, ec) ? icon : std::string();
+    }
+
+#ifdef _WIN32
+    // install from a terminal or a double-click: Backbreaker in the Start menu, with the title's
+    // icon (installer/platform.h). Not with --progress: a launcher has its own entry for the game.
+    void addMenuEntry(const std::string& prefix)
+    {
+        std::string error;
+        if (!platform::writeStartMenuShortcut(nativePath(prefix + "/" + gameProgram()), shortcutIcon(prefix), error))
+            std::printf("[installer] no Start-menu shortcut: %s\n", error.c_str());
+        else
+            std::printf("[installer] added Backbreaker to your Start menu (%s)\n", platform::startMenuShortcutPath().c_str());
+    }
+
+    // Linux desktops take a window's name and icon from an entry; Windows takes the window's own
+    void addHiddenEntry(const std::string&) {}
+#else
     // install from a terminal: Backbreaker in the applications menu, with the title's icon
     // (installer/menu_entry.h). Not with --progress: a launcher has its own entry for the game.
     void addMenuEntry(const std::string& prefix)
@@ -207,6 +264,7 @@ namespace
         else
             std::fprintf(stderr, "[installer] no hidden applications entry for the game's window: %s\n", error.c_str());
     }
+#endif
 
     // install from a terminal, and add-to-steam: Backbreaker as a non-Steam game in every Steam
     // account on this machine, starting <prefix>/bin/backbreaker with the title's icon
@@ -227,10 +285,10 @@ namespace
                         " add-to-steam" + prefixOption(prefix));
         SteamShortcut s;
         s.name = "Backbreaker";
-        s.exe = prefix + "/bin/backbreaker";
-        s.startDir = prefix + "/bin";
+        s.exe = nativePath(prefix + "/" + gameProgram());
+        s.startDir = nativePath(prefix + "/bin");
         std::error_code ec;
-        if (std::filesystem::exists(prefix + "/game/icon.png", ec)) s.icon = prefix + "/game/icon.png";
+        s.icon = shortcutIcon(prefix);
         unsigned added = 0, updated = 0, unchanged = 0;
         bool flatpak = false, failed = false;
         for (const SteamInstall& install : installs) {
@@ -533,9 +591,7 @@ namespace
         std::string error;
         if (!lock.acquire(o.prefix, error)) return fail(kFailed, error);
         // The disc's files, ppc/ while it compiles, the objects and the game: about 1.6 GB at most
-        struct statvfs fsInfo {};
-        if (statvfs(o.prefix.c_str(), &fsInfo) == 0) {
-            const uint64_t free = uint64_t(fsInfo.f_bavail) * fsInfo.f_frsize;
+        if (uint64_t free = 0; platform::freeSpace(o.prefix, free)) {
             if (free < (2ull << 30))
                 return fail(kFailed, "not enough free space where the game goes (" + std::to_string(free >> 20) +
                                          " MB free, 2048 MB needed)");
@@ -554,7 +610,7 @@ namespace
             if (o.steam) addToSteam(o.prefix, false);
             std::printf("[installer] start it with: %s play%s\n", selfCommand().c_str(), prefixOption(o.prefix).c_str());
             // The game finds its files from its own path (runtime/paths.cpp), so it needs no options
-            std::printf("[installer] or start %s/bin/backbreaker itself\n", o.prefix.c_str());
+            std::printf("[installer] or start %s itself\n", nativePath(o.prefix + "/" + gameProgram()).c_str());
         }
         return kOk;
     }
@@ -575,7 +631,7 @@ namespace
     int cmdAddToSteam(const Options& o)
     {
         std::error_code ec;
-        if (!std::filesystem::exists(o.prefix + "/game/.complete", ec) || !std::filesystem::exists(o.prefix + "/bin/backbreaker", ec))
+        if (!std::filesystem::exists(o.prefix + "/game/.complete", ec) || !std::filesystem::exists(o.prefix + "/" + gameProgram(), ec))
             return fail(kNotInstalled, notInstalled(o.prefix));
         ensureIcon(o.prefix + "/game"); // an install from before the icon
         return addToSteam(o.prefix, true);
@@ -592,7 +648,8 @@ namespace
         return kOk;
     }
 
-    // The launcher's start step: builds whatever a new bundle changed, then becomes the game
+    // The launcher's start step: builds whatever a new bundle changed, then becomes the game (on
+    // Windows, starts it and waits, and its exit code is this one's)
     int cmdPlay(const Options& o)
     {
         if (!std::filesystem::exists(o.prefix + "/game/.complete"))
@@ -612,18 +669,18 @@ namespace
         // RecompLauncher sets RECOMPLAUNCHER_MODE for every game it starts
         const char* mode = std::getenv("RECOMPLAUNCHER_MODE");
         if (mode) addHiddenEntry(o.prefix); // an install from before it, or one whose entry went
-        const std::string game = o.prefix + "/bin/backbreaker";
+        const std::string game = nativePath(o.prefix + "/" + gameProgram());
         std::vector<std::string> args{game, "--data-dir", o.prefix + "/game"};
         // RecompLauncher's Big Picture mode is played from a couch or a Steam Deck: full screen
         // whatever settings.ini says
         if (mode && std::string(mode) == "bigpicture") args.push_back("--fullscreen");
         args.insert(args.end(), o.gameArgs.begin(), o.gameArgs.end());
-        std::vector<char*> argv;
-        for (std::string& s : args) argv.push_back(s.data());
-        argv.push_back(nullptr);
         std::fflush(stdout);
-        execv(game.c_str(), argv.data());
-        return fail(kFailed, "can't start " + game + " (" + std::strerror(errno) + ")");
+        bool started = false;
+        std::string error;
+        const int code = platform::runGame(args, started, error);
+        if (!started) return fail(kFailed, "can't start " + game + " (" + error + ")");
+        return code;
     }
 }
 
@@ -637,6 +694,13 @@ int main(int argc, char** argv)
         parseOptions({"play"}, false, o);
         if (std::filesystem::exists(o.prefix + "/game/.complete")) return cmdPlay(o);
         printUsage(stderr);
+#ifdef _WIN32
+        // Double-clicked in Explorer: the console window closes with this program
+        if (platform::ownsConsole()) {
+            std::fprintf(stderr, "\nPress Enter to close this window.");
+            std::getchar();
+        }
+#endif
         return kUsage;
     }
     if (a[0] == "--help" || a[0] == "-h") {

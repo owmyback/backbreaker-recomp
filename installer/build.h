@@ -11,7 +11,14 @@
 // and the install folder (by default ~/.local/share/backbreaker-recomp/install) gets the checkout's
 // layout, which XenonRecomp's config expects: config/, game/disc, game/extracted, ppc/ (headers
 // only, once compiled), obj/ and bin/backbreaker.
+//
+// On Windows (#174) the bundle is the folder `bundle` beside the program (the release zip), its
+// toolchain is llvm-mingw (clang, lld and MinGW-w64 with the UCRT, its headers in toolchain/include
+// and its libraries in toolchain/x86_64-w64-mingw32/lib: no sysroot of its own), programs end in .exe, and the
+// install folder is %LOCALAPPDATA%\backbreaker-recomp\install, with bin/backbreaker.exe.
 #pragma once
+#include "platform.h"
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -37,8 +44,10 @@ namespace installer
     // RecompLauncher reruns `install` only when prepare.version changes.
     std::string bundlePpcInputs(const Bundle& bundle);
 
-    std::string dataHome();      // $XDG_DATA_HOME when absolute (as the specification says), else ~/.local/share
+    // $XDG_DATA_HOME when absolute (as the specification says), else ~/.local/share; %LOCALAPPDATA% on Windows
+    std::string dataHome();
     std::string defaultPrefix(); // <dataHome()>/backbreaker-recomp/install
+    std::string gameProgram();   // the game inside the install folder: bin/backbreaker (.exe on Windows)
     // Parallel compiles that fit: the cores, and free memory at 1 GiB a job (the biggest ppc/ file
     // peaks at about 720 MB without debug info). `why` says which limit applied.
     unsigned chooseJobs(std::string& why);
@@ -64,9 +73,8 @@ namespace installer
     {
     public:
         bool acquire(const std::string& prefix, std::string& error);
-        ~InstallLock();
 
     private:
-        int fd_ = -1;
+        platform::FileLock lock_;
     };
 }

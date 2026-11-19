@@ -1,29 +1,20 @@
 #include "build.h"
 
 #include "crypto.h"
+#include "platform.h"
 #include "xex.h"
 
 #include <algorithm>
 #include <cerrno>
-#include <climits>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <sstream>
 #include <thread>
 
-#include <fcntl.h>
-#include <spawn.h>
-#include <sys/file.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-extern char** environ;
 
 namespace fs = std::filesystem;
 
@@ -88,6 +79,7 @@ namespace installer
                 return s;
             };
             while (std::getline(in, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back(); // a kit written with CRLF
                 if (line.empty()) continue;
                 if (line == "@GAME@") {
                     args.insert(args.end(), game.begin(), game.end());
@@ -114,44 +106,15 @@ namespace installer
             return text.substr(at);
         }
 
-        // Starts argv with the toolchain's libraries first on the library path, its stdout and stderr
-        // going to `log`. The environment is otherwise the caller's.
-        pid_t spawn(const std::vector<std::string>& argv, const std::string& libraryPath, const std::string& log,
-                    std::string& error)
-        {
-            std::vector<std::string> env;
-            for (char** e = environ; *e; e++)
-                if (std::strncmp(*e, "LD_LIBRARY_PATH=", 16) != 0) env.emplace_back(*e);
-            if (!libraryPath.empty()) env.push_back("LD_LIBRARY_PATH=" + libraryPath);
-            std::vector<char*> args, envp;
-            for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
-            args.push_back(nullptr);
-            for (const std::string& e : env) envp.push_back(const_cast<char*>(e.c_str()));
-            envp.push_back(nullptr);
-            posix_spawn_file_actions_t actions;
-            posix_spawn_file_actions_init(&actions);
-            posix_spawn_file_actions_addopen(&actions, 1, log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            posix_spawn_file_actions_adddup2(&actions, 1, 2);
-            pid_t pid = -1;
-            const int rc = posix_spawn(&pid, argv[0].c_str(), &actions, nullptr, args.data(), envp.data());
-            posix_spawn_file_actions_destroy(&actions);
-            if (rc != 0) {
-                error = "can't start " + argv[0] + " (" + std::strerror(rc) + ")";
-                return -1;
-            }
-            return pid;
-        }
-
-        bool succeeded(int status) { return WIFEXITED(status) && WEXITSTATUS(status) == 0; }
-
+        // argv with its output in `log` (installer/platform.h, spawn), waited for
         bool run(const std::vector<std::string>& argv, const std::string& libraryPath, const std::string& log,
                  std::string& error)
         {
-            const pid_t pid = spawn(argv, libraryPath, log, error);
-            if (pid < 0) return false;
-            int status = 0;
-            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-            if (!succeeded(status)) {
+            platform::Child child = 0;
+            if (!platform::spawn(argv, libraryPath, log, child, error)) return false;
+            size_t index = 0;
+            bool ok = false;
+            if (!platform::waitAny({child}, index, ok) || !ok) {
                 error = fs::path(argv[0]).filename().string() + " failed (log: " + log + "):" + tail(log, 15);
                 return false;
             }
@@ -197,10 +160,18 @@ namespace installer
             for (auto it = fs::recursive_directory_iterator(b.kit, ec); !ec && it != fs::recursive_directory_iterator();
                  it.increment(ec)) {
                 if (!it->is_regular_file()) continue;
+#ifdef _WIN32
+                std::error_code e;
+                // In the file clock's own units (libc++ counts them in 128 bits)
+                const long long when = (long long)fs::last_write_time(it->path(), e).time_since_epoch().count();
+                lines.push_back(fs::relative(it->path(), b.kit).string() + " " + std::to_string(it->file_size(e)) + " " +
+                                std::to_string(when));
+#else
                 struct stat st {};
                 stat(it->path().c_str(), &st);
                 lines.push_back(fs::relative(it->path(), b.kit).string() + " " + std::to_string(st.st_size) + " " +
                                 std::to_string(st.st_mtim.tv_sec) + "." + std::to_string(st.st_mtim.tv_nsec));
+#endif
             }
             std::sort(lines.begin(), lines.end());
             std::string all = ppc + "\n";
@@ -210,7 +181,12 @@ namespace installer
 
         std::vector<std::string> toolchainCompile(const Bundle& b)
         {
+#ifdef _WIN32
+            // llvm-mingw: clang finds its MinGW-w64 headers and libraries (UCRT) beside itself
+            return {b.cxx, "--target=x86_64-w64-mingw32"};
+#else
             return {b.cxx, "--target=x86_64-linux-gnu", "--sysroot=" + b.sysroot};
+#endif
         }
 
         // XenonRecomp into <prefix>/ppc, with the config copied beside the game files: its paths
@@ -279,7 +255,9 @@ namespace installer
                 base.push_back(a);
             base.insert(base.end(), kPpcExtraFlags.begin(), kPpcExtraFlags.end());
 
-            std::map<pid_t, size_t> running;
+            jobs = std::min(jobs, platform::maxJobs());
+            std::vector<platform::Child> running; // and which unit each one compiles
+            std::vector<size_t> runningUnit;
             size_t next = 0, finished = 0;
             bool failed = false;
             while (finished < units.size()) {
@@ -287,29 +265,25 @@ namespace installer
                     const Unit& u = units[next];
                     std::vector<std::string> argv = base;
                     argv.insert(argv.end(), {"-c", u.source, "-o", u.object});
-                    const pid_t pid = spawn(argv, b.toolchainLib, u.object + ".log", error);
-                    if (pid < 0) {
+                    platform::Child child = 0;
+                    if (!platform::spawn(argv, b.toolchainLib, u.object + ".log", child, error)) {
                         failed = true;
                         break;
                     }
-                    running[pid] = next++;
+                    running.push_back(child);
+                    runningUnit.push_back(next++);
                 }
-                if (running.empty()) break;
-                int status = 0;
-                const pid_t pid = waitpid(-1, &status, 0);
-                if (pid < 0) {
-                    if (errno == EINTR) continue;
-                    break;
-                }
-                auto it = running.find(pid);
-                if (it == running.end()) continue;
-                const Unit& u = units[it->second];
-                running.erase(it);
+                size_t index = 0;
+                bool ok = false;
+                if (!platform::waitAny(running, index, ok)) break;
+                const Unit& u = units[runningUnit[index]];
+                running.erase(running.begin() + long(index));
+                runningUnit.erase(runningUnit.begin() + long(index));
                 finished++;
-                if (!succeeded(status)) {
+                if (!ok) {
                     if (!failed) error = "compiling " + fs::path(u.source).filename().string() + " failed (log: " + u.object + ".log):" + tail(u.object + ".log", 15);
                     failed = true;
-                    for (auto& [p, i] : running) kill(p, SIGTERM);
+                    for (platform::Child c : running) platform::terminate(c);
                     continue;
                 }
                 fs::remove(u.object + ".log", ec);
@@ -352,11 +326,12 @@ namespace installer
             argv = toolchainCompile(b);
             argv.push_back("-fuse-ld=lld");
             for (const std::string& a : readArgs(share + "/game-link.args", b.kit, prefix + "/ppc", game)) argv.push_back(a);
-            argv.insert(argv.end(), {"-o", prefix + "/bin/backbreaker.tmp"});
+            const std::string program = prefix + "/" + gameProgram();
+            argv.insert(argv.end(), {"-o", program + ".tmp"});
             if (!run(argv, b.toolchainLib, prefix + "/obj/link.log", error)) return false;
-            fs::rename(prefix + "/bin/backbreaker.tmp", prefix + "/bin/backbreaker", ec);
+            fs::rename(program + ".tmp", program, ec);
             if (ec) {
-                error = "can't write " + prefix + "/bin/backbreaker (" + ec.message() + ")";
+                error = "can't write " + program + " (" + ec.message() + ")";
                 return false;
             }
             return true;
@@ -367,28 +342,40 @@ namespace installer
     {
         std::string root = dir;
         if (root.empty()) {
-            char self[PATH_MAX];
-            const ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
-            if (n <= 0) {
-                error = "can't tell where this program is (/proc/self/exe)";
+            const std::string self = platform::selfPath();
+            if (self.empty()) {
+                error = "can't tell where this program is";
                 return false;
             }
-            self[n] = 0;
+#ifdef _WIN32
+            // The release zip: the program, and its bundle in the folder beside it
+            root = (fs::path(self).parent_path() / "bundle").lexically_normal().string();
+#else
             root = (fs::path(self).parent_path() / ".." / "lib" / "backbreaker-installer").lexically_normal().string();
+#endif
         }
         std::error_code ec;
         root = fs::absolute(root, ec).lexically_normal().string();
+        const std::string exe = platform::kExe;
         b.root = root;
         b.kit = root + "/kit";
-        b.xenonRecomp = root + "/xenonrecomp/XenonRecomp";
+        b.xenonRecomp = root + "/xenonrecomp/XenonRecomp" + exe;
         b.ppcContext = root + "/xenonrecomp/ppc_context.h";
         b.xenonRecompSource = root + "/xenonrecomp/SOURCE";
         b.config = root + "/config";
-        b.cxx = root + "/toolchain/bin/clang++";
+        b.cxx = root + "/toolchain/bin/clang++" + exe;
+#ifdef _WIN32
+        // llvm-mingw is its own sysroot, which clang finds by itself: include/ for every target,
+        // x86_64-w64-mingw32/lib for this one
+        b.sysroot = root + "/toolchain";
+        const std::string sysrootHeader = b.sysroot + "/include/stdio.h";
+#else
         b.sysroot = root + "/sysroot";
+        const std::string sysrootHeader = b.sysroot + "/usr/include/stdio.h";
+#endif
         b.toolchainLib = root + "/toolchain/lib";
         for (const std::string& f : {b.kit + "/share/backbreaker-runtime/game-link.args", b.xenonRecomp, b.ppcContext,
-                                     b.config + "/backbreaker.toml", b.cxx, b.sysroot + "/usr/include/stdio.h"}) {
+                                     b.config + "/backbreaker.toml", b.cxx, sysrootHeader}) {
             if (!fs::exists(f, ec)) {
                 error = "the installer's bundle is incomplete or missing (" + f + "); build it with packaging/installer/build_installer.sh";
                 return false;
@@ -413,11 +400,18 @@ namespace installer
 
     std::string dataHome()
     {
+#ifdef _WIN32
+        // Where the game keeps the player's files there too (runtime/paths.cpp)
+        return platform::localAppData();
+#else
         // Relative values are ignored, as the game does (runtime/paths.cpp), so both agree
         if (const char* data = std::getenv("XDG_DATA_HOME"); data && data[0] == '/') return data;
         const char* home = std::getenv("HOME");
         return std::string(home && *home ? home : ".") + "/.local/share";
+#endif
     }
+
+    std::string gameProgram() { return std::string("bin/backbreaker") + platform::kExe; }
 
     std::string defaultPrefix()
     {
@@ -427,15 +421,9 @@ namespace installer
     unsigned chooseJobs(std::string& why)
     {
         const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-        uint64_t available = 0;
-        std::ifstream meminfo("/proc/meminfo");
-        std::string key;
-        uint64_t value = 0;
-        std::string unit;
-        while (meminfo >> key >> value >> unit)
-            if (key == "MemAvailable:") available = value * 1024;
+        const uint64_t available = platform::availableMemory();
         const unsigned byMemory = available ? unsigned(std::max<uint64_t>(1, available / kBytesPerJob)) : cores;
-        const unsigned jobs = std::min(cores, byMemory);
+        const unsigned jobs = std::min({cores, byMemory, platform::maxJobs()});
         why = std::to_string(jobs) + " at a time (" + std::to_string(cores) + " CPU threads, " +
               std::to_string(available >> 20) + " MB free memory at 1 GB a job)";
         return jobs;
@@ -472,7 +460,7 @@ namespace installer
             result = BuildResult::Rebuilt;
         }
         const std::string linkHash = linkInputs(b, ppc);
-        if (o.relink || result == BuildResult::Rebuilt || stamp.link != linkHash || !fs::exists(prefix + "/bin/backbreaker", ec)) {
+        if (o.relink || result == BuildResult::Rebuilt || stamp.link != linkHash || !fs::exists(prefix + "/" + gameProgram(), ec)) {
             progress(from + (to - from) * 0.97, "linking the game");
             if (!link(b, prefix, error)) return BuildResult::Failed;
             stamp.link = linkHash;
@@ -487,17 +475,13 @@ namespace installer
     {
         std::error_code ec;
         fs::create_directories(prefix, ec);
-        fd_ = open((prefix + "/.lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-        if (fd_ < 0 || flock(fd_, LOCK_EX | LOCK_NB) != 0) {
-            error = fd_ < 0 ? "can't write to " + prefix + " (" + std::strerror(errno) + ")"
-                            : "another installer is working in " + prefix + " right now";
+        bool busy = false;
+        std::string why;
+        if (!lock_.acquire(prefix + "/.lock", busy, why)) {
+            error = busy ? "another installer is working in " + prefix + " right now"
+                         : "can't write to " + prefix + " (" + why + ")";
             return false;
         }
         return true;
-    }
-
-    InstallLock::~InstallLock()
-    {
-        if (fd_ >= 0) close(fd_);
     }
 }

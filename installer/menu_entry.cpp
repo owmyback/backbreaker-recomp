@@ -1,10 +1,32 @@
 #include "menu_entry.h"
 #include "build.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace installer
 {
+    std::vector<uint8_t> icoFromPng(const std::vector<uint8_t>& png)
+    {
+        static const uint8_t signature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+        // The signature, then IHDR first: its length (4 bytes), type, width and height (big-endian)
+        if (png.size() < 33 || !std::equal(signature, signature + 8, png.begin()) ||
+            std::memcmp(png.data() + 12, "IHDR", 4) != 0)
+            return {};
+        auto be32 = [&](size_t at) {
+            return uint32_t(png[at]) << 24 | uint32_t(png[at + 1]) << 16 | uint32_t(png[at + 2]) << 8 | png[at + 3];
+        };
+        const uint32_t width = be32(16), height = be32(20);
+        if (!width || !height || width > 256 || height > 256) return {};
+        // ICONDIR (reserved, type 1 = icon, one image), then its ICONDIRENTRY: width and height (0
+        // for 256), no palette, reserved, one plane, 32 bits a pixel, the image's size and offset (22)
+        std::vector<uint8_t> ico = {0, 0, 1, 0, 1, 0, uint8_t(width & 0xFF), uint8_t(height & 0xFF), 0, 0, 1, 0, 32, 0};
+        for (uint32_t v : {uint32_t(png.size()), 22u})
+            for (int i = 0; i < 4; i++) ico.push_back(uint8_t(v >> (8 * i)));
+        ico.insert(ico.end(), png.begin(), png.end());
+        return ico;
+    }
+
     std::string menuEntryPath()
     {
         return dataHome() + "/applications/" + kAppId + ".desktop";

@@ -19,7 +19,11 @@ set(RUNTIME_FLAGS ${COMMON_FLAGS} -Wall -Wno-unused-function)
 # Windows (#174), cross-compiled with llvm-mingw: mingw's localtime_r/gmtime_r, 64-bit off_t and
 # stat, and windows.h without min/max macros. runtime/platform.h has the rest.
 if (WIN32)
-    add_compile_definitions(_POSIX_THREAD_SAFE_FUNCTIONS _FILE_OFFSET_BITS=64 WIN32_LEAN_AND_MEAN NOMINMAX)
+    if (NOT BB_PORTABLE)
+        message(FATAL_ERROR "Windows builds link everything in: configure with -DBB_PORTABLE=ON (cmake/llvm-mingw.cmake)")
+    endif()
+    set(WIN32_DEFINITIONS _POSIX_THREAD_SAFE_FUNCTIONS _FILE_OFFSET_BITS=64 WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_compile_definitions(${WIN32_DEFINITIONS})
     enable_language(RC)
 endif()
 
@@ -126,8 +130,17 @@ if (BB_PORTABLE)
     target_link_libraries(backbreaker_runtime PUBLIC Vulkan::Vulkan SDL3::SDL3-static ${SHADERC_COMBINED})
     set(GAME_LINK_OPTIONS -static-libstdc++ -static-libgcc)
     set(KIT_STATIC_LIBS $<TARGET_FILE:SDL3::SDL3-static> ${SHADERC_COMBINED})
-    set(KIT_LINK -lvulkan @KIT@/lib/$<TARGET_FILE_NAME:SDL3::SDL3-static> @KIT@/lib/libshaderc_combined.a
-        -static-libstdc++ -static-libgcc -pthread)
+    if (WIN32)
+        # vulkan-1.dll's import library goes in the kit: a player's PC has the DLL (the GPU driver
+        # installs it) but nothing to link against
+        get_filename_component(vulkan_import_lib "${Vulkan_LIBRARY}" NAME)
+        list(APPEND KIT_STATIC_LIBS ${Vulkan_LIBRARY})
+        set(KIT_LINK @KIT@/lib/${vulkan_import_lib} @KIT@/lib/$<TARGET_FILE_NAME:SDL3::SDL3-static>
+            @KIT@/lib/libshaderc_combined.a)
+    else()
+        set(KIT_LINK -lvulkan @KIT@/lib/$<TARGET_FILE_NAME:SDL3::SDL3-static> @KIT@/lib/libshaderc_combined.a
+            -static-libstdc++ -static-libgcc -pthread)
+    endif()
 else()
     find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
     target_link_libraries(backbreaker_runtime PUBLIC Vulkan::Vulkan SDL3::SDL3 shaderc_shared)
@@ -144,17 +157,31 @@ if (EXISTS ${FFMPEG_XMA}/lib/libavcodec.a AND EXISTS ${FFMPEG_XMA}/lib/libavutil
     target_include_directories(backbreaker_runtime PRIVATE ${FFMPEG_XMA}/include)
     target_compile_definitions(backbreaker_runtime PRIVATE BB_XMA_DECODER=1)
     target_link_libraries(backbreaker_runtime PUBLIC ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a m)
-    if (WIN32)
-        target_link_libraries(backbreaker_runtime PUBLIC bcrypt) # libavutil's random seed (BCryptGenRandom)
-    endif()
     list(APPEND KIT_STATIC_LIBS ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a)
     list(APPEND KIT_LINK @KIT@/lib/libavcodec.a @KIT@/lib/libavutil.a)
+    if (WIN32)
+        target_link_libraries(backbreaker_runtime PUBLIC bcrypt) # libavutil's random seed (BCryptGenRandom)
+        list(APPEND KIT_LINK -lbcrypt)
+    endif()
     message(STATUS "XMA decoder: ${FFMPEG_XMA}")
 else()
     message(WARNING "No XMA decoder (third_party/ffmpeg-xma): game sounds will be silent. "
                     "Run scripts/build_xma_decoder.sh, then re-run cmake.")
 endif()
-list(APPEND KIT_LINK -lm -rdynamic)
+if (WIN32)
+    # As the game below links on Windows: SDL3's own system libraries (from its static target, so a
+    # new SDL brings its list along), everything linked in, and the manifest's resource object
+    get_target_property(sdl_link SDL3::SDL3-static INTERFACE_LINK_LIBRARIES)
+    foreach (lib IN LISTS sdl_link)
+        string(REGEX REPLACE "^\\$<LINK_ONLY:(.+)>$" "\\1" lib "${lib}")
+        if (NOT lib MATCHES "::")
+            list(APPEND KIT_LINK -l${lib})
+        endif()
+    endforeach()
+    list(APPEND KIT_LINK -static -pthread @KIT@/lib/backbreaker-resources.o)
+else()
+    list(APPEND KIT_LINK -lm -rdynamic)
+endif()
 
 # The game: the import glue, the whole runtime library and ppc/. WHOLE_ARCHIVE is needed because
 # the runtime replaces recompiled functions with strong definitions of the same name (play_lock.cpp,
@@ -203,9 +230,15 @@ if (DEFINED CMAKE_CXX_EXTENSIONS AND NOT CMAKE_CXX_EXTENSIONS)
 else()
     set(std_flag ${CMAKE_CXX20_EXTENSION_COMPILE_OPTION})
 endif()
-set(KIT_PPC_COMPILE ${config_flags} ${std_flag} ${PPC_FLAGS} -include @KIT@/include/ppc_hooks.h
+# Windows: the definitions add_compile_definitions gives every file above, so the installer compiles
+# ppc/ and the import glue as this build does (none on Linux, whose arguments stay as they were)
+set(kit_definitions)
+foreach (d IN LISTS WIN32_DEFINITIONS)
+    list(APPEND kit_definitions -D${d})
+endforeach()
+set(KIT_PPC_COMPILE ${config_flags} ${std_flag} ${kit_definitions} ${PPC_FLAGS} -include @KIT@/include/ppc_hooks.h
     -I@PPC@ -I@KIT@/include/simde)
-set(KIT_IMPORTS_COMPILE ${config_flags} ${std_flag} ${RUNTIME_FLAGS} -I@KIT@/include -I@PPC@
+set(KIT_IMPORTS_COMPILE ${config_flags} ${std_flag} ${kit_definitions} ${RUNTIME_FLAGS} -I@KIT@/include -I@PPC@
     -I@KIT@/include/simde)
 set(KIT_GAME_LINK -Wl,--whole-archive @KIT@/lib/libbackbreaker_runtime.a -Wl,--no-whole-archive
     @GAME@ ${KIT_LINK})
@@ -213,10 +246,25 @@ foreach (step ppc-compile imports-compile game-link)
     string(TOUPPER "KIT_${step}" var)
     string(REPLACE "-" "_" var "${var}")
     list(JOIN ${var} "\n" text)
-    file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/kit-args/${step}.args CONTENT "${text}\n")
+    # LF on every host: CMake on Windows would write CRLF, and the installer reads one argument a line
+    file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/kit-args/${step}.args CONTENT "${text}\n" NEWLINE_STYLE UNIX)
     install(FILES ${CMAKE_BINARY_DIR}/kit-args/${step}.args DESTINATION ${KIT_SHARE} COMPONENT runtime)
 endforeach()
 install(TARGETS backbreaker_runtime ARCHIVE DESTINATION lib COMPONENT runtime)
+if (WIN32)
+    # The game's manifest (runtime/windows/backbreaker.manifest: the UTF-8 code page its file calls
+    # rely on) as an object the installer links in, made with the same windres as the CMake build's
+    set(kit_resources ${CMAKE_BINARY_DIR}/kit-res/backbreaker-resources.o)
+    add_custom_command(OUTPUT ${kit_resources}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/kit-res
+        COMMAND ${CMAKE_RC_COMPILER} -O coff -I ${CMAKE_SOURCE_DIR}/runtime/windows
+                -i ${CMAKE_SOURCE_DIR}/runtime/windows/backbreaker.rc -o ${kit_resources}
+        DEPENDS runtime/windows/backbreaker.rc runtime/windows/backbreaker.manifest
+        COMMENT "the game's manifest for the runtime kit")
+    add_custom_target(kit_resources DEPENDS ${kit_resources})
+    add_dependencies(backbreaker_runtime kit_resources)
+    install(FILES ${kit_resources} DESTINATION lib COMPONENT runtime)
+endif()
 if (KIT_STATIC_LIBS)
     install(FILES ${KIT_STATIC_LIBS} DESTINATION lib COMPONENT runtime)
 endif()
@@ -233,10 +281,16 @@ install(SCRIPT cmake/kit_version.cmake COMPONENT runtime)
 # tools/xdvdfs.py, xex_decrypt.py, gen_imports.py and title_icon.py do, without Python or OpenSSL.
 # Builds without game files, SDL3 or Vulkan; the kernel's export tables come from XenonUtils/xbox/.
 set(INSTALLER_SOURCES installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp
-    installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp)
+    installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp installer/platform.cpp)
 add_executable(backbreaker-installer installer/main.cpp ${INSTALLER_SOURCES})
 target_include_directories(backbreaker-installer PRIVATE ${XENON}/XenonUtils)
 target_compile_options(backbreaker-installer PRIVATE -Wall -Wextra)
-if (BB_PORTABLE) # the installer's own build (packaging/installer/build_installer.sh): only glibc from the host
+if (WIN32)
+    # The game's manifest serves it too (UTF-8 code page: its arguments and paths are UTF-8, as on
+    # Linux), everything linked in, and COM for the Start-menu shortcut (installer/platform.cpp)
+    target_sources(backbreaker-installer PRIVATE ${CMAKE_SOURCE_DIR}/runtime/windows/backbreaker.rc)
+    target_link_options(backbreaker-installer PRIVATE -static)
+    target_link_libraries(backbreaker-installer PRIVATE ole32 uuid shell32)
+elseif (BB_PORTABLE) # the installer's own build (packaging/installer/build_installer.sh): only glibc from the host
     target_link_options(backbreaker-installer PRIVATE -static-libstdc++ -static-libgcc)
 endif()
