@@ -10,6 +10,7 @@
 //    write-watch faults, plus the longest single call of each kind.
 // A hitch report is the difference between the snapshots around one long frame.
 #include <algorithm>
+#include <cctype>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
@@ -198,8 +199,10 @@ namespace debug::threadtimes
         std::vector<std::pair<size_t, std::string>> stacks, functions; // (samples, name), most first
     };
 
+    // `hostFrames`: a thread that runs no guest code (the command processor): the runtime's own
+    // functions count as guest frames do, and a system DLL ("[ntdll.dll]") only as the innermost frame
     inline StackSummary summarizeStacks(const std::vector<std::vector<std::string>>& samples, const std::string& fence,
-                                        size_t topStacks = 4, size_t topFunctions = 8, size_t guestFrames = 4)
+                                        size_t topStacks = 4, size_t topFunctions = 8, size_t guestFrames = 4, bool hostFrames = false)
     {
         StackSummary out;
         out.samples = samples.size();
@@ -216,7 +219,13 @@ namespace debug::threadtimes
             std::set<std::string> seen;
             for (const std::string& f : frames)
             {
-                const bool isGuest = f.rfind("sub_", 0) == 0;
+                auto isDll = [&] {
+                    if (f.size() < 6) return false;
+                    std::string tail = f.substr(f.size() - 5);
+                    for (char& c : tail) c = char(std::tolower(static_cast<unsigned char>(c)));
+                    return tail == ".dll]";
+                };
+                const bool isGuest = f.rfind("sub_", 0) == 0 || (hostFrames && !f.empty() && !isDll());
                 if (isGuest)
                 {
                     if (seen.insert(f).second) functions[f]++;

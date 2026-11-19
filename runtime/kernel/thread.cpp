@@ -111,7 +111,7 @@ namespace
         std::lock_guard lock(kernel::g_dispatchLock);
         th->exited = true;
         th->exitCode = code;
-        kernel::signalObjectsChanged();
+        kernel::signalObject(th);
         return nullptr;
     }
 }

@@ -39,6 +39,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#include <timeapi.h>
 #else
 #include <execinfo.h>
 #include <ucontext.h>
@@ -351,6 +352,10 @@ int main(int argc, char** argv)
 {
 #ifdef _WIN32
     _set_fmode(_O_BINARY); // every file the CRT opens is binary, as on Linux (runtime/platform.h)
+    // Sleeps and timed waits last whole timer ticks on Windows, 15.6 ms unless a process asks for
+    // finer ones (#174): the guest's Sleep(1), the 1 ms time stamp bundle, the command processor's
+    // short polls for the GPU. 1 ms, for as long as the game runs (Windows ends it with the process).
+    timeBeginPeriod(1);
 #endif
     blockEndSignals(); // first: every thread started from here on inherits the mask
     std::string image; // the positional argument; default <data>/extracted/default.pe once paths are known

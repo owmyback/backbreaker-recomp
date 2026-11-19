@@ -88,10 +88,10 @@ file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/runtime/generated/*.cpp)
 set(IMPORT_GLUE ${CMAKE_SOURCE_DIR}/runtime/generated/imports.cpp)
 list(REMOVE_ITEM RUNTIME_SOURCES ${IMPORT_GLUE})
-# Windows has its own platform shims; the Linux-only debugging aids (signals, /proc) stay out and
-# runtime/debug/debug_win.cpp stands in for them
+# Windows has its own platform shims; the Linux-only guest thread sampler (signals) stays out and
+# runtime/debug/debug_win.cpp stands in for it. The thread timing (thread_times.cpp) runs on both.
 set(WINDOWS_ONLY_SOURCES ${CMAKE_SOURCE_DIR}/runtime/platform_win.cpp ${CMAKE_SOURCE_DIR}/runtime/debug/debug_win.cpp)
-set(LINUX_ONLY_SOURCES ${CMAKE_SOURCE_DIR}/runtime/debug/sampler.cpp ${CMAKE_SOURCE_DIR}/runtime/debug/thread_times.cpp)
+set(LINUX_ONLY_SOURCES ${CMAKE_SOURCE_DIR}/runtime/debug/sampler.cpp)
 if (WIN32)
     list(REMOVE_ITEM RUNTIME_SOURCES ${LINUX_ONLY_SOURCES})
 else()

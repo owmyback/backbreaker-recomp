@@ -71,6 +71,15 @@ namespace kernel
 
     void signalObjectsChanged() { g_dispatchCv.notify_all(); }
 
+    void signalObject(Object* o)
+    {
+        for (Waiter* w : o->waiters)
+        {
+            w->woken = true;
+            w->cv.notify_one();
+        }
+    }
+
     uint32_t registerObject(Object* o)
     {
         std::lock_guard guard(g_tableLock);
@@ -178,6 +187,15 @@ namespace kernel
     uint32_t waitForObjects(const std::vector<Object*>& objects, bool waitAll, Deadline deadline)
     {
         std::unique_lock lock(g_dispatchLock);
+        // On the objects' waiter lists from the first time it has to wait until it returns: a
+        // change to one of them wakes this thread (signalObject), and nothing else does
+        Waiter me;
+        bool listed = false;
+        auto done = [&](uint32_t result) {
+            if (listed)
+                for (Object* o : objects) o->waiters.erase(std::remove(o->waiters.begin(), o->waiters.end(), &me), o->waiters.end());
+            return result;
+        };
         for (;;)
         {
             if (waitAll)
@@ -187,7 +205,7 @@ namespace kernel
                 if (all)
                 {
                     for (Object* o : objects) acquire(o);
-                    return STATUS_SUCCESS;
+                    return done(STATUS_SUCCESS);
                 }
             }
             else
@@ -197,24 +215,30 @@ namespace kernel
                     if (isSignaled(objects[i]))
                     {
                         acquire(objects[i]);
-                        return uint32_t(i);
+                        return done(uint32_t(i));
                     }
                 }
             }
+            if (!listed)
+            {
+                for (Object* o : objects) o->waiters.push_back(&me);
+                listed = true;
+            }
+            me.woken = false;
             if (deadline)
             {
-                if (g_dispatchCv.wait_until(lock, *deadline) == std::cv_status::timeout && std::chrono::steady_clock::now() >= *deadline)
+                if (!me.cv.wait_until(lock, *deadline, [&] { return me.woken; }))
                 {
                     // one last check after the timeout
                     if (!waitAll)
                         for (size_t i = 0; i < objects.size(); i++)
-                            if (isSignaled(objects[i])) { acquire(objects[i]); return uint32_t(i); }
-                    return STATUS_TIMEOUT;
+                            if (isSignaled(objects[i])) { acquire(objects[i]); return done(uint32_t(i)); }
+                    return done(STATUS_TIMEOUT);
                 }
             }
             else
             {
-                g_dispatchCv.wait(lock);
+                me.cv.wait(lock, [&] { return me.woken; });
             }
         }
     }
@@ -224,7 +248,7 @@ namespace kernel
         std::lock_guard lock(g_dispatchLock);
         e->signaled = true;
         syncGuestState(e);
-        signalObjectsChanged();
+        signalObject(e);
     }
 }
 
@@ -260,7 +284,7 @@ GUEST_IMPORT(NtSetEvent)
         prev = e->signaled;
         e->signaled = true;
         syncGuestState(e);
-        signalObjectsChanged();
+        signalObject(e);
     }
     if (ctx.r4.u32) write32(ctx.r4.u32, prev);
     ctx.r3.u64 = STATUS_SUCCESS;
@@ -298,7 +322,7 @@ GUEST_IMPORT(KeSetEvent)
     uint32_t prev = e->signaled;
     e->signaled = true;
     syncGuestState(e);
-    signalObjectsChanged();
+    signalObject(e);
     ctx.r3.u64 = prev;
 }
 
@@ -333,7 +357,7 @@ GUEST_IMPORT(NtReleaseSemaphore)
         prev = s->count;
         s->count = std::min(s->count + int32_t(ctx.r4.u32), s->maximum);
         syncGuestState(s);
-        signalObjectsChanged();
+        signalObject(s);
     }
     if (ctx.r5.u32) write32(ctx.r5.u32, uint32_t(prev));
     ctx.r3.u64 = STATUS_SUCCESS;
@@ -458,7 +482,7 @@ GUEST_IMPORT(NtSetTimerEx)
                 std::lock_guard lock(g_dispatchLock);
                 t->signaled = true;
                 syncGuestState(t);
-                signalObjectsChanged();
+                signalObject(t);
             }
             if (period <= 0) return;
             when += std::chrono::milliseconds(period);

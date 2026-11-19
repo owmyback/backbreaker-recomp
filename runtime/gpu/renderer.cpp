@@ -183,9 +183,10 @@ namespace gpu::render
         // Translating the microcode takes about 2 ms for all of them, and RADV caches its own
         // pipeline compiles. So compiled SPIR-V is kept on disk, keyed by a hash of everything
         // that goes into it (the GLSL text, the stage, the color mask, the target and a format
-        // tag): $XDG_CACHE_HOME/backbreaker-recomp/spirv/<key>.spv (or ~/.cache/...). A changed
-        // translation is a different key, so the cache never needs clearing; --no-shader-cache
-        // turns it off.
+        // tag): $XDG_CACHE_HOME/backbreaker-recomp/spirv/<key>.spv (or ~/.cache/...), on Windows
+        // %LOCALAPPDATA%\backbreaker-recomp\spirv (#174: with neither variable set there, it was
+        // off, and every run compiled every shader again). A changed translation is a different key,
+        // so the cache never needs clearing; --no-shader-cache turns it off.
         bool g_shaderCacheOff = false;
         std::string g_shaderCacheDir; // empty: not set up yet, or unusable
         uint32_t g_targetEnv = 0;
@@ -196,9 +197,23 @@ namespace gpu::render
             if (tried || g_shaderCacheOff) return g_shaderCacheDir;
             tried = true;
             std::string base;
+#ifdef _WIN32
+            if (const char* l = getenv("LOCALAPPDATA"); l && *l) base = l; // beside the player's files (runtime/paths.cpp)
+#else
             if (const char* x = getenv("XDG_CACHE_HOME"); x && *x) base = x;
             else if (const char* h = getenv("HOME"); h && *h) base = std::string(h) + "/.cache";
-            if (base.empty()) return g_shaderCacheDir;
+#endif
+            if (base.empty())
+            {
+                warn("[render] shader cache off: no folder for it (%s)",
+#ifdef _WIN32
+                     "LOCALAPPDATA is not set"
+#else
+                     "neither XDG_CACHE_HOME nor HOME is set"
+#endif
+                );
+                return g_shaderCacheDir;
+            }
             std::error_code ec;
             std::string dir = base + "/backbreaker-recomp/spirv";
             std::filesystem::create_directories(dir, ec);
@@ -411,6 +426,51 @@ void main() {
             uint64_t ownedGen = 0;
         };
 
+        // Images' memory comes from blocks of kImageBlock bytes per memory type (#174): AMD's Windows
+        // driver makes every vkAllocateMemory an allocation of the operating system's, milliseconds
+        // each, and a new scene creates dozens of images (textures, resolve destinations) in a frame:
+        // 40% of the command processor's time in a load hitch. No image is ever destroyed here, so a
+        // block only fills; when the next image doesn't fit, a new block starts and the old one stays
+        // with the images in it. An image of more than a quarter block gets memory of its own.
+        struct ImageBlock
+        {
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            VkDeviceSize size = 0, used = 0;
+        };
+        std::map<uint32_t, ImageBlock> g_imageBlocks; // by memory type
+        constexpr VkDeviceSize kImageBlock = VkDeviceSize(128) << 20;
+
+        // Binds `image` to device-local memory; `own` gets the allocation when the image has one of its own
+        void bindImageMemory(VkImage image, VkDeviceMemory& own)
+        {
+            VkMemoryRequirements req;
+            vkGetImageMemoryRequirements(D, image, &req);
+            const uint32_t type = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (req.size > kImageBlock / 4)
+            {
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = req.size;
+                mai.memoryTypeIndex = type;
+                VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &own));
+                VK_CHECK(vkBindImageMemory(D, image, own, 0));
+                return;
+            }
+            ImageBlock& b = g_imageBlocks[type];
+            const VkDeviceSize align = std::max<VkDeviceSize>(req.alignment, 1);
+            VkDeviceSize at = (b.used + align - 1) / align * align;
+            if (!b.memory || at + req.size > b.size)
+            {
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = kImageBlock;
+                mai.memoryTypeIndex = type;
+                VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &b.memory));
+                b.size = kImageBlock;
+                at = 0;
+            }
+            VK_CHECK(vkBindImageMemory(D, image, b.memory, at));
+            b.used = at + req.size;
+        }
+
         Image createImage(VkImageType type, VkImageViewType viewType, VkFormat format, uint32_t w, uint32_t h, uint32_t depth,
                           uint32_t layers, uint32_t samples, VkImageUsageFlags usage, VkImageCreateFlags flags = 0, uint32_t levels = 1)
         {
@@ -433,13 +493,7 @@ void main() {
             ici.usage = usage;
             ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             VK_CHECK(vkCreateImage(D, &ici, nullptr, &img.image));
-            VkMemoryRequirements req;
-            vkGetImageMemoryRequirements(D, img.image, &req);
-            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-            mai.allocationSize = req.size;
-            mai.memoryTypeIndex = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &img.memory));
-            VK_CHECK(vkBindImageMemory(D, img.image, img.memory, 0));
+            bindImageMemory(img.image, img.memory); // img.memory: only an image with memory of its own has one
             VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
             vci.image = img.image;
             vci.viewType = viewType;
@@ -778,14 +832,20 @@ void main() {
             if (g_drawsSinceSubmit >= kChunkDraws) submitChunk();
         }
 
-        // Wait for a frame's early submits and make their fences reusable
+        // Wait for a frame's early submits and make their fences reusable. At most 64 fences a call:
+        // AMD's Windows driver fails a wait for more with VK_ERROR_UNKNOWN (#174; Windows waits for at
+        // most 64 objects at once), and the CP's idle submits at startup made up to 141 in one frame
+        constexpr uint32_t kFencesPerCall = 64;
         void waitChunks(Frame& f)
         {
             if (!f.chunksInFlight) return;
             double w0 = nowMs();
-            VK_CHECK(vkWaitForFences(D, f.chunksInFlight, f.chunkFences.data(), VK_TRUE, UINT64_MAX));
+            for (uint32_t at = 0; at < f.chunksInFlight; at += kFencesPerCall)
+                VK_CHECK(vkWaitForFences(D, std::min(kFencesPerCall, f.chunksInFlight - at), f.chunkFences.data() + at, VK_TRUE,
+                                         UINT64_MAX));
             g_perf.waitMs += nowMs() - w0;
-            VK_CHECK(vkResetFences(D, f.chunksInFlight, f.chunkFences.data()));
+            for (uint32_t at = 0; at < f.chunksInFlight; at += kFencesPerCall)
+                VK_CHECK(vkResetFences(D, std::min(kFencesPerCall, f.chunksInFlight - at), f.chunkFences.data() + at));
             f.chunksInFlight = 0;
         }
 
