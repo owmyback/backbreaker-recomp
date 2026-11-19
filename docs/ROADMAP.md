@@ -84,18 +84,18 @@ timing hid (#129).
 
 | # | Phase | Status | Commits |
 |---|-------|--------|---------|
-| 0 | Feasibility and extraction | Done | `43b7032` |
-| 1 | CPU recompilation (PowerPC -> C++) | Done | `5dad6d2`, `8efcafd`, `8400499`, `9667d0e` |
-| 2 | Host runtime boot (loader, kernel, threads, files) | Done | `0507715`, `b3796cc`, `9d09a50` |
-| 3 | Headless subsystems: game reaches the front end | Done | `8400499`, `9667d0e` |
-| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-19 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels, player highlight, decal passes, the crowd, anisotropic filtering, native 1280x720 matches) | `258ec24`, `7bf4023`, `9ac4cb9`, `733e432`, `0ed897c` |
-| 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `607e8ce` |
+| 0 | Feasibility and extraction | Done | `00ae550` |
+| 1 | CPU recompilation (PowerPC -> C++) | Done | `c713a56`, `c130d58`, `9fa6760`, `6f9fc85` |
+| 2 | Host runtime boot (loader, kernel, threads, files) | Done | `908206e`, `36d70f0`, `06e1c97` |
+| 3 | Headless subsystems: game reaches the front end | Done | `9fa6760`, `6f9fc85` |
+| 4 | Rendering (Vulkan): see the game | **In progress** (steps 0-19 done: first picture, resolution scaling, tiled textures, EDRAM aliasing, render to texture, the match's 3D view, EDRAM transfers between formats, clear rectangles bounded by their vertices, resolves written back to guest memory, mip levels, player highlight, decal passes, the crowd, anisotropic filtering, native 1280x720 matches) | `857e572`, `fe9e042`, `74e9b26`, `6b6358c`, `c0f6f44` |
+| 5 | Controller input (SDL, DualSense) | Done (DualSense tested; keyboard fallback not yet) | `4142896` |
 | 6 | Audio output (real XMA decoding, mixing) | **Done** (output to SDL3, #90; XMA decoding, #93; confirmed by ear 2026-11-15) | #92, #95 |
 | 7 | Movies (WMV / XMV playback) | **Done** (every movie stopped after a second or two: Win32 error codes, #132; boot logos skippable with `skip_intro`) | #132 |
-| 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `69ba008` |
-| 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `baa2b5f`, `2a16722`, `e859d75`, `97b8bdc` |
-| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck; Add to Steam, #160, tried on the Deck; draft GitHub releases, #160) | `100ec86` |
-| 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `1a59660`, `83fce76`, `9b2c8bf` |
+| 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `e9fd2cf` |
+| 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `d92ef75`, `2d55d49`, `5cd6844`, `7e0b5c8` |
+| 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck; Add to Steam, #160, tried on the Deck; draft GitHub releases, #160) | `54f3038` |
+| 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `d46b648`, `5d400ab`, `57278f3` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
@@ -225,7 +225,7 @@ Open issues: #5 (virtual memory grows ~1 MB per 20 s on the title screen).
 
 Goal: see the game, ideally at higher internal resolution than the console (see Goals).
 
-**Step 0 - GPU frame capture (done, `258ec24`).** `--capture-frame N[,N...]` records a frame's draws,
+**Step 0 - GPU frame capture (done, `857e572`).** `--capture-frame N[,N...]` records a frame's draws,
 shader loads, register changes, render targets and textures to `captures/frame_N/` (see
 `docs/runtime.md`). Register names and field layouts come from Xenia's register table and
 `xenos.h` (BSD). First findings:
@@ -238,7 +238,7 @@ shader loads, register changes, render targets and textures to `captures/frame_N
 - Front buffer is 1280x720 8_8_8_8 at physical 0x00840000.
 - Movies are drawn by the GPU, not decoded by us: their pictures come with the renderer.
 
-**Step 1 - Window + present (done, `6ad24c9`).** SDL3 window and Vulkan swapchain (FIFO) on the
+**Step 1 - Window + present (done, `840687e`).** SDL3 window and Vulkan swapchain (FIFO) on the
 process main thread; the game runs on its own host thread and never waits on the window. Each
 guest swap publishes the front buffer; the presenter copies it into a staging buffer, uploads it
 and blits it letterboxed into the swapchain image. Window title: game fps and display fps (30 and
@@ -256,13 +256,13 @@ Exhibition match reports no errors (docs/runtime.md, "Vulkan validation"; the tw
 render pass attachments the draw has no image for, and a shader feature enabled without asking the
 GPU for it - are fixed). #10 (screenshot key) is done: F12 reads back the swapchain image the
 presenter just drew and writes `screenshots/<date-time>.png` (what the window shows; `--screenshot N`
-saves the renderer's front buffer instead). Window polish #9 is done (`bf0641c`): F11 or Alt+Enter
+saves the renderer's front buffer instead). Window polish #9 is done (`441bd2e`): F11 or Alt+Enter
 toggles borderless fullscreen, and the windowed size, position and fullscreen state are remembered
 in `game/settings.ini` between runs (`--fullscreen` to start fullscreen). Only the windowed geometry
 is remembered, so leaving fullscreen gives the same window back. The same file can keep the
 resolution scale for windowed runs (`resolution_scale=2`, #115).
 
-**Step 2 - Shader disassembler (done, `c5562a6`).** `runtime/gpu/ucode.h` decodes Xenos microcode
+**Step 2 - Shader disassembler (done, `8d8696e`).** `runtime/gpu/ucode.h` decodes Xenos microcode
 (control flow, vertex/texture fetch, paired vector+scalar ALU; layouts from Xenia's `ucode.h`),
 `runtime/gpu/disasm.cpp` disassembles it and `build/xenos-disasm` summarizes coverage over a set
 of shaders. `--dump-shaders` collects every shader a run loads. Coverage of the 58 unique shaders
@@ -279,7 +279,7 @@ of shaders. `--dump-shaders` collects every shader a run loads. Coverage of the 
 So the translator can start small; gameplay shaders will extend this (re-run the coverage once
 the game gets further).
 
-**Step 3 - Xenos state tracking (done, `a7b0bb8`).** `runtime/gpu/state.cpp` decodes the full draw
+**Step 3 - Xenos state tracking (done, `822a27d`).** `runtime/gpu/state.cpp` decodes the full draw
 state from the register file at each draw (primitive/indices, EDRAM mode, four color targets with
 format, EDRAM tile base, write mask and blending, depth/stencil front and back, rasterizer,
 alpha test, viewport, window/screen scissor, shader register counts, export modes and constant
@@ -295,7 +295,7 @@ draw and the distinct pipeline states per frame. Findings from the 3D logo frame
   depth buffer starts at tile 64 = 256/16 rows x 4 tiles.
 - Vertex shader constants live at 0-255 and pixel shader constants at 256-511.
 
-**Step 4 - Shader translation (first version, `093c825`).** `runtime/gpu/shader_translator.cpp`
+**Step 4 - Shader translation (first version, `72b4fad`).** `runtime/gpu/shader_translator.cpp`
 emits GLSL 4.50 for Vulkan, compiled to SPIR-V with glslc/shaderc. Design: vertices are fetched
 in the vertex shader straight from guest memory (bound as one storage buffer, byte-swapped per
 the fetch constant's endianness, formats unpacked in the shader) instead of Vulkan vertex input
@@ -308,7 +308,7 @@ Not yet: loops/calls, LOD/gradient fetches,
 texture fetch offsets, pixel shader param_gen, runtime compilation with shaderc + caching (comes
 with draw execution).
 
-**Step 5 - Vulkan renderer, first picture (`7bf4023`).** `runtime/gpu/renderer.cpp` runs the
+**Step 5 - Vulkan renderer, first picture (`fe9e042`).** `runtime/gpu/renderer.cpp` runs the
 game's draws on the host GPU. The attract movie renders correctly (checked with
 `--screenshot`). Design:
 - One Vulkan device shared by the window and the renderer (`runtime/video/vk_context.cpp`); the
@@ -327,12 +327,12 @@ game's draws on the host GPU. The attract movie renders correctly (checked with
   asked. Linear textures (8, 8_8, 8_8_8_8, DXT1/3/5) upload once per frame they are used.
 - `--screenshot N` writes PNGs (headless too); `--no-render` turns the renderer off.
 
-**Step 6 - Internal resolution scaling (`9ac4cb9`).** `--resolution-scale N` (1-4) multiplies
+**Step 6 - Internal resolution scaling (`74e9b26`).** `--resolution-scale N` (1-4) multiplies
 render targets, the host viewport, scissors, resolve rectangles and clears by N while the game
 still renders "1280x720"; the guest viewport math stays in guest pixels. Checked: the attract
 movie at 3x renders a full 3840x2160 front buffer at 30 fps.
 
-**Tiled 2D addressing (`runtime/gpu/tiling.h`, issue #12, `f9566a7`).** The byte offset of a block in a tiled
+**Tiled 2D addressing (`runtime/gpu/tiling.h`, issue #12, `9c739c3`).** The byte offset of a block in a tiled
 surface, following Xenia's `texture_address::Tiled2D` (BSD, docs/licenses/xenia-LICENSE.txt): the
 32x32 macro tile origin plus the micro tile position carried by the bank/pipe bits, for block sizes
 1, 2, 4, 8 and 16 bytes. `tile2D`/`untile2D` move a whole surface between the tiled storage and
@@ -344,14 +344,14 @@ offsets of a pitch-aligned surface forming a permutation, and the header buildin
 translation units (everything in it is inline/constexpr). Not used by the renderer or the presenter
 yet.
 
-**Step 7 - Tiled textures (`1f70840`).** Textures are untiled on upload with `runtime/gpu/tiling.h`
+**Step 7 - Tiled textures (`7499f90`).** Textures are untiled on upload with `runtime/gpu/tiling.h`
 (after byte-swapping guest memory); 4_4_4_4 and 5_6_5 are expanded to RGBA8. The middleware
 logo screen and the title screen ("BACKBREAKER", "(A) START") now render with their real images.
 Visible gap: the game clears the screen with a rectangle drawn at pitch 640 with 4x MSAA, which
 on the console covers the same EDRAM as the 1280x720 target; without EDRAM aliasing (step 2
 below) that clear misses, so stale pixels show around the logos.
 
-**Step 8 - EDRAM aliasing (`882ca1b`).** Each of the 2048 EDRAM tiles remembers the render target
+**Step 8 - EDRAM aliasing (`4ca484b`).** Each of the 2048 EDRAM tiles remembers the render target
 image that wrote it last (draw scissor rectangles, resolve clears). Before a target is drawn into
 or resolved from, tiles last written through another image are copied in by a transfer shader
 that maps each sample to its EDRAM address in both layouts (pitch, MSAA 1x/2x/4x, 32/64-bit
@@ -360,7 +360,7 @@ the game's 640-pitch 4x MSAA screen clear now reaching the 1280x720 target, the 
 clean black and the title screen shows its football-field background. Transfers between
 different formats (including color <-> depth) came later, in step 11.
 
-**Step 9 - Cube maps and render to texture on the GPU (`a450796`).** Cube textures (6 faces,
+**Step 9 - Cube maps and render to texture on the GPU (`19d52ae`).** Cube textures (6 faces,
 linear or tiled, base level) upload like 2D ones. Render to texture stays on the GPU: a 2D
 8_8_8_8 texture whose address is a resolve destination samples the resolved image directly
 (with the red/blue swap the resolve asked for, and at the internal resolution), and a cube map
@@ -543,13 +543,13 @@ game renders every frame: 64 skinned fans in 128x128 tiles, a row of 8 at a time
 as 1_5_5_5 into the same 1024x1024 texture 256 KB further on. A resolve into an earlier one's image
 was placed by the EDRAM source's pixel size instead of the destination's, so every row landed on
 the legs of the row before: torsos beside their legs, fans sunk to the shoulders. Resolve images now
-record their guest bytes per pixel (#125, `733e432`).
+record their guest bytes per pixel (#125, `6b6358c`).
 
 **Step 19 - Sharpness: anisotropic filtering and native 1280x720 matches (#126, #128).** The game
 asks for anisotropic filtering on few textures, so the field blurred toward the horizon:
-`anisotropy=16` is now the default in `game/settings.ini` (`c034aa7`). And the game drew the match at
+`anisotropy=16` is now the default in `game/settings.ini` (`e69b3da`). And the game drew the match at
 1152x640 and stretched it to 1280x720; its render view is now created at 1280x720, and the game
-re-tiles the scene and sizes its post-processing from it (`0ed897c`). That exposed the resolve
+re-tiles the scene and sizes its post-processing from it (`c0f6f44`). That exposed the resolve
 rectangle: it was the scissor (whole EDRAM tile rows), so a 320x180 destination got 320x184 and its
 texture sampled four rows of stale EDRAM into the bloom; resolves now copy the rectangle their
 vertices span, within the scissor and the declared destination.
@@ -576,7 +576,7 @@ This is the largest phase (weeks to months).
 SDL3 gamepad backend behind `readPad()` in `runtime/hid/input.cpp` (DualSense over USB on the
 dev machine), vibration via `XamInputSetState`, keyboard fallback.
 
-Status (`607e8ce`, issue #6): up to four controllers through SDL3 (users 0-3, in SDL's order),
+Status (`4142896`, issue #6): up to four controllers through SDL3 (users 0-3, in SDL's order),
 mapped to XInput (south/east/west/north = A/B/X/Y, stick Y inverted), keystrokes generated from
 button, trigger and stick-direction edges, vibration forwarded with `SDL_RumbleGamepad`. With a
 window the presenter's loop polls the controllers (SDL events stay on that thread); headless
@@ -627,7 +627,7 @@ render-driver callback.
   `tests/xma_context_test.cpp`. A kick now runs one pass on the kicking thread, as in Xenia,
   instead of a polling thread. On the test route without the decoder: about 3,600 kicks/s and
   2,700 frames/s (played as silence), no parse errors, and the route plays as before. With the
-  decoder (2026-11-15, main d4ba320 + #90 + #93): 486,300 frames decoded in 260 s with 0 decode
+  decoder (2026-11-15, main 44e1007 + #90 + #93): 486,300 frames decoded in 260 s with 0 decode
   and 0 parse errors, sound in every second except 4-9 s (between the logo screens and the title music), all six
   channels in use, 30.1 fps in the match (unchanged), memory flat, and about 23 ms/s of CPU in
   XMA passes in the match (12.4 ms/s of it in FFmpeg). The game's own mix sometimes goes above
@@ -660,7 +660,7 @@ timing. See `docs/runtime.md`, "Movies".
 XamContent* (save devices, content creation/enumeration) mapped to a host directory; persist
 profile settings; device selector UI answered automatically.
 
-Status - saves done (`69ba008`, issue #7): `runtime/kernel/xam_content.cpp` implements
+Status - saves done (`e9fd2cf`, issue #7): `runtime/kernel/xam_content.cpp` implements
 content enumerators (`XamContentCreateEnumerator` / `XamEnumerate`), `XamContentCreateEx` /
 `XamContentClose` (a package is mounted as a drive such as `save:` through a runtime device
 mount + symbolic link in `files.cpp`), `XamContentGetCreator`, `XamContentSetThumbnail` and the
@@ -739,7 +739,7 @@ the Exhibition route reaches the same coin toss, wind and kickoff (#71).
 
 ## Phase 10 - Packaging (started)
 
-`scripts/setup.sh "<iso>"` (`100ec86`, #4) takes a checkout and an image of your own disc to a
+`scripts/setup.sh "<iso>"` (`54f3038`, #4) takes a checkout and an image of your own disc to a
 built `build/backbreaker` in one step: prerequisite check with the package names for the
 distribution, extraction, decryption, the XenonRecomp clone + patch + build at the pinned commit,
 the recompile, the import glue, the CMake build and the game-free tests. It skips a step whose
@@ -752,7 +752,7 @@ Next in this phase: a portable build (#134), with an **AppImage** as the main ou
 the Steam Deck (SteamOS), Debian/Ubuntu, Fedora and Arch. Status (2026-11-16): built, and checked
 headless in containers of Ubuntu 22.04 and 24.04, Debian 12 and 13, Fedora and Arch (#136: where
 files live, mods folder, CPU check; #137: the container, `setup.sh --portable`, the AppImage). On
-2026-11-17 the maintainer's Steam Deck play-test ran the AppImage (`e795ba5`) in Gaming Mode as a
+2026-11-17 the maintainer's Steam Deck play-test ran the AppImage (`a820dd1`) in Gaming Mode as a
 non-Steam game. Two follow-ups came out of it:
 - #145: on the Deck, the achievements list needs a back grip mapped to F1 (README, step 5).
 - #146: the game is slow at moments on the Deck. The Deck's performance overlay showed no drop below
@@ -929,10 +929,10 @@ What the game provides (checked 2026-11-13):
   (Corrected 2026-11-15: an earlier note here said 0x000B0025 and that the game imports
   `XamShowAchievementsUI`; it imports neither, and it has no achievements screen of its own.)
 
-Status: parts 1 and 2 are done (#97, `1a59660`): the SPA reader (`runtime/kernel/spa.h`,
+Status: parts 1 and 2 are done (#97, `d46b648`): the SPA reader (`runtime/kernel/spa.h`,
 tested), the unlock path with a per-machine store (`game/achievements/`), the enumerator, and
 `--achievements`. Confirmed in play: "First of Many" and "Quarter Pounder" unlocked, stored and
-listed. Parts 3-5 (#101, `83fce76`): the overlay (`runtime/video/overlay.cpp`), the achievements
+listed. Parts 3-5 (#101, `5d400ab`): the overlay (`runtime/video/overlay.cpp`), the achievements
 list on F1 / Guide, and the unlock pop-up, tested in the window. #105: simultaneous unlocks take
 turns in the pop-up, and each plays a synthesized unlock sound. See docs/runtime.md,
 "Achievements". All five parts below are done.
