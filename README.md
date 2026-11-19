@@ -7,6 +7,12 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
 - **With RecompLauncher:** add this repository's link in RecompLauncher. It downloads the installer
   from the [latest release](https://github.com/owmyback/backbreaker-recomp/releases/latest), asks
   for your disc image, builds the game on your machine and adds it to Steam.
+- **RecompLauncher still shows the previous release?** It gets the release list from its own
+  website, which can take a few minutes to see a new release. It also keeps a copy of that list on
+  your PC and can keep using it for over an hour, even after a restart. To make it check again
+  (on Linux): quit RecompLauncher completely, delete
+  `~/.local/share/com.recomplauncher.app/cache/releases/owmyback__backbreaker-recomp.json` and the
+  `.json.tag` file next to it, then start it again. Your install, saves and settings stay.
 - **From a terminal:** the release's `Backbreaker-Recompiled-x86_64.AppImage install <your disc image>`
   does the same; the release notes have the steps.
 - **Achievements:** F1, or the controller's Guide (PS) button, opens the list of achievements over
