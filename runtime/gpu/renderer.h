@@ -48,4 +48,7 @@ namespace gpu::render
     uint64_t fenceSerial();
     uint64_t gpuDone();
     void waitGpu(uint64_t serial);
+    // BB_PERF (#174): a fence held back for the GPU was written, `heldMs` after it was queued;
+    // `serial` is the submit it waited for, whose round trip is counted once
+    void fenceWritten(uint64_t serial, double heldMs);
 }

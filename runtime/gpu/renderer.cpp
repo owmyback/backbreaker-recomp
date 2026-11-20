@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <deque>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -144,8 +145,9 @@ namespace gpu::render
                                     hashSkips = 0, passes = 0, barriers = 0, gpuMarksDropped = 0,
                                     transfers = 0, transferTiles = 0, exportBarriers = 0, transferTilesSkipped = 0, copiesReused = 0, bytesReused = 0,
                                     geomHits = 0, geomHitBytes = 0, geomNew = 0, geomNewBytes = 0, geomForward = 0, geomWritten = 0,
-                                    geomOverBudget = 0, geomCheckFail = 0;
-                           double hashMs = 0, waitMs = 0, cpWaitMs = 0;
+                                    geomOverBudget = 0, geomCheckFail = 0, earlyFences = 0, fencesHeld = 0, roundTrips = 0,
+                                    roundTripsSlow = 0;
+                           double hashMs = 0, waitMs = 0, cpWaitMs = 0, fenceHeldMs = 0, fenceHeldMax = 0, roundTripMs = 0, roundTripMax = 0;
                            std::vector<double> gpuMs;       // BB_GPU_TIME: GPU time by kind of work (see gpuMark)
                            std::vector<uint32_t> gpuSpans;  // how many stretches of each kind
                            struct Calls { uint32_t calls = 0; uint64_t amount = 0; const char* unit = ""; };
@@ -756,6 +758,10 @@ void main() {
         // everything up to submit N" is one counter: a semaphore signal covers all earlier submits.
         VkSemaphore g_timeline = VK_NULL_HANDLE;
         uint64_t g_submitSerial = 0;
+        // When each recent submit was made (BB_PERF, #174): a fence held for the GPU counts the round
+        // trip from its submit to the fence being written
+        std::deque<std::pair<uint64_t, double>> g_submitTimes;
+        uint64_t g_roundTripCounted = 0; // the last submit whose round trip is in the stats
 
         void queueSubmit(VkCommandBuffer cb, VkFence fence)
         {
@@ -777,6 +783,11 @@ void main() {
             }
             std::lock_guard guard(C->queueLock);
             VK_CHECK(vkQueueSubmit(C->queue, 1, &si, fence));
+            if (value)
+            {
+                g_submitTimes.emplace_back(value, nowMs());
+                if (g_submitTimes.size() > 4096) g_submitTimes.pop_front();
+            }
         }
 
         struct Frame
@@ -4791,18 +4802,46 @@ void main()
 
     bool asyncFences() { return !g_disabled && !g_failed && D && g_timeline; }
 
+    // BB_EARLY_FENCES, an experiment (#174). Each fence held back until the GPU has finished the
+    // writes before it is a round trip to the GPU: 200-360 a second in a replay, about 3.7 ms each on
+    // Windows against 1.3 on Linux, which makes 100-300 ms frames around every play there.
+    //   1: fences don't wait for memory export writes still on their way (the skinning in replays
+    //      and cutscenes), only for resolve writebacks. The GPU's own reads of exported data are
+    //      looked after anyway (needsExportedData).
+    //   2: they don't wait for resolve writebacks either, so no fence waits for the GPU.
+    // Either is safe only if the game's own code never reads that memory, nor writes it, before the
+    // GPU's write lands there. Off unless set; something drawn wrong is the sign it isn't.
+    const int g_earlyFences = [] {
+        const char* v = getenv("BB_EARLY_FENCES");
+        return v && (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+    }();
+
     uint64_t fenceSerial()
     {
         if (!asyncFences()) return 0;
+        static bool said = false; // here, not at startup: the log file isn't open then
+        if (g_earlyFences && !said)
+        {
+            said = true;
+            info("[render] BB_EARLY_FENCES=%d: the game's fences don't wait for %s (an experiment, #174)", g_earlyFences,
+                 g_earlyFences == 1 ? "memory export writes" : "memory export writes or resolve writebacks");
+        }
         retireCompleted();
         if (g_pendingWrites.empty()) return 0;
+        auto counts = [](const PendingWrite& w) { return g_earlyFences == 0 || (g_earlyFences == 1 && !w.exported); };
         for (const PendingWrite& w : g_pendingWrites)
-            if (!w.serial) { submitChunk(); break; } // still being recorded: hand it to the GPU now
+            if (counts(w) && !w.serial) { submitChunk(); break; } // still being recorded: hand it to the GPU now
         uint64_t serial = 0;
         for (const PendingWrite& w : g_pendingWrites)
         {
+            if (!counts(w)) continue;
             if (!w.serial) { syncGuestMemory("untagged"); return 0; } // cannot happen: a submit tags every range
             serial = std::max(serial, w.serial);
+        }
+        if (!serial) // only writes BB_EARLY_FENCES lets fences go ahead of are on their way
+        {
+            g_perf.earlyFences++;
+            return 0;
         }
         g_perf.asyncFences++;
         return serial;
@@ -4814,6 +4853,23 @@ void main()
         uint64_t done = gpuProgress();
         retire(done);
         return done;
+    }
+
+    void fenceWritten(uint64_t serial, double heldMs)
+    {
+        PerfStats& p = g_perf;
+        p.fencesHeld++;
+        p.fenceHeldMs += heldMs;
+        p.fenceHeldMax = std::max(p.fenceHeldMax, heldMs);
+        if (serial <= g_roundTripCounted) return;
+        g_roundTripCounted = serial;
+        while (!g_submitTimes.empty() && g_submitTimes.front().first < serial) g_submitTimes.pop_front();
+        if (g_submitTimes.empty() || g_submitTimes.front().first != serial) return;
+        const double ms = nowMs() - g_submitTimes.front().second;
+        p.roundTrips++;
+        p.roundTripMs += ms;
+        p.roundTripMax = std::max(p.roundTripMax, ms);
+        if (ms >= 5.0) p.roundTripsSlow++;
     }
 
     void waitGpu(uint64_t serial)
@@ -4886,7 +4942,8 @@ void main()
                          "%llu index/vertex copies reused (%.1f MB), "
                          "%llu early submits (%llu while the CP waited), %llu fences written when the GPU got there (%llu waited for), "
                          "%llu writebacks over pending ones; textures known unchanged without reading %llu, write faults %llu, "
-                         "pages watched %u",
+                         "pages watched %u, fences ahead of GPU writes (BB_EARLY_FENCES) %llu, fences held for the GPU %llu (mean %.1f ms, max %.0f ms), "
+                         "GPU round trips %llu (mean %.1f ms, max %.0f ms, %llu of 5 ms or more)",
                          (t - perfLast) / 1000.0, (unsigned long long)swaps, (unsigned long long)p.draws, cpu - cpuLast, p.cpWaitMs, p.waitMs,
                          (unsigned long long)p.flushes, p.hashBytes / 1048576.0, p.hashMs, (unsigned long long)p.uploads,
                          p.uploadBytes / 1048576.0, (unsigned long long)p.resolves, (unsigned long long)p.writebacks,
@@ -4895,7 +4952,10 @@ void main()
                          p.bytesReused / 1048576.0, (unsigned long long)p.chunks,
                          (unsigned long long)p.idleSubmits, (unsigned long long)p.asyncFences, (unsigned long long)p.asyncWaits,
                          (unsigned long long)p.copyInsAroundPending, (unsigned long long)p.hashSkips,
-                         (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages());
+                         (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages(),
+                         (unsigned long long)p.earlyFences, (unsigned long long)p.fencesHeld,
+                         p.fencesHeld ? p.fenceHeldMs / double(p.fencesHeld) : 0.0, p.fenceHeldMax, (unsigned long long)p.roundTrips,
+                         p.roundTrips ? p.roundTripMs / double(p.roundTrips) : 0.0, p.roundTripMax, (unsigned long long)p.roundTripsSlow);
                     faultsLast = mem::watch::faults();
                     if (g_geomOn)
                     {

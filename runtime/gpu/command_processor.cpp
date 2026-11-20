@@ -443,7 +443,7 @@ namespace gpu
         // game's fences (EVENT_WRITE_SHD to memory, D3D's scratch registers) and the read pointer. The
         // console's CP writes them when the GPU gets there; so do we, instead of stopping until it
         // has. Applied strictly in order.
-        struct DeferredWrite { uint64_t serial; Target target; uint32_t addr, value; };
+        struct DeferredWrite { uint64_t serial; Target target; uint32_t addr, value; double queuedAt = 0; }; // queuedAt: seconds
         std::deque<DeferredWrite> g_deferred;
         uint32_t g_pollTick = 0;
 
@@ -474,6 +474,7 @@ namespace gpu
             while (!g_deferred.empty() && g_deferred.front().serial <= done)
             {
                 applyWrite(g_deferred.front());
+                render::fenceWritten(g_deferred.front().serial, (hostSeconds() - g_deferred.front().queuedAt) * 1000.0);
                 g_deferred.pop_front();
             }
         }
@@ -491,7 +492,7 @@ namespace gpu
             uint64_t serial = render::fenceSerial();
             if (!g_deferred.empty()) serial = std::max(serial, g_deferred.back().serial); // keep the order
             if (!serial) { applyWrite({ 0, target, addr, value }); return; }
-            g_deferred.push_back({ serial, target, addr, value });
+            g_deferred.push_back({ serial, target, addr, value, hostSeconds() });
         }
 
         // Every other point where the guest can look: GPU writes and deferred writes all land first
