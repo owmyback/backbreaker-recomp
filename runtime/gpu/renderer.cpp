@@ -48,6 +48,7 @@
 #include <unordered_set>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <tuple>
 #include <vector>
@@ -278,6 +279,154 @@ namespace gpu::render
             ok = (fclose(f) == 0) && ok;
             if (ok) ok = rename(tmp.c_str(), path.c_str()) == 0; // atomic: a reader sees all or nothing
             if (!ok) remove(tmp.c_str());
+        }
+
+        // Compiled pipelines, kept between runs (#174): <cache>/backbreaker-recomp/pipelines.bin,
+        // beside the SPIR-V cache and off with it. On Linux Mesa keeps a disk cache of its own, so
+        // this changes little there (155 pipelines took 51 ms on the PC). AMD's Windows driver
+        // compiled every pipeline again on every run: 157 in 7.2 s, 46 ms each, and up to 1.8 s in
+        // one frame at team select. The file is the driver's own data, used only when its header
+        // names this GPU and driver. It's written again, whole and through a temporary file, once no
+        // new pipeline has appeared for a few seconds (savePipelineCacheSoon, at swaps).
+        VkPipelineCache g_pipelineCache = VK_NULL_HANDLE;
+        std::string g_pipelineCachePath; // empty: not kept on disk
+        std::atomic<uint32_t> g_pipelinesUnsaved{0}; // created since the file was last written
+        std::atomic<double> g_lastPipelineMs{0};
+        std::atomic<bool> g_pipelineCacheWriting{false};
+        uint64_t g_pipelineCacheHash = 0; // of what the file holds: a cache that only found its pipelines there isn't written again
+
+        uint64_t hashBytes(const std::vector<uint8_t>& d)
+        {
+            uint64_t h = 1469598103934665603ull;
+            for (uint8_t b : d) h = (h ^ b) * 1099511628211ull;
+            return h;
+        }
+
+        // VkPipelineCacheHeaderVersionOne, which the driver's data starts with
+        struct PipelineCacheHeader
+        {
+            uint32_t size, version, vendorID, deviceID;
+            uint8_t uuid[VK_UUID_SIZE];
+        };
+
+        void createPipelineCache()
+        {
+            std::vector<uint8_t> data;
+            const std::string& dir = shaderCacheDir();
+            if (!dir.empty())
+            {
+                g_pipelineCachePath = std::filesystem::path(dir).parent_path().string() + "/pipelines.bin";
+                if (FILE* f = fopen(g_pipelineCachePath.c_str(), "rb"))
+                {
+                    if (fseek(f, 0, SEEK_END) == 0)
+                    {
+                        long size = ftell(f);
+                        if (size > 0 && fseek(f, 0, SEEK_SET) == 0)
+                        {
+                            data.resize(size_t(size));
+                            if (fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
+                        }
+                    }
+                    fclose(f);
+                }
+                PipelineCacheHeader h{};
+                if (data.size() >= sizeof h) memcpy(&h, data.data(), sizeof h);
+                const bool ours = data.size() >= sizeof h && h.size >= sizeof h && h.version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+                                  h.vendorID == C->props.vendorID && h.deviceID == C->props.deviceID &&
+                                  !memcmp(h.uuid, C->props.pipelineCacheUUID, VK_UUID_SIZE);
+                if (!data.empty() && !ours)
+                {
+                    info("[render] pipeline cache: %s is from another GPU or driver, starting a new one", g_pipelineCachePath.c_str());
+                    data.clear();
+                }
+            }
+            VkPipelineCacheCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+            ci.initialDataSize = data.size();
+            ci.pInitialData = data.empty() ? nullptr : data.data();
+            if (vkCreatePipelineCache(D, &ci, nullptr, &g_pipelineCache) != VK_SUCCESS)
+            {
+                g_pipelineCache = VK_NULL_HANDLE;
+                ci.initialDataSize = 0; // the driver refused the file's contents: an empty cache instead
+                ci.pInitialData = nullptr;
+                if (!data.empty() && vkCreatePipelineCache(D, &ci, nullptr, &g_pipelineCache) != VK_SUCCESS)
+                    g_pipelineCache = VK_NULL_HANDLE;
+                data.clear();
+            }
+            if (!g_pipelineCache)
+            {
+                warn("[render] pipeline cache off: the driver could not create one");
+                g_pipelineCachePath.clear();
+            }
+            else if (!g_pipelineCachePath.empty())
+            {
+                info("[render] pipeline cache: %s (%zu KB read)", g_pipelineCachePath.c_str(), data.size() / 1024);
+                if (!data.empty()) g_pipelineCacheHash = hashBytes(data);
+            }
+        }
+
+        void pipelineCreated()
+        {
+            g_pipelinesUnsaved++;
+            g_lastPipelineMs = nowMs();
+        }
+
+        // At swaps: once no new pipeline has appeared for 3 s, the cache is written out on a thread
+        // of its own, so no frame waits for the file
+        void savePipelineCacheSoon(double now)
+        {
+            if (!g_pipelinesUnsaved || g_pipelineCachePath.empty() || now - g_lastPipelineMs < 3000.0) return;
+            if (g_pipelineCacheWriting.exchange(true)) return;
+            const uint32_t added = g_pipelinesUnsaved.exchange(0);
+            std::thread([added] {
+                size_t size = 0;
+                std::vector<uint8_t> data;
+                if (vkGetPipelineCacheData(D, g_pipelineCache, &size, nullptr) == VK_SUCCESS && size)
+                {
+                    data.resize(size);
+                    if (vkGetPipelineCacheData(D, g_pipelineCache, &size, data.data()) == VK_SUCCESS) data.resize(size);
+                    else data.clear(); // VK_INCOMPLETE: it grew in between, so the next swap tries again
+                }
+                const uint64_t hash = data.empty() ? 0 : hashBytes(data);
+                if (hash && hash == g_pipelineCacheHash) // the driver found them all in the file: nothing to write
+                {
+                    g_pipelineCacheWriting = false;
+                    return;
+                }
+                const std::string tmp = g_pipelineCachePath + ".tmp" + std::to_string(getpid());
+                bool ok = false;
+                if (!data.empty())
+                    if (FILE* f = fopen(tmp.c_str(), "wb"))
+                    {
+                        ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+                        ok = (fclose(f) == 0) && ok;
+                    }
+                if (ok)
+                {
+                    std::error_code ec;
+                    std::filesystem::rename(tmp, g_pipelineCachePath, ec); // replaces the old file (atomically on Linux)
+                    if (ec)
+                    {
+                        std::filesystem::remove(g_pipelineCachePath, ec);
+                        std::filesystem::rename(tmp, g_pipelineCachePath, ec);
+                    }
+                    ok = !ec;
+                }
+                if (ok)
+                {
+                    g_pipelineCacheHash = hash;
+                    info("[render] pipeline cache: %zu KB written (%u pipelines created since)", data.size() / 1024, added);
+                }
+                else
+                {
+                    static std::atomic<bool> warned{false};
+                    if (!warned.exchange(true)) warn("[render] pipeline cache: could not write %s", g_pipelineCachePath.c_str());
+                    std::error_code ec;
+                    std::filesystem::remove(tmp, ec);
+                    g_pipelinesUnsaved += added;
+                    g_lastPipelineMs = nowMs(); // not again at once
+                }
+                g_pipelineCacheWriting = false;
+            }).detach();
         }
 
         VkShaderModule compile(const std::string& glsl, shaderc_shader_kind kind, const char* name, std::string& error, uint32_t colorMask = 15,
@@ -1530,7 +1679,8 @@ void main() {
             gci.pDynamicState = &dy;
             gci.layout = g_transferLayout;
             VkPipeline pl;
-            VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
+            VK_CHECK(vkCreateGraphicsPipelines(D, g_pipelineCache, 1, &gci, nullptr, &pl));
+            pipelineCreated();
             vkDestroyShaderModule(D, fs, nullptr);
             info("[render] EDRAM transfer pipeline: %s %ux -> %s %ux%s", kindName(srcKind), srcImage.samples, kindName(dstKind), destSamples,
                  convert ? " (through the EDRAM bits)" : "");
@@ -2029,7 +2179,8 @@ void main()
                 VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
                 ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs, "main", nullptr };
                 ci.layout = g_packLayout;
-                VK_CHECK(vkCreateComputePipelines(D, VK_NULL_HANDLE, 1, &ci, nullptr, &g_packPipeline));
+                VK_CHECK(vkCreateComputePipelines(D, g_pipelineCache, 1, &ci, nullptr, &g_packPipeline));
+                pipelineCreated();
                 vkDestroyShaderModule(D, cs, nullptr);
                 VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
                 VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_packSampler));
@@ -2736,7 +2887,8 @@ void main()
             gci.layout = g_layout;
             VkPipeline pl = VK_NULL_HANDLE;
             double t0 = nowMs();
-            VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
+            VK_CHECK(vkCreateGraphicsPipelines(D, g_pipelineCache, 1, &gci, nullptr, &pl));
+            pipelineCreated();
             g_compileStats.pipelines++;
             g_compileStats.pipelineMs += nowMs() - t0;
             info("[render] pipeline %zu %p: %s", g_pipelines.size() + 1, (void*)pl, pipelineKey(s).c_str());
@@ -2878,6 +3030,7 @@ void main()
             std::string error;
             g_rectGs = compile(kRectangleGs, shaderc_geometry_shader, "rectangle_list.geom", error);
             if (!g_rectGs) fatal("[render] rectangle list geometry shader: %s", error.c_str());
+            createPipelineCache();
 
             // set 0: guest data + constants (one set per frame in flight, constants by dynamic
             // offset); set 1: 32 textures, pushed per draw (a layout may have one push set only)
@@ -3521,7 +3674,8 @@ void main()
             VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
             ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs, "main", nullptr };
             ci.layout = g_writebackLayout;
-            VK_CHECK(vkCreateComputePipelines(D, VK_NULL_HANDLE, 1, &ci, nullptr, &g_writebackPipeline));
+            VK_CHECK(vkCreateComputePipelines(D, g_pipelineCache, 1, &ci, nullptr, &g_writebackPipeline));
+            pipelineCreated();
             vkDestroyShaderModule(D, cs, nullptr);
             VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
             VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_writebackSampler));
@@ -4708,6 +4862,7 @@ void main()
                 cs = {};
                 lastLog = t;
             }
+            savePipelineCacheSoon(t);
         }
         {
             static const bool perfOn = getenv("BB_PERF") != nullptr;
