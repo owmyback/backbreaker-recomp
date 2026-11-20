@@ -20,7 +20,8 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
 - **Achievements:** F1, or the controller's Guide (PS) button, opens the list of achievements over
   the game, and the same key or button closes it. On a Steam Deck the Steam button belongs to Steam
   and there's no F1 key: in Steam, open the game's controller settings and map the back grip R4 to
-  the keyboard key F1 (#145).
+  the keyboard key F1 (#145). The list has the 26 achievements you can earn offline, worth 1000 G:
+  the three online ones are left out until there's online play.
 - **Mods:** plays, the AI's audibles, minigames and menus can be changed; see `docs/modding.md`.
 
 ## Start here

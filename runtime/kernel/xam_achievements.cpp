@@ -9,8 +9,12 @@
 // apps/xgi_app.cc, xam_user.cc XamUserCreateAchievementEnumerator, xenumerator.cc
 // XAchievementEnumerator::WriteItems, achievement_manager.h X_ACHIEVEMENT_DETAILS; BSD 3-clause,
 // docs/licenses/xenia-LICENSE.txt).
+//
+// The player's list (the overlay and --achievements) leaves out the online achievements and
+// rescales the others to 1000 G (achievement_list.h); the game gets the title's own list.
 #include "kernel.h"
 #include "import_support.h"
+#include "achievement_list.h"
 #include "spa.h"
 #include "xam_enum.h"
 #include "../log.h"
@@ -50,6 +54,7 @@ namespace
     bool g_loaded = false;
     uint32_t g_titleId = 0;
     kernel::spa::Info g_spa;
+    std::vector<kernel::spa::Achievement> g_shown; // the player's list (achievement_list.h)
     std::string g_dir;                       // game/achievements
     std::map<uint16_t, uint64_t> g_unlocked; // achievement id -> unlock time (unix seconds)
     const uint8_t* g_spaBlob = nullptr;      // the SPA in the loaded image (for its PNG icons)
@@ -138,6 +143,15 @@ namespace
             }
             info("[xam] achievements: %zu (%u G) for title %08X, %zu unlocked (%u G) in %s",
                  g_spa.achievements.size(), total, g_titleId, g_unlocked.size(), earned, storePath().c_str());
+            g_shown = kernel::achievement_list::playerList(g_titleId, g_spa.achievements);
+            if (kernel::achievement_list::matches(g_titleId, g_spa.achievements))
+            {
+                uint32_t shownTotal = 0;
+                for (auto& a : g_shown) shownTotal += a.gamerscore;
+                info("[xam] the player's list: %zu (%u G), without the online ones", g_shown.size(), shownTotal);
+            }
+            else
+                info("[xam] the player's list is the title's own: not the list achievement_list.h was made for");
             return;
         }
         warn("[xam] no achievement data: the XEX has no resource named %s", want);
@@ -228,7 +242,7 @@ namespace kernel
         std::lock_guard guard(g_lock);
         loadLocked();
         std::vector<AchievementView> out;
-        for (auto& a : g_spa.achievements)
+        for (auto& a : g_shown)
         {
             AchievementView v;
             v.id = a.id;
@@ -259,21 +273,22 @@ namespace kernel
         return std::vector<uint16_t>(g_unlockOrder.begin() + std::ptrdiff_t(index), g_unlockOrder.end());
     }
 
-    // --achievements: the list with what is earned, on stdout (the game has no screen for it;
-    // on the console it was the Guide's).
+    // --achievements: the player's list with what is earned, on stdout (the game has no screen for
+    // it; on the console it was the Guide's).
     void printAchievements()
     {
         std::lock_guard guard(g_lock);
         loadLocked();
         uint32_t total = 0, earned = 0;
-        for (auto& a : g_spa.achievements)
+        size_t got = 0;
+        for (auto& a : g_shown)
         {
             total += a.gamerscore;
-            if (g_unlocked.count(a.id)) earned += a.gamerscore;
+            if (g_unlocked.count(a.id)) { earned += a.gamerscore; got++; }
         }
         std::printf("Backbreaker achievements (title %08X): %zu of %zu unlocked, %u of %u G\n",
-                    g_titleId, g_unlocked.size(), g_spa.achievements.size(), earned, total);
-        for (auto& a : g_spa.achievements)
+                    g_titleId, got, g_shown.size(), earned, total);
+        for (auto& a : g_shown)
         {
             auto it = g_unlocked.find(a.id);
             bool got = it != g_unlocked.end();

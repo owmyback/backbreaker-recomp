@@ -83,6 +83,12 @@ jobs:
       - name: Run SPA parser test
         run: ./build/spa_test
 
+      - name: Build player's achievements list test (header-only)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/achievement_list_test.cpp -o build/achievement_list_test
+
+      - name: Run player's achievements list test
+        run: ./build/achievement_list_test
+
       - name: Build frame timing test (header-only)
         run: clang++ -std=c++20 -Wall -Wextra -O2 tests/frame_stats_test.cpp -o build/frame_stats_test
 

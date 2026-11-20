@@ -731,6 +731,17 @@ named after the title id 464F07DA, at 0x82E00000 in the loaded image (`runtime/k
 parses it; `tests/spa_test.cpp` checks the parser on hand-built blobs). Only English strings are
 in it.
 
+**The player's list** (the overlay and `--achievements`) has 26 of them, worth 1000 G
+(`runtime/kernel/achievement_list.h`, tested by `tests/achievement_list_test.cpp`). The three online
+ones (Online, On form; Head to Head; Create and Dominate: 120 G) can't be earned while there's no
+online play (roadmap phase 12), so they're left out. The other 26 (880 G) are scaled by 1000/880 and
+rounded to the nearest 5 G, so achievements worth the same stay worth the same; the two 60 G ones get
+65 instead of 70 so the total is exactly 1000: 10 → 10, 20 → 25, 30 → 35, 40 → 45, 60 → 65,
+80 → 90, 90 → 100, 100 → 115. The game itself still gets the title's own list, all 29 at their own
+gamerscore. The table is checked against the title's list as it loads (the same achievements at the
+same gamerscore); for any other list the title's own is shown. The log says which:
+`[xam] the player's list: 26 (1000 G), without the online ones`.
+
 The game reports an unlock with the XDK's `XUserWriteAchievements` (recompiled as `sub_828F7A30`),
 which is `XMsgStartIORequest(0xFB, 0x000B0008, overlapped, {count, X_USER_ACHIEVEMENT*}, 8)`: a
 message to XAM's XGI app, not an import of its own. `runtime/kernel/xam_achievements.cpp` handles

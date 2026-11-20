@@ -97,7 +97,7 @@ timing hid (#129).
 | 8 | Saves and profile (XAM content) | **Saves done**; profile settings answered with the console defaults (#98) | `e9fd2cf` |
 | 9 | Gameplay correctness and performance | **In progress** (60 fps, #89; frame-rate dips fixed, #73; heavy scenes hold 60 at scale 2, #121; crashes fixed, #127, #129; Steam Deck CPU-bound in matches, geometry cache, #146) | `d92ef75`, `2d55d49`, `5cd6844`, `7e0b5c8` |
 | 10 | Packaging and launcher | **Started** (one-step setup script done, #4; portable build for Steam Deck and other distributions merged and play-tested on the Deck, #134: #136 and #137; docker path untested; installer #138: RecompLauncher as the front end; the runtime kit, the tools in C++ and the headless install done, the install tried on a Steam Deck; Add to Steam, #160, tried on the Deck; draft GitHub releases, #160) | `54f3038` |
-| 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105) | `d46b648`, `5d400ab`, `57278f3` |
+| 11 | Achievements (unlocks, pop-ups, achievements screen) | Done (database, unlocks, store: #97; overlay list and pop-up: #101; pop-ups take turns, with a sound: #105; the player's list without the 3 online ones, rescaled to 1000 G) | `d46b648`, `5d400ab`, `57278f3` |
 | 12 | Online multiplayer (session service, game browser) - last | Planned (research written, `docs/multiplayer.md`) | - |
 
 Naming note: in early discussion, phase 3 was called "Phase 1 (headless GPU)" and phase 4
@@ -938,7 +938,10 @@ tested), the unlock path with a per-machine store (`game/achievements/`), the en
 listed. Parts 3-5 (#101, `5d400ab`): the overlay (`runtime/video/overlay.cpp`), the achievements
 list on F1 / Guide, and the unlock pop-up, tested in the window. #105: simultaneous unlocks take
 turns in the pop-up, and each plays a synthesized unlock sound. See docs/runtime.md,
-"Achievements". All five parts below are done.
+"Achievements". All five parts below are done. Since 2026-11-19 the player's list (the overlay and
+`--achievements`) leaves out the three online achievements, which can't be earned offline, and
+rescales the other 26 from 880 to 1000 G (`runtime/kernel/achievement_list.h`); the game still
+gets its own list. When online play arrives (phase 12), the three come back.
 
 Planned parts:
 1. Database reader: parse the XDBF resource (achievements, strings, images) from the loaded
