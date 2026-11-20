@@ -13,12 +13,15 @@
 
 namespace kernel
 {
+    struct Object;
+
     // A thread blocked in waitForObjects, on the waiter list of every object it waits for: a change
     // to one of those wakes it, and only those (signalObject)
     struct Waiter
     {
         std::condition_variable cv;
         bool woken = false;
+        Object* pulsedBy = nullptr; // a pulse of this object released the wait (NtPulseEvent)
     };
 
     struct Object
