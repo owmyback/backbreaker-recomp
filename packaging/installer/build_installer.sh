@@ -150,7 +150,7 @@ find "$S" -xtype l -delete
     # only when prepare.version changes, so new ppc inputs need a new prepare.version
     echo "ppc inputs $("$APPDIR/usr/bin/backbreaker-installer" ppc-inputs)"
     echo "prepare.version $(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["prepare"]["version"])' \
-        packaging/installer/recomplauncher.json)"
+        recomplauncher.json)"
 } >"$B/MANIFEST.txt"
 
 say "notices: every third-party part's licence and source"
@@ -181,7 +181,7 @@ printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\
     >"$APPDIR/backbreaker-installer.png"
 ln -s backbreaker-installer.png "$APPDIR/.DirIcon"
 # RecompLauncher reads /recomplauncher.json from the AppImage itself (#138, part 4)
-install -m 644 packaging/installer/recomplauncher.json "$APPDIR/recomplauncher.json"
+install -m 644 recomplauncher.json "$APPDIR/recomplauncher.json"
 # -no-xattrs: the build machine's extended attributes (SELinux labels on Fedora) have no place in a
 # published image, and they make mksquashfs write extended symlink inodes, which RecompLauncher's
 # reader (the backhand crate, 0.21) can't read: it then ignores the embedded recomplauncher.json

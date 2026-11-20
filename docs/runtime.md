@@ -178,8 +178,9 @@ content. `packaging/portable/test_distros.sh --installer <AppImage> --image <you
 runs the game with it in each distribution's container, none of which has a compiler.
 
 **RecompLauncher** (#138, part 4) is the front end players will use: it takes their disc image,
-runs the installer, shows the settings and starts the game. `packaging/installer/recomplauncher.json`
-tells it how, and `build_installer.sh` puts it at the AppImage's root, where the launcher reads it
+runs the installer, shows the settings and starts the game. `recomplauncher.json`, at the repo's
+root, tells it how: recomplauncher.com reads it there (its "Check my repo" step doesn't open an
+AppImage), and `build_installer.sh` puts a copy at the AppImage's root, where the launcher reads it
 (its `docs/DEVELOPERS.md`, "Where the file goes"):
 - `game`: an `.iso` holding `default.xex` (`"xdvdfs"`), with the USA/Europe dump's size and CRC32
   for its "verified" badge.
