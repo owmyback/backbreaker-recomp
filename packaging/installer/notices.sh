@@ -24,7 +24,7 @@ for f in LICENSE "$XENON/LICENSE.md" "$FFMPEG/COPYING.LGPLv2.1" "$LIC/SDL3/LICEN
     [ -f "$f" ] || die "$f is missing (the build container or scripts/build_xma_decoder.sh is older than notices.sh)"
 done
 
-repo=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["repo"])' packaging/installer/recomplauncher.json)
+repo=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["repo"])' recomplauncher.json)
 rev=$(git rev-parse HEAD 2>/dev/null || echo unknown)
 
 part() { # $1 = name, $2 = where in the bundle, $3 = licence, $4 = source

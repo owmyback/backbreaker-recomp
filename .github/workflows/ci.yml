@@ -161,7 +161,7 @@ jobs:
         run: ./build/installer_test
 
       - name: Check RecompLauncher's manifest parses (#138; its schema check is in the PR that added it)
-        run: python3 -I -m json.tool packaging/installer/recomplauncher.json >/dev/null
+        run: python3 -I -m json.tool recomplauncher.json >/dev/null
 
       - name: Build backbreaker-installer (#138; its install step needs the bundle, not built here)
         run: |
