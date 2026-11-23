@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -336,6 +337,24 @@ namespace installer::platform
 
     void terminate(Child child) { TerminateProcess(HANDLE(child), 1); }
 
+    namespace
+    {
+        // A standard handle that is a file or a pipe, for a child; null for a console's or none
+        HANDLE redirected(DWORD which)
+        {
+            const HANDLE h = GetStdHandle(which);
+            if (!h || h == INVALID_HANDLE_VALUE) return nullptr;
+            const DWORD type = GetFileType(h);
+            return type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE ? h : nullptr;
+        }
+
+        bool isConsole(DWORD which)
+        {
+            DWORD mode = 0;
+            return GetConsoleMode(GetStdHandle(which), &mode) != 0;
+        }
+    }
+
     int runGame(const std::vector<std::string>& argv, bool& started, std::string& error)
     {
         started = false;
@@ -343,9 +362,18 @@ namespace installer::platform
         STARTUPINFOW si{};
         si.cb = sizeof si;
         PROCESS_INFORMATION pi{};
-        // It shares this console, as the game's log in a terminal; started without one (a launcher),
-        // it gets none either rather than a window of its own
-        const DWORD flags = CREATE_SUSPENDED | (GetConsoleWindow() ? 0 : CREATE_NO_WINDOW);
+        // It shares this console, as the game's log in a terminal. Without one (a launcher that
+        // starts this with none, or `play` after leaveOwnConsole) it gets none either rather than
+        // a window of its own, and this process's redirected stdin, stdout and stderr (a launcher's
+        // pipes or files: RecompLauncher keeps the game's output) are handed on by name.
+        const bool console = GetConsoleWindow() != nullptr;
+        if (!console) {
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = redirected(STD_INPUT_HANDLE);
+            si.hStdOutput = redirected(STD_OUTPUT_HANDLE);
+            si.hStdError = redirected(STD_ERROR_HANDLE);
+        }
+        const DWORD flags = CREATE_SUSPENDED | (console ? 0 : CREATE_NO_WINDOW);
         if (!CreateProcessW(widen(argv[0]).c_str(), line.data(), nullptr, nullptr, TRUE, flags, nullptr, nullptr, &si, &pi)) {
             error = describe(GetLastError());
             return -1;
@@ -473,6 +501,18 @@ namespace installer::platform
     {
         DWORD processes[2];
         return GetConsoleProcessList(processes, 2) == 1;
+    }
+
+    bool leaveOwnConsole()
+    {
+        if (!ownsConsole()) return false;
+        // The streams that went to it go nowhere from here, and are closed while their handles are
+        // still the console's: a later write can't then land in a file that was opened afterwards
+        // and given the same handle value
+        if (isConsole(STD_INPUT_HANDLE)) std::freopen("NUL", "r", stdin);
+        if (isConsole(STD_OUTPUT_HANDLE)) std::freopen("NUL", "w", stdout);
+        if (isConsole(STD_ERROR_HANDLE)) std::freopen("NUL", "w", stderr);
+        return FreeConsole() != 0;
     }
 
     std::string pickDiscImage()
