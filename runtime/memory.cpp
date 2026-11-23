@@ -1,17 +1,23 @@
 #include "memory.h"
 #include "log.h"
+#include "platform.h"
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <atomic>
 #include <string>
-#include <sys/mman.h>
 #include <tuple>
-#include <unistd.h>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace mem
 {
@@ -112,6 +118,61 @@ namespace mem
         Heap g_physical{ "physical", kPhysicalBase + 0x10000, kPhysicalEnd };
     }
 
+#ifdef _WIN32
+    namespace
+    {
+        // mprotect's meaning on Windows, for the write watch below
+        constexpr int PROT_NONE = 0, PROT_READ = 1, PROT_WRITE = 2;
+        int mprotect(void* p, size_t n, int prot)
+        {
+            DWORD old = 0;
+            const DWORD w = (prot & PROT_WRITE) ? PAGE_READWRITE : (prot & PROT_READ) ? PAGE_READONLY : PAGE_NOACCESS;
+            if (VirtualProtect(p, n, w, &old)) return 0;
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+
+    void init()
+    {
+        // Windows (#174): one 4 GB placeholder reservation, split where the physical views go, and
+        // the views are of one 512 MB section, as the memfd is on Linux. Windows maps a view only at
+        // 64 KB boundaries of both its address and the section, so the console's 0xE0000000 view
+        // (physical 0x1000 at its start) can't be made: that range stays reserved, and touching it
+        // is a crash that names the address. The game was checked not to use it (#174).
+        // VirtualAlloc2 and MapViewOfFile3 are Windows 10 1803 and newer (and Wine).
+        using VirtualAlloc2Fn = PVOID(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
+        using MapViewOfFile3Fn = PVOID(WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
+        HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+        auto virtualAlloc2 = kb ? (VirtualAlloc2Fn)(void*)GetProcAddress(kb, "VirtualAlloc2") : nullptr;
+        auto mapViewOfFile3 = kb ? (MapViewOfFile3Fn)(void*)GetProcAddress(kb, "MapViewOfFile3") : nullptr;
+        if (!virtualAlloc2 || !mapViewOfFile3)
+            fatal("this Windows is too old: Backbreaker needs Windows 10 version 1803 or newer");
+
+        const HANDLE self = GetCurrentProcess();
+        HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT, 0, kPhysicalSize, nullptr);
+        if (!section)
+            fatal("could not create physical memory backing (error %lu)", GetLastError());
+        auto* p = (uint8_t*)virtualAlloc2(self, nullptr, 0x100000000ull, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
+        if (!p)
+            fatal("could not reserve 4 GB guest address space (error %lu)", GetLastError());
+        base = p;
+        // [0, A0000000) [A0000000, C0000000) [C0000000, E0000000) [E0000000, 4 GB)
+        for (uint32_t at : { 0xA0000000u, 0xC0000000u })
+            if (!VirtualFree(base + at, kPhysicalSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+                fatal("could not split the guest address space at %08X (error %lu)", at, GetLastError());
+        // Ordinary guest memory: committed, which Windows counts against RAM and the page file;
+        // a page takes memory only once it's touched
+        if (!virtualAlloc2(self, base, 0xA0000000u, MEM_RESERVE | MEM_COMMIT | MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0))
+            fatal("could not commit guest memory (error %lu): is the page file too small?", GetLastError());
+        for (uint32_t at : { 0xA0000000u, 0xC0000000u })
+            if (!mapViewOfFile3(section, self, base + at, 0, kPhysicalSize, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0))
+                fatal("could not map physical view at %08X (error %lu)", at, GetLastError());
+        CloseHandle(section); // the views keep it
+        mprotect(base, kNullGuardEnd, PROT_NONE);
+        info("guest memory at %p", base);
+    }
+#else
     void init()
     {
         // Lazily committed; untouched pages cost nothing.
@@ -137,6 +198,7 @@ namespace mem
         close(fd);
         info("guest memory at %p", base);
     }
+#endif
 
     namespace watch
     {
@@ -158,8 +220,10 @@ namespace mem
                 uint32_t phys = firstPage << 12;
                 bool ok = mprotect(base + 0xA0000000u + phys, bytes, prot) == 0;
                 ok &= mprotect(base + 0xC0000000u + phys, bytes, prot) == 0;
+#ifndef _WIN32 // no 0xE0000000 view there (init)
                 if (phys >= 0x1000) ok &= mprotect(base + 0xE0000000u + phys - 0x1000, bytes, prot) == 0;
                 else if (count > 1) ok &= mprotect(base + 0xE0000000u, bytes - 0x1000, prot) == 0;
+#endif
                 return ok;
             }
             std::atomic<bool> g_protectFailed{false}; // since then, nothing new is protected
@@ -244,6 +308,9 @@ namespace mem
         {
             const uint8_t* a = (const uint8_t*)addr;
             if (a < base + 0xA0000000u || a >= base + 0x100000000ull) return false;
+#ifdef _WIN32
+            if (a >= base + 0xE0000000u) return false; // no view there (init): a crash, not a watched page
+#endif
             uint32_t page = physicalAddress(uint32_t(a - base)) >> 12;
             if (page >= kPages) return false;
             // Nothing else ever makes the physical views non-writable, so a fault here is a watched

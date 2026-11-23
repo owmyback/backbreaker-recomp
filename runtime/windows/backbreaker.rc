@@ -1,0 +1,3 @@
+// Windows resources for backbreaker.exe (#174): the manifest (1 = CREATEPROCESS_MANIFEST_RESOURCE_ID,
+// 24 = RT_MANIFEST)
+1 24 "backbreaker.manifest"

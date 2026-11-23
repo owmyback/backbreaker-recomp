@@ -462,6 +462,26 @@ int main()
                "this game's own: rewritten while hidden, left alone in the menu");
         expect(!launcherEntryReplaces("[Desktop Entry]\nType=Application\nName=Mine\nExec=mine\n", g, there),
                "an entry with no TryExec isn't one of ours: left alone");
+
+        // Windows' shortcut icon (#174): the title's PNG in an .ico, as its one image
+        auto pngOf = [](uint32_t w, uint32_t h) {
+            std::vector<uint8_t> p = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R'};
+            for (uint32_t v : {w, h})
+                for (int i = 3; i >= 0; i--) p.push_back(uint8_t(v >> (8 * i)));
+            p.insert(p.end(), {8, 6, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xAE, 0x42, 0x60, 0x82});
+            return p;
+        };
+        const std::vector<uint8_t> png = pngOf(64, 64), ico = icoFromPng(png);
+        auto le32 = [&](size_t at) { return uint32_t(ico[at]) | uint32_t(ico[at + 1]) << 8 | uint32_t(ico[at + 2]) << 16 | uint32_t(ico[at + 3]) << 24; };
+        expect(ico.size() == 22 + png.size() && ico[0] == 0 && ico[1] == 0 && ico[2] == 1 && ico[4] == 1,
+               "an .ico: ICONDIR for one icon image, then the PNG");
+        expect(ico[6] == 64 && ico[7] == 64 && ico[10] == 1 && ico[12] == 32 && le32(14) == png.size() && le32(18) == 22 &&
+                   std::equal(png.begin(), png.end(), ico.begin() + 22),
+               "its entry: 64x64, one plane, 32 bits, the PNG's size, at offset 22, the PNG's bytes as they are");
+        expect(icoFromPng(pngOf(256, 256))[6] == 0 && icoFromPng(pngOf(256, 256))[7] == 0, "256x256 is written as 0");
+        expect(icoFromPng(pngOf(257, 64)).empty() && icoFromPng(pngOf(0, 64)).empty() &&
+                   icoFromPng(std::vector<uint8_t>(40, 0)).empty() && icoFromPng({}).empty(),
+               "not a PNG, or too big for an .ico: none");
         setenv("XDG_DATA_HOME", "/xdg/data", 1);
         expect(menuEntryPath() == "/xdg/data/applications/backbreaker-recomp.desktop", "the entry's path ($XDG_DATA_HOME)");
         setenv("XDG_DATA_HOME", "relative", 1);

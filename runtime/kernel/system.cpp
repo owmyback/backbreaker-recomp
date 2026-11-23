@@ -1,5 +1,6 @@
 // Time, system information and process-level imports.
 #include "import_support.h"
+#include "../platform.h"
 #include "kernel.h"
 #include "ntstatus.h"
 #include "../log.h"

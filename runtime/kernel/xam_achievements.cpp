@@ -108,7 +108,7 @@ namespace
         }
         fs::rename(tmp, storePath(), ec); // whole file or the old one, never half a file
         if (ec)
-            warn("[xam] could not write %s: %s", storePath().c_str(), ec.message().c_str());
+            warn("[xam] could not write %s: %s", storePath().string().c_str(), ec.message().c_str());
     }
 
     // The SPA resource is named after the title id; its data is in the loaded image.
@@ -142,7 +142,7 @@ namespace
                 if (g_unlocked.count(a.id)) earned += a.gamerscore;
             }
             info("[xam] achievements: %zu (%u G) for title %08X, %zu unlocked (%u G) in %s",
-                 g_spa.achievements.size(), total, g_titleId, g_unlocked.size(), earned, storePath().c_str());
+                 g_spa.achievements.size(), total, g_titleId, g_unlocked.size(), earned, storePath().string().c_str());
             g_shown = kernel::achievement_list::playerList(g_titleId, g_spa.achievements);
             if (kernel::achievement_list::matches(g_titleId, g_spa.achievements))
             {
@@ -302,7 +302,7 @@ namespace kernel
             std::printf("  [%c] %-36s %4u G  %-16s %s\n", got ? 'x' : ' ', secret ? "(secret)" : a.label.c_str(), a.gamerscore,
                         when, secret ? "" : (got ? a.description : a.unachieved).c_str());
         }
-        std::printf("Stored in %s\n", storePath().c_str());
+        std::printf("Stored in %s\n", storePath().string().c_str());
     }
 }
 

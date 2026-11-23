@@ -11,6 +11,8 @@
 #include "../log.h"
 #include "../debug/thread_times.h"
 #include "../memory.h"
+#include "../frame_rate.h"
+#include "../platform.h"
 
 #include <atomic>
 #include <chrono>
@@ -21,7 +23,9 @@
 #include <vector>
 #include <algorithm>
 #include <map>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 using namespace mem;
 
@@ -76,6 +80,34 @@ namespace gpu
         // status line and keeps the result for lastSecond()
         std::mutex g_frameStatsLock;
         FrameStats g_frameStats;
+
+        // How even the game's frames are (BB_PERF, #174), under g_frameStatsLock. The game runs its
+        // simulation in fixed steps of one frame (runtime/frame_rate.cpp): each frame adds its
+        // measured time to an accumulator and runs a step for each 1/60 s in it. Frames of uneven
+        // length then get no step, or two, and the picture judders at a steady frame rate. The step
+        // counts here are an estimate from the swaps' host times, not read from the game.
+        struct FramePacing
+        {
+            uint32_t frames = 0, noStep = 0, twoSteps = 0;
+            double minMs = 1e9, maxMs = 0, sumMs = 0, sumSqMs = 0;
+        } g_framePacing;
+        double g_pacingAccumulator = 0;
+        void pacingOnSwap(double dt)
+        {
+            const double step = 1.0 / frame_rate::get();
+            g_pacingAccumulator += std::min(dt, 1.0 / 30); // the game clock's longest frame
+            const int steps = int(g_pacingAccumulator / step);
+            g_pacingAccumulator -= steps * step;
+            FramePacing& p = g_framePacing;
+            p.frames++;
+            if (steps == 0) p.noStep++;
+            if (steps >= 2) p.twoSteps++;
+            const double ms = dt * 1000.0;
+            p.minMs = std::min(p.minMs, ms);
+            p.maxMs = std::max(p.maxMs, ms);
+            p.sumMs += ms;
+            p.sumSqMs += ms * ms;
+        }
         FrameSecond g_lastSecond;
         double hostSeconds()
         {
@@ -400,6 +432,7 @@ namespace gpu
                     {
                         std::lock_guard g(g_frameStatsLock);
                         g_frameStats.onSwap(now);
+                        if (lastSwap != 0) pacingOnSwap(now - lastSwap);
                     }
                     debug::threadtimes::frameEnded(lastSwap, now); // a long frame gets a [hitch] report (BB_PERF)
                     lastSwap = now;
@@ -443,7 +476,7 @@ namespace gpu
         // game's fences (EVENT_WRITE_SHD to memory, D3D's scratch registers) and the read pointer. The
         // console's CP writes them when the GPU gets there; so do we, instead of stopping until it
         // has. Applied strictly in order.
-        struct DeferredWrite { uint64_t serial; Target target; uint32_t addr, value; };
+        struct DeferredWrite { uint64_t serial; Target target; uint32_t addr, value; double queuedAt = 0; }; // queuedAt: seconds
         std::deque<DeferredWrite> g_deferred;
         uint32_t g_pollTick = 0;
 
@@ -474,6 +507,7 @@ namespace gpu
             while (!g_deferred.empty() && g_deferred.front().serial <= done)
             {
                 applyWrite(g_deferred.front());
+                render::fenceWritten(g_deferred.front().serial, (hostSeconds() - g_deferred.front().queuedAt) * 1000.0);
                 g_deferred.pop_front();
             }
         }
@@ -491,7 +525,7 @@ namespace gpu
             uint64_t serial = render::fenceSerial();
             if (!g_deferred.empty()) serial = std::max(serial, g_deferred.back().serial); // keep the order
             if (!serial) { applyWrite({ 0, target, addr, value }); return; }
-            g_deferred.push_back({ serial, target, addr, value });
+            g_deferred.push_back({ serial, target, addr, value, hostSeconds() });
         }
 
         // Every other point where the guest can look: GPU writes and deferred writes all land first
@@ -585,10 +619,23 @@ namespace gpu
             auto next = clock::now();
             auto lastReport = next;
             uint64_t lastFrames = 0, lastDraws = 0;
+            // The game's frames are paced by this interrupt, so a late one makes an uneven frame.
+            // BB_PRECISE_VBLANK=0: the plain sleep, late by up to 1-2 ms on Windows (for A/B runs)
+            static const bool precise = !(getenv("BB_PRECISE_VBLANK") && getenv("BB_PRECISE_VBLANK")[0] == '0');
+            static const bool perfOn = getenv("BB_PERF") != nullptr;
+            double lateSumMs = 0, lateMaxMs = 0;
+            uint32_t vblanks = 0;
             for (;;)
             {
                 next += std::chrono::microseconds(16667);
-                std::this_thread::sleep_until(next);
+                if (precise) platform::sleepUntilPrecise(next);
+                else std::this_thread::sleep_until(next);
+                {
+                    const double lateMs = std::chrono::duration<double, std::milli>(clock::now() - next).count();
+                    lateSumMs += lateMs;
+                    lateMaxMs = std::max(lateMaxMs, lateMs);
+                    vblanks++;
+                }
                 dispatchInterrupt(0, 2);
                 if (clock::now() - lastReport >= std::chrono::seconds(1))
                 {
@@ -607,6 +654,25 @@ namespace gpu
                          (unsigned long long)f, g_frontBuffer, g_frontWidth, g_frontHeight,
                          (unsigned long long)apu::xmaFramesDecoded(), (unsigned long long)vmb, (unsigned long long)pmb,
                          s.longestMs, s.speedPercent);
+                    if (perfOn)
+                    {
+                        FramePacing p;
+                        {
+                            std::lock_guard g(g_frameStatsLock);
+                            p = g_framePacing;
+                            g_framePacing = {};
+                        }
+                        if (p.frames)
+                        {
+                            const double mean = p.sumMs / p.frames;
+                            info("[perf]   frames: %u, %.1f to %.1f ms apart (std dev %.2f ms); by the swaps' times, %u got no gameplay "
+                                 "step and %u got two or more | vblank interrupt late by %.2f ms on average, %.2f at most%s",
+                                 p.frames, p.minMs, p.maxMs, std::sqrt(std::max(0.0, p.sumSqMs / p.frames - mean * mean)), p.noStep,
+                                 p.twoSteps, vblanks ? lateSumMs / vblanks : 0.0, lateMaxMs, precise ? "" : " (BB_PRECISE_VBLANK=0)");
+                        }
+                        lateSumMs = lateMaxMs = 0;
+                        vblanks = 0;
+                    }
                     lastFrames = f;
                     lastDraws = d;
                     lastReport = clock::now();

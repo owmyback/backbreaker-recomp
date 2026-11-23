@@ -9,8 +9,12 @@
 #include <filesystem>
 #include <fstream>
 
+#ifdef _WIN32
+#include "platform.h"
+#else
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -183,9 +187,16 @@ namespace installer
     std::string steamQuoted(const std::string& path)
     {
         if (path.empty()) return {};
+#ifdef _WIN32
+        // Steam on Windows starts it with CreateProcess, no shell: only a quote would end the path early
+        // (and every Windows path has backslashes)
+        const char* unsafe = "\"";
+#else
+        const char* unsafe = "\"`$\\";
+#endif
         for (char c : path) {
             const unsigned char u = static_cast<unsigned char>(c);
-            if (u < 0x20 || u == 0x7F || std::strchr("\"`$\\", c)) return {};
+            if (u < 0x20 || u == 0x7F || std::strchr(unsafe, c)) return {};
         }
         return "\"" + path + "\"";
     }
@@ -265,6 +276,14 @@ namespace installer
 
     std::vector<SteamInstall> findSteamInstalls()
     {
+#ifdef _WIN32
+        // One Steam per machine, where the registry says (installer/platform.h, steamFolder)
+        std::vector<SteamInstall> found;
+        std::error_code ec;
+        if (const std::string folder = platform::steamFolder(); !folder.empty() && fs::is_directory(folder + "/userdata", ec))
+            found.push_back({folder, false});
+        return found;
+#else
         const char* h = std::getenv("HOME");
         const std::string home = h && *h ? h : ".";
         const std::string flatpak = home + "/.var/app/" + kFlatpakSteam;
@@ -288,6 +307,7 @@ namespace installer
             found.push_back({path, isFlatpak});
         }
         return found;
+#endif
     }
 
     std::vector<std::string> steamAccountConfigs(const std::string& root)
@@ -306,6 +326,10 @@ namespace installer
 
     bool steamRunning(const std::string& proc)
     {
+#ifdef _WIN32
+        (void)proc;
+        return platform::processRunning("steam.exe");
+#else
         std::error_code ec;
         for (const fs::directory_entry& d : fs::directory_iterator(proc, ec)) {
             const std::string pid = d.path().filename().string();
@@ -317,5 +341,6 @@ namespace installer
             if (std::getline(f, comm) && comm == "steam") return true;
         }
         return false;
+#endif
     }
 }

@@ -4,12 +4,21 @@
 // entry's icon on the game's window in its taskbar, and how Steam's "Add a Non-Steam Game" list
 // gets a name and an icon for it. A launcher's install writes the same file hidden (NoDisplay):
 // not in the menu, since the launcher has its own entry, but still the window's name and icon.
+//
+// On Windows (#174) the menu entry is a Start-menu shortcut instead (installer/platform.h), whose
+// icon, like Steam's there, is an .ico: icoFromPng makes one from the title's icon.png.
 #pragma once
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace installer
 {
+    // A PNG (up to 256x256) as an .ico holding it as its one image, as Windows Vista and newer
+    // read them; empty when it isn't a PNG of a size an .ico can name
+    std::vector<uint8_t> icoFromPng(const std::vector<uint8_t>& png);
+
     constexpr const char* kAppId = "backbreaker-recomp";
 
     // $XDG_DATA_HOME/applications/backbreaker-recomp.desktop

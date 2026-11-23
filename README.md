@@ -3,7 +3,7 @@
 <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
 
 Exploratory project to statically recompile Backbreaker (2010, NaturalMotion) for native Linux
-using XenonRecomp. Requires a legally owned disc image; no game data is in this repository.
+and Windows using XenonRecomp. Requires a legally owned disc image; no game data is in this repository.
 
 ## Playing it
 - **With RecompLauncher:** add this repository's link in RecompLauncher. It downloads the installer
@@ -17,6 +17,9 @@ using XenonRecomp. Requires a legally owned disc image; no game data is in this 
   `.json.tag` file next to it, then start it again. Your install, saves and settings stay.
 - **From a terminal:** the release's `Backbreaker-Recompiled-x86_64.AppImage install <your disc image>`
   does the same; the release notes have the steps.
+- **On Windows:** unzip the release's `Backbreaker-Recompiled-windows-x86_64.zip` and drag your
+  disc image onto `Backbreaker-Recompiled.exe`. Its `README.txt` has the steps. Settings are in
+  `%LOCALAPPDATA%\backbreaker-recomp\settings.ini` (`resolution_scale=2` sharpens the picture).
 - **Achievements:** F1, or the controller's Guide (PS) button, opens the list of achievements over
   the game, and the same key or button closes it. On a Steam Deck the Steam button belongs to Steam
   and there's no F1 key: in Steam, open the game's controller settings and map the back grip R4 to

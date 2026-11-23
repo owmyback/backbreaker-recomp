@@ -158,9 +158,9 @@ namespace gpu::capture
             g_frame = frame;
             fs::path dir = fs::path(g_dir) / ("frame_" + std::to_string(frame));
             fs::create_directories(dir / "shaders");
-            g_drawLog = fopen((dir / "draws.txt").c_str(), "w");
+            g_drawLog = fopen((dir / "draws.txt").string().c_str(), "w");
             g_shadow.assign(reg::kCount, 0);
-            FILE* f = fopen((dir / "registers_start.txt").c_str(), "w");
+            FILE* f = fopen((dir / "registers_start.txt").string().c_str(), "w");
             uint32_t aluNonZero = 0;
             for (uint32_t i = 0; i < reg::kCount; i++)
             {
@@ -178,7 +178,7 @@ namespace gpu::capture
             g_usedShaders[0].clear(); g_usedShaders[1].clear();
             g_draws = g_copies = 0;
             g_active = true;
-            info("[capture] recording frame %llu into %s", (unsigned long long)frame, dir.c_str());
+            info("[capture] recording frame %llu into %s", (unsigned long long)frame, dir.string().c_str());
         }
 
         void finish(uint32_t front, uint32_t width, uint32_t height)
@@ -194,14 +194,14 @@ namespace gpu::capture
                     if (it == g_shaders.end()) continue;
                     char name[64];
                     snprintf(name, sizeof(name), "%s_%016llx.bin", t ? "ps" : "vs", (unsigned long long)h);
-                    if (FILE* s = fopen((dir / "shaders" / name).c_str(), "wb"))
+                    if (FILE* s = fopen((dir / "shaders" / name).string().c_str(), "wb"))
                     {
                         fwrite(it->second.words.data(), 4, it->second.words.size(), s); // big-endian dwords
                         fclose(s);
                     }
                 }
             }
-            FILE* f = fopen((dir / "summary.txt").c_str(), "w");
+            FILE* f = fopen((dir / "summary.txt").string().c_str(), "w");
             if (!f) return;
             fprintf(f, "Backbreaker GPU frame capture - frame %llu\n", (unsigned long long)g_frame);
             // Which binary made this capture: a capture folder gets emailed around on its own (#75).
@@ -222,7 +222,7 @@ namespace gpu::capture
             for (auto& [op, n] : g_opcodes) fprintf(f, "  0x%02X  %llu\n", op, (unsigned long long)n);
             fclose(f);
             info("[capture] frame %llu: %llu draws, %zu+%zu shaders, %zu textures -> %s", (unsigned long long)g_frame,
-                 (unsigned long long)g_draws, g_usedShaders[0].size(), g_usedShaders[1].size(), g_textures.size(), dir.c_str());
+                 (unsigned long long)g_draws, g_usedShaders[0].size(), g_usedShaders[1].size(), g_textures.size(), dir.string().c_str());
         }
     }
 
@@ -264,7 +264,7 @@ namespace gpu::capture
             {
                 char name[64];
                 snprintf(name, sizeof(name), "%s_%016llx.bin", type ? "ps" : "vs", (unsigned long long)h);
-                if (FILE* s = fopen((fs::path(g_dumpDir) / name).c_str(), "wb"))
+                if (FILE* s = fopen((fs::path(g_dumpDir) / name).string().c_str(), "wb"))
                 {
                     fwrite(words, 4, dwords, s); // big-endian dwords, as in guest memory
                     fclose(s);

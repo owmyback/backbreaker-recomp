@@ -3,8 +3,12 @@
 
 #include <cstdlib>
 #include <filesystem>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <pwd.h>
 #include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -18,6 +22,27 @@ namespace
     std::string g_captures = "captures";
     std::string g_logs; // none in the checkout layout: a terminal or a pipe has the log there
 
+#ifdef _WIN32
+    // Windows (#174): the player's files and settings both go in %LOCALAPPDATA%\backbreaker-recomp
+    std::string xdg(const char*, const char*)
+    {
+        if (const char* v = std::getenv("LOCALAPPDATA"); v && *v) return v;
+        if (const char* h = std::getenv("USERPROFILE"); h && *h) return std::string(h) + "/AppData/Local";
+        return ".";
+    }
+
+    fs::path selfPath(std::error_code& ec)
+    {
+        std::wstring buf(MAX_PATH, L'\0');
+        for (;;)
+        {
+            DWORD n = GetModuleFileNameW(nullptr, buf.data(), DWORD(buf.size()));
+            if (n == 0) { ec = std::error_code(int(GetLastError()), std::system_category()); return {}; }
+            if (n < buf.size()) { buf.resize(n); return fs::path(buf); }
+            buf.resize(buf.size() * 2);
+        }
+    }
+#else
     std::string home()
     {
         if (const char* h = std::getenv("HOME"); h && *h) return h;
@@ -32,6 +57,9 @@ namespace
         return home() + "/" + fallback;
     }
 
+    fs::path selfPath(std::error_code& ec) { return fs::read_symlink("/proc/self/exe", ec); }
+#endif
+
     // The installer's layout (#138): this program is <prefix>/bin/backbreaker and the game's files
     // are <prefix>/game, which the installer marks finished with game/.complete. Found from the
     // program's own path, so a shortcut to it (Steam's non-Steam game) needs no --data-dir and no
@@ -39,7 +67,7 @@ namespace
     std::string installerGameDir()
     {
         std::error_code ec;
-        const fs::path self = fs::read_symlink("/proc/self/exe", ec);
+        const fs::path self = selfPath(ec);
         if (ec || self.parent_path().filename() != "bin") return {};
         const fs::path game = self.parent_path().parent_path() / "game";
         return fs::exists(game / ".complete", ec) ? game.string() : std::string();

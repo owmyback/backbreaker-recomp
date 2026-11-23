@@ -6,6 +6,7 @@ game/
 # Upstream clones
 third_party/
 build/
+build-win/
 # Recompiled output (derived from game code)
 ppc/
 
@@ -23,4 +24,5 @@ captures/
 screenshots/
 build-portable/
 build-installer/
+build-installer-windows/
 dist/

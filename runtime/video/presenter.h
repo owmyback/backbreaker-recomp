@@ -22,4 +22,16 @@ namespace video
     // runtime/settings.h) and written back when the window closes, with the file's other keys
     // (resolution_scale, #115) as they were; startFullscreen forces fullscreen whatever the file says.
     void run(bool startFullscreen = false);
+
+    // BB_PERF (#174): what presenting cost since the last call. Both threads share one queue, so
+    // a present that holds the queue (or its lock) holds the renderer's submits back.
+    struct PresentStats
+    {
+        uint64_t presents = 0;
+        double fenceMs = 0;   // waiting for the last present's own commands
+        double acquireMs = 0; // in vkAcquireNextImageKHR
+        double queueMs = 0, queueMaxMs = 0; // holding the queue lock: the submit and vkQueuePresentKHR
+        uint64_t skippedFrames = 0;         // game frames that were never presented
+    };
+    PresentStats takePresentStats();
 }

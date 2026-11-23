@@ -27,16 +27,24 @@
 #include <algorithm>
 #include <filesystem>
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstring>
-#include <execinfo.h>
 #include <fstream>
 #include <pthread.h>
 #include <string>
 #include <thread>
+#include <vector>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#include <timeapi.h>
+#else
+#include <execinfo.h>
 #include <ucontext.h>
 #include <unistd.h>
-#include <vector>
+#endif
 
 PPC_EXTERN_FUNC(_xstart);
 
@@ -53,6 +61,110 @@ namespace
         log_file::drain();
     }
 
+    // The crash report's guest part: the crashing guest thread's registers, scopes and trace
+    void printGuestCrashState()
+    {
+        kernel::GuestThread* gt = kernel::currentThread();
+        if (kernel::Thread* th = kernel::currentThreadObject(); th && th->ctx)
+        {
+            PPCContext& c = *th->ctx;
+            std::fprintf(stderr, "---- guest registers, thread %u ----\n", gt ? gt->id : 0);
+            PPCRegister* r[] = { &c.r0,  &c.r2,  &c.r3,  &c.r4,  &c.r5,  &c.r6,  &c.r7,  &c.r8,  &c.r9,  &c.r10,
+                                 &c.r11, &c.r12, &c.r14, &c.r15, &c.r16, &c.r17, &c.r18, &c.r19, &c.r20, &c.r21,
+                                 &c.r22, &c.r23, &c.r24, &c.r25, &c.r26, &c.r27, &c.r28, &c.r29, &c.r30, &c.r31 };
+            static const int num[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21,
+                                       22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
+            for (int i = 0; i < 30; i++)
+                std::fprintf(stderr, "  r%-2d %08X%s", num[i], r[i]->u32, i % 5 == 4 ? "\n" : "");
+            std::fprintf(stderr, "  r1  %08X  r13 %08X  lr  %08X\n", c.r1.u32, c.r13.u32, uint32_t(c.lr));
+        }
+        kernel::printScopes(gt);
+        if (gt) kernel::printTrace(gt->id, 24);
+        kernel::printTrace(0, 12);
+    }
+
+    // --timeout, kill and Ctrl+C all end a run with this report, then the process
+    void endRun(const char* banner, int code)
+    {
+        std::fprintf(stderr, "\n==== %s ====\n", banner);
+        for (kernel::GuestThread* t : kernel::allThreads())
+        {
+            std::fprintf(stderr, "\n#### thread %u\n", t->id);
+            kernel::printScopes(t);
+            kernel::printTrace(t->id, 4);
+        }
+        printExitSummary();
+        std::fflush(nullptr);
+        _exit(code);
+    }
+
+#ifdef _WIN32
+    // Windows (#174). First in line for every exception: a write to a page the renderer watches
+    // (mem::watch) is not a crash. ExceptionInformation: [0] 1 for a write, [1] the address.
+    LONG CALLBACK watchFaults(EXCEPTION_POINTERS* e)
+    {
+        const EXCEPTION_RECORD* r = e->ExceptionRecord;
+        if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2 && r->ExceptionInformation[0] == 1 &&
+            mem::watch::onFault((const void*)r->ExceptionInformation[1]))
+            return EXCEPTION_CONTINUE_EXECUTION;
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // An exception nothing handled: the same report as the Linux signal handler. Host frames are
+    // offsets into the program (no symbol names here: llvm-symbolizer or the map file reads them).
+    LONG WINAPI crashFilter(EXCEPTION_POINTERS* e)
+    {
+        static std::atomic<bool> crashing{false};
+        if (crashing.exchange(true))
+            for (;;) Sleep(INFINITE);
+        const EXCEPTION_RECORD* r = e->ExceptionRecord;
+        std::fprintf(stderr, "\n==== exception 0x%08lX ====\n", r->ExceptionCode);
+        if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2)
+        {
+            const uintptr_t fault = r->ExceptionInformation[1];
+            const char* kind = r->ExceptionInformation[0] == 1 ? "write" : r->ExceptionInformation[0] == 8 ? "execute" : "read";
+            if (mem::isGuest((void*)fault))
+                std::fprintf(stderr, "fault address (%s): guest %08X\n", kind, uint32_t(fault - (uintptr_t)mem::base));
+            else
+                std::fprintf(stderr, "fault address (%s): host %p\n", kind, (void*)fault);
+        }
+        const uintptr_t exe = (uintptr_t)GetModuleHandleW(nullptr);
+        std::fprintf(stderr, "host rip: %p (backbreaker.exe+0x%llx)\n", (void*)e->ContextRecord->Rip,
+                     (unsigned long long)(e->ContextRecord->Rip - exe));
+        void* frames[48];
+        const USHORT n = CaptureStackBackTrace(0, 48, frames, nullptr);
+        std::fprintf(stderr, "---- host backtrace ----\n");
+        for (USHORT i = 0; i < n; i++)
+            std::fprintf(stderr, "  %p (backbreaker.exe+0x%llx)\n", frames[i], (unsigned long long)((uintptr_t)frames[i] - exe));
+        printGuestCrashState();
+        printExitSummary();
+        _exit(3);
+    }
+
+    BOOL WINAPI consoleCtrl(DWORD type)
+    {
+        if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT)
+            endRun(type == CTRL_C_EVENT ? "Ctrl+C received" : type == CTRL_BREAK_EVENT ? "Ctrl+Break received" : "console closed", 130);
+        return FALSE;
+    }
+
+    void blockEndSignals() {}
+
+    void installHandlers()
+    {
+        AddVectoredExceptionHandler(1, watchFaults);
+        SetUnhandledExceptionFilter(crashFilter);
+        SetConsoleCtrlHandler(consoleCtrl, TRUE);
+    }
+
+    void startTimeout(int seconds)
+    {
+        std::thread([seconds] {
+            std::this_thread::sleep_for(std::chrono::seconds(seconds));
+            endRun("timeout reached", 124);
+        }).detach();
+    }
+#else
     void crashHandler(int sig, siginfo_t* si, void* uctx)
     {
         // A write to a page the renderer watches for texture changes (mem::watch): not a crash.
@@ -85,23 +197,7 @@ namespace
         std::fprintf(stderr, "---- host backtrace (sub_XXXXXXXX = guest function) ----\n");
         backtrace_symbols_fd(frames, n, STDERR_FILENO);
 
-        kernel::GuestThread* gt = kernel::currentThread();
-        if (kernel::Thread* th = kernel::currentThreadObject(); th && th->ctx)
-        {
-            PPCContext& c = *th->ctx;
-            std::fprintf(stderr, "---- guest registers, thread %u ----\n", gt ? gt->id : 0);
-            PPCRegister* r[] = { &c.r0,  &c.r2,  &c.r3,  &c.r4,  &c.r5,  &c.r6,  &c.r7,  &c.r8,  &c.r9,  &c.r10,
-                                 &c.r11, &c.r12, &c.r14, &c.r15, &c.r16, &c.r17, &c.r18, &c.r19, &c.r20, &c.r21,
-                                 &c.r22, &c.r23, &c.r24, &c.r25, &c.r26, &c.r27, &c.r28, &c.r29, &c.r30, &c.r31 };
-            static const int num[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21,
-                                       22, 23, 24, 25, 26, 27, 28, 29, 30, 31 };
-            for (int i = 0; i < 30; i++)
-                std::fprintf(stderr, "  r%-2d %08X%s", num[i], r[i]->u32, i % 5 == 4 ? "\n" : "");
-            std::fprintf(stderr, "  r1  %08X  r13 %08X  lr  %08X\n", c.r1.u32, c.r13.u32, uint32_t(c.lr));
-        }
-        kernel::printScopes(gt);
-        if (gt) kernel::printTrace(gt->id, 24);
-        kernel::printTrace(0, 12);
+        printGuestCrashState();
         printExitSummary();
         _exit(128 + sig);
     }
@@ -136,19 +232,8 @@ namespace
         signal(SIGINT, SIG_DFL);
         pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
 
-        if (sig == SIGALRM)
-            std::fprintf(stderr, "\n==== timeout reached ====\n");
-        else
-            std::fprintf(stderr, "\n==== %s received ====\n", sig == SIGTERM ? "SIGTERM" : "SIGINT");
-        for (kernel::GuestThread* t : kernel::allThreads())
-        {
-            std::fprintf(stderr, "\n#### thread %u\n", t->id);
-            kernel::printScopes(t);
-            kernel::printTrace(t->id, 4);
-        }
-        printExitSummary();
-        std::fflush(nullptr);
-        _exit(sig == SIGALRM ? 124 : 128 + sig);
+        endRun(sig == SIGALRM ? "timeout reached" : sig == SIGTERM ? "SIGTERM received" : "SIGINT received",
+               sig == SIGALRM ? 124 : 128 + sig);
     }
 
     void installHandlers()
@@ -166,6 +251,9 @@ namespace
             sigaction(sig, &sa, nullptr);
         std::thread(endSignalWatcher).detach();
     }
+
+    void startTimeout(int seconds) { alarm(unsigned(seconds)); }
+#endif
 
     void loadImage(const std::string& path)
     {
@@ -234,12 +322,14 @@ namespace
     // Runs the game's entry point on the calling host thread. Never returns.
     void runGuestMain()
     {
-        // Per-thread state: alternate signal stack, current guest thread, FPU mode
+        // Per-thread state: alternate signal stack (Linux), current guest thread, FPU mode
+#ifndef _WIN32
         static thread_local std::vector<uint8_t> altStack(1 << 16);
         stack_t ss{};
         ss.ss_sp = altStack.data();
         ss.ss_size = altStack.size();
         sigaltstack(&ss, nullptr);
+#endif
         kernel::setCurrentThread(g_mainThread);
         kernel::adoptCurrentThread(g_mainThread, &g_mainCtx);
         g_mainCtx.fpscr.loadFromHost();
@@ -260,6 +350,13 @@ namespace
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    _set_fmode(_O_BINARY); // every file the CRT opens is binary, as on Linux (runtime/platform.h)
+    // Sleeps and timed waits last whole timer ticks on Windows, 15.6 ms unless a process asks for
+    // finer ones (#174): the guest's Sleep(1), the 1 ms time stamp bundle, the command processor's
+    // short polls for the GPU. 1 ms, for as long as the game runs (Windows ends it with the process).
+    timeBeginPeriod(1);
+#endif
     blockEndSignals(); // first: every thread started from here on inherits the mask
     std::string image; // the positional argument; default <data>/extracted/default.pe once paths are known
     paths::Options pathOptions; // --data-dir, --user-dir (#134)
@@ -464,7 +561,7 @@ int main(int argc, char** argv)
     apu::initAudio();
 
     if (timeout > 0)
-        alarm(timeout);
+        startTimeout(timeout);
 
     if (headless)
     {

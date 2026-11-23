@@ -1,6 +1,8 @@
 # The installer AppImage (#160): built in the portable build container, then, for a version tag or
 # a run by hand, attached with MANIFEST.txt, NOTICES.txt and third-party-sources.tar.xz to a DRAFT
 # release. Nothing here publishes: the maintainer looks the draft over and publishes it on GitHub.
+# The installer for Windows (#174), Backbreaker-Recompiled-windows-x86_64.zip, is cross-compiled on
+# the runner after it and attached to the same draft with MANIFEST-windows.txt and NOTICES-windows.txt.
 # A pull request that changes how the AppImage is made builds it too, and uploads nothing, and so
 # does a push to main that changes it: GitHub keeps caches per branch, and a pull request can use
 # its own branch's and main's, so main's run is what keeps the build container and the XMA decoder
@@ -20,6 +22,8 @@ on:
       - packaging/**
       - recomplauncher.json
       - scripts/build_xma_decoder.sh
+      - scripts/windows_deps.sh
+      - cmake/llvm-mingw.cmake
   workflow_dispatch:
     inputs:
       tag:
@@ -31,6 +35,8 @@ on:
       - packaging/**
       - recomplauncher.json
       - scripts/build_xma_decoder.sh
+      - scripts/windows_deps.sh
+      - cmake/llvm-mingw.cmake
 
 permissions:
   contents: read
@@ -199,3 +205,91 @@ jobs:
             echo "Draft release **$TAG** made from \`$GITHUB_SHA\`, with the AppImage, MANIFEST.txt, NOTICES.txt and third-party-sources.tar.xz."
             echo "Look it over and publish it on GitHub: publishing makes the tag, if the run was started by hand."
           } >>"$GITHUB_STEP_SUMMARY"
+
+  # After the AppImage: the draft release is that job's, and this one adds to it
+  windows:
+    needs: appimage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write # the draft release's files, only for a tag or a run by hand
+    env:
+      ZIP: build-installer-windows/Backbreaker-Recompiled-windows-x86_64.zip
+      MANIFEST: build-installer-windows/MANIFEST-windows.txt
+      NOTICES: build-installer-windows/NOTICES-windows.txt
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Which release
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          case $GITHUB_EVENT_NAME in
+            workflow_dispatch) tag=$INPUT_TAG ;;
+            push) if [[ $GITHUB_REF == refs/tags/* ]]; then tag=$GITHUB_REF_NAME; else tag=; fi ;;
+            *) tag= ;;
+          esac
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+
+      - name: Patched XenonRecomp (scripts/setup.sh's pin)
+        run: |
+          rev=$(sed -n 's/^XENON_REV=\([0-9a-f]*\).*/\1/p' scripts/setup.sh)
+          [ -n "$rev" ]
+          git clone -q --recursive https://github.com/hedge-dev/XenonRecomp.git third_party/XenonRecomp
+          git -C third_party/XenonRecomp checkout -q "$rev"
+          git -C third_party/XenonRecomp submodule update -q --init --recursive
+          git -C third_party/XenonRecomp apply ../../patches/xenonrecomp-backbreaker-instructions.patch
+
+      - name: Ninja
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build
+
+      # llvm-mingw, and SDL3, shaderc and the XMA decoder built for Windows with it (about 15
+      # minutes), with the sources their licences are read from
+      - name: The cross-compiler and the Windows libraries, from an earlier run
+        uses: actions/cache@v5
+        with:
+          path: |
+            third_party/llvm-mingw
+            third_party/win64
+            third_party/downloads
+          key: windows-deps-${{ hashFiles('scripts/windows_deps.sh', 'scripts/build_xma_decoder.sh', 'packaging/portable/Containerfile', 'packaging/installer/build_installer_windows.sh') }}
+
+      - name: The installer for Windows
+        run: packaging/installer/build_installer_windows.sh
+
+      - name: Check it
+        run: |
+          names=$(python3 -I -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$ZIP")
+          for f in Backbreaker-Recompiled.exe README.txt recomplauncher.json bundle/MANIFEST.txt bundle/NOTICES.txt bundle/toolchain/bin/clang++.exe \
+            bundle/toolchain/bin/ld.lld.exe bundle/toolchain/include/stdio.h bundle/xenonrecomp/XenonRecomp.exe \
+            bundle/xenonrecomp/ppc_context.h bundle/config/backbreaker.toml bundle/kit/lib/libbackbreaker_runtime.a \
+            bundle/kit/share/backbreaker-runtime/game-link.args; do
+            grep -qx "Backbreaker-Recompiled-windows-x86_64/$f" <<<"$names" || { echo "::error::the zip has no $f"; exit 1; }
+          done
+          # RecompLauncher finds the manifest at the top of the zip's folder and runs the program by this name
+          m=build-installer-windows/Backbreaker-Recompiled-windows-x86_64/recomplauncher.json
+          [ "$(jq -r '.prepare.program[0]' $m)" = Backbreaker-Recompiled.exe ]
+          [ "$(jq -r '.start.program[0]' $m)" = Backbreaker-Recompiled.exe ]
+          for part in XenonRecomp 'FFmpeg (libavcodec' 'SDL 3' 'shaderc,' 'llvm-mingw' 'Vulkan-Headers'; do
+            grep -q "^$part" "$NOTICES" || { echo "::error::NOTICES-windows.txt has no $part"; exit 1; }
+          done
+          # Nothing from a game: no disc image, executable, translated code or title image
+          found=$(grep -iE '\.(iso|xex|pe)$|ppc_recomp|ppc_func_mapping|/icon\.(png|ico)$|/game/' <<<"$names" || true)
+          if [ -n "$found" ]; then echo "::error::game files in the zip: $found"; exit 1; fi
+          ls -l "$ZIP" "$MANIFEST" "$NOTICES"
+
+      - name: Add to the draft release
+        if: steps.release.outputs.tag != ''
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]; then
+            echo "::error::$TAG is not a draft release"
+            exit 1
+          fi
+          gh release upload "$TAG" "$ZIP" "$MANIFEST" "$NOTICES" --clobber
+          echo "Added to the draft release **$TAG**: the Windows zip, MANIFEST-windows.txt and NOTICES-windows.txt." >>"$GITHUB_STEP_SUMMARY"

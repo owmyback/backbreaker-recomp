@@ -5,6 +5,14 @@
 #include <ppc_context.h>
 
 #include <cxxabi.h>
+#ifdef _WIN32
+// Windows (#174): thread CPU from QueryThreadCycleTime (there's no time-waiting-for-a-core there),
+// the other threads from a Toolhelp snapshot, the main thread's stacks by suspending it from a
+// sampler thread and unwinding with its .pdata, and names from the program's COFF symbol table
+#include <windows.h>
+#include <tlhelp32.h>
+#include <fstream>
+#else
 #include <dirent.h>
 #include <dlfcn.h>
 #include <execinfo.h>
@@ -14,7 +22,9 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+#endif
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -38,13 +48,26 @@ namespace debug::threadtimes
         // A frame this long gets a report: 80 ms, or BB_HITCH_MS (at least 20) to look at shorter ones
         const double kHitchSeconds = getenv("BB_HITCH_MS") ? std::max(20.0, atof(getenv("BB_HITCH_MS"))) / 1000 : 0.08;
         constexpr size_t kMaxLines = 8, kSecondLines = 6;
+        // The guest thread whose stacks the hitch reports sample: the game's main thread, or
+        // BB_STACK_GUEST=<n> to look at a worker it waits for
+        const uint32_t g_stackGuest = getenv("BB_STACK_GUEST") ? uint32_t(std::max(1, atoi(getenv("BB_STACK_GUEST")))) : 1;
+        // BB_STACK_CP=1: the command processor's stacks instead (the renderer: when the game waits
+        // on the GPU fence, it's what the frame waits for)
+        const bool g_stackCp = getenv("BB_STACK_CP") != nullptr;
+        std::string stackLabel() { return g_stackCp ? std::string("the command processor") : "guest " + std::to_string(g_stackGuest); }
 
         // One host thread's counters. Never freed: the sampler may still read a thread's last values
         // after it exits.
+#ifdef _WIN32
+        using pid_t = unsigned long; // a thread id
+#endif
         struct Counters
         {
             pid_t tid = 0;
-            int fd = -1;               // its schedstat; -1 none, -2 the thread is gone
+            int fd = -1;               // its schedstat; -1 none, -2 the thread is gone (Windows: 0 once `thread` is open)
+#ifdef _WIN32
+            HANDLE thread = nullptr;   // for its cycle time
+#endif
             uint32_t guestId = 0;      // the guest thread it runs, 0 if none
             const char* role = nullptr;
             std::atomic<uint64_t> total[kBuckets]{};
@@ -62,7 +85,34 @@ namespace debug::threadtimes
         std::vector<std::pair<double, double>> g_hitches;
         std::once_flag g_started;
 
+#ifdef _WIN32
+        pid_t tidNow() { return GetCurrentThreadId(); }
+
+        // QueryThreadCycleTime counts the TSC's cycles: its rate, measured once against the steady clock
+        double nsPerCycle()
+        {
+            static const double v = [] {
+                const auto t0 = std::chrono::steady_clock::now();
+                const uint64_t c0 = __rdtsc();
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                const uint64_t c1 = __rdtsc();
+                const double ns = double(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+                return c1 > c0 ? ns / double(c1 - c0) : 0.25;
+            }();
+            return v;
+        }
+
+        bool readThreadTimes(HANDLE thread, uint64_t& run, uint64_t& wait)
+        {
+            ULONG64 cycles = 0;
+            if (!thread || !QueryThreadCycleTime(thread, &cycles)) return false;
+            run = uint64_t(double(cycles) * nsPerCycle());
+            wait = 0; // Windows doesn't count a thread's time waiting for a core
+            return true;
+        }
+#else
         pid_t tidNow() { return pid_t(syscall(SYS_gettid)); }
+#endif
         double seconds(uint64_t ns) { return double(ns) / 1e9; }
 
         void samplerLoop();
@@ -85,6 +135,84 @@ namespace debug::threadtimes
         };
         StackSample* g_stacks = nullptr;
         std::atomic<uint64_t> g_stackCount{0};
+
+        void keepSample(void* const* pc, int n)
+        {
+            const uint64_t i = g_stackCount.load(std::memory_order_relaxed);
+            StackSample& s = g_stacks[i % kStackRing];
+            s.seq.store(0, std::memory_order_relaxed);
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+            s.t = nowNs();
+            s.n = n;
+            std::copy(pc, pc + n, s.pc);
+            s.seq.store(i + 1, std::memory_order_release);
+            g_stackCount.store(i + 1, std::memory_order_release);
+        }
+
+#ifdef _WIN32
+        // Windows: no CPU-time timer can signal a thread, so a sampler thread suspends the main
+        // thread every 2 ms of wall time (a waiting thread is sampled too: its wait shows), reads its
+        // registers and unwinds its stack with the program's .pdata, then lets it go. Nothing is
+        // allocated or logged while it's suspended.
+        constexpr int kSkipFrames = 0; // the samples start at the thread's own instruction
+        HANDLE g_sampled = nullptr;
+
+        int unwind(CONTEXT c, void** pc, int max)
+        {
+            int n = 0;
+            while (n < max && c.Rip)
+            {
+                pc[n++] = (void*)c.Rip;
+                DWORD64 imageBase = 0;
+                PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(c.Rip, &imageBase, nullptr);
+                if (!f) // a leaf function: its return address is on top of the stack
+                {
+                    if (!c.Rsp) break;
+                    c.Rip = *(const DWORD64*)c.Rsp;
+                    c.Rsp += 8;
+                    continue;
+                }
+                PVOID handlerData = nullptr;
+                DWORD64 establisher = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, c.Rip, f, &c, &handlerData, &establisher, nullptr);
+            }
+            return n;
+        }
+
+        void stackSamplerLoop()
+        {
+            SetThreadDescription(GetCurrentThread(), L"bb-stacks");
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            auto next = std::chrono::steady_clock::now();
+            for (;;)
+            {
+                next += std::chrono::nanoseconds(kStackPeriodNs);
+                std::this_thread::sleep_until(next);
+                if (SuspendThread(g_sampled) == DWORD(-1)) return; // the thread is gone
+                CONTEXT c{};
+                c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+                void* pc[kStackFrames];
+                const int n = GetThreadContext(g_sampled, &c) ? unwind(c, pc, kStackFrames) : 0;
+                ResumeThread(g_sampled);
+                if (n) keepSample(pc, n);
+            }
+        }
+
+        // On the thread to sample (the game's main thread), once
+        void startStackSampling()
+        {
+            if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_sampled,
+                                 THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0))
+            {
+                warn("[threads] can't sample the main thread's stacks (error %lu): the hitch reports won't name its functions", GetLastError());
+                return;
+            }
+            g_stacks = new StackSample[kStackRing];
+            std::thread(stackSamplerLoop).detach();
+            info("[threads] sampling the game's main thread every %ld ms for the hitch reports", kStackPeriodNs / 1000000);
+        }
+#else
+        constexpr int kSkipFrames = 2; // the signal handler and the signal trampoline
 
         void onStackSample(int, siginfo_t*, void*)
         {
@@ -127,6 +255,97 @@ namespace debug::threadtimes
             }
             info("[threads] sampling the game's main thread every %ld ms of its CPU time for the hitch reports", kStackPeriodNs / 1000000);
         }
+#endif
+
+#ifdef _WIN32
+        // The program's COFF symbol table, read from its file once (the game keeps one: the
+        // installer doesn't strip it): every function's address, as an RVA, and its name
+        struct Symbols
+        {
+            uintptr_t base = 0, size = 0; // the program in memory
+            std::vector<std::pair<uint32_t, std::string>> byRva; // sorted
+        };
+
+        const Symbols& symbols()
+        {
+            static const Symbols s = [] {
+                Symbols out;
+                out.base = uintptr_t(GetModuleHandleW(nullptr));
+                const auto* nt = (const IMAGE_NT_HEADERS*)(out.base + ((const IMAGE_DOS_HEADER*)out.base)->e_lfanew);
+                out.size = nt->OptionalHeader.SizeOfImage;
+                wchar_t path[1024];
+                const DWORD len = GetModuleFileNameW(nullptr, path, DWORD(std::size(path)));
+                if (!len || len >= std::size(path)) return out;
+                std::ifstream f(path, std::ios::binary);
+                auto readAt = [&](uint64_t at, void* to, size_t n) {
+                    f.seekg(std::streamoff(at));
+                    return bool(f.read((char*)to, std::streamsize(n)));
+                };
+                IMAGE_DOS_HEADER dos{};
+                IMAGE_FILE_HEADER fh{};
+                if (!readAt(0, &dos, sizeof dos) || !readAt(uint64_t(dos.e_lfanew) + 4, &fh, sizeof fh) || !fh.PointerToSymbolTable)
+                    return out;
+                std::vector<IMAGE_SECTION_HEADER> sections(fh.NumberOfSections);
+                const uint64_t sectionsAt = uint64_t(dos.e_lfanew) + 4 + sizeof fh + fh.SizeOfOptionalHeader;
+                if (!readAt(sectionsAt, sections.data(), sections.size() * sizeof(IMAGE_SECTION_HEADER))) return out;
+                std::vector<uint8_t> table(size_t(fh.NumberOfSymbols) * IMAGE_SIZEOF_SYMBOL);
+                uint32_t stringsSize = 0;
+                const uint64_t stringsAt = fh.PointerToSymbolTable + table.size();
+                if (!readAt(fh.PointerToSymbolTable, table.data(), table.size()) || !readAt(stringsAt, &stringsSize, 4)) return out;
+                std::vector<char> strings(stringsSize > 4 ? stringsSize : 4);
+                if (stringsSize > 4 && !readAt(stringsAt, strings.data(), strings.size())) return out;
+                for (uint32_t i = 0; i < fh.NumberOfSymbols; i++)
+                {
+                    IMAGE_SYMBOL sym;
+                    std::memcpy(&sym, table.data() + size_t(i) * IMAGE_SIZEOF_SYMBOL, IMAGE_SIZEOF_SYMBOL);
+                    const uint32_t aux = sym.NumberOfAuxSymbols;
+                    if (sym.SectionNumber > 0 && sym.SectionNumber <= int(sections.size()) &&
+                        (sections[sym.SectionNumber - 1].Characteristics & IMAGE_SCN_CNT_CODE) &&
+                        (sym.StorageClass == IMAGE_SYM_CLASS_EXTERNAL || sym.StorageClass == IMAGE_SYM_CLASS_STATIC))
+                    {
+                        std::string name = sym.N.Name.Short ? std::string((const char*)sym.N.ShortName, strnlen((const char*)sym.N.ShortName, 8))
+                                                            : (sym.N.Name.Long < strings.size() ? std::string(strings.data() + sym.N.Name.Long) : std::string());
+                        // Not section names (.text) nor weak aliases (.weak.<name>.default...): the function's own name
+                        if (!name.empty() && name[0] != '.')
+                            out.byRva.push_back({ sections[sym.SectionNumber - 1].VirtualAddress + sym.Value, std::move(name) });
+                    }
+                    i += aux;
+                }
+                std::sort(out.byRva.begin(), out.byRva.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+                return out;
+            }();
+            return s;
+        }
+
+        // The mangled name of the function `pc` is in, or "" when the symbol table doesn't have it;
+        // outside the program, the name of the DLL it's in (ntdll.dll, the GPU driver's...)
+        std::string rawName(void* pc)
+        {
+            const Symbols& s = symbols();
+            if (uintptr_t(pc) < s.base || uintptr_t(pc) >= s.base + s.size)
+            {
+                HMODULE m = nullptr;
+                wchar_t path[512];
+                if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)pc, &m) ||
+                    !GetModuleFileNameW(m, path, DWORD(std::size(path))))
+                    return {};
+                const wchar_t* file = wcsrchr(path, L'\\');
+                file = file ? file + 1 : path;
+                char narrow[128];
+                return WideCharToMultiByte(CP_UTF8, 0, file, -1, narrow, sizeof narrow, nullptr, nullptr) > 0 ? std::string(narrow) : std::string();
+            }
+            if (s.byRva.empty()) return {};
+            const uint32_t rva = uint32_t(uintptr_t(pc) - s.base);
+            auto it = std::upper_bound(s.byRva.begin(), s.byRva.end(), rva, [](uint32_t v, const auto& e) { return v < e.first; });
+            return it == s.byRva.begin() ? std::string() : std::prev(it)->second;
+        }
+#else
+        std::string rawName(void* pc)
+        {
+            Dl_info di{};
+            return dladdr(pc, &di) && di.dli_sname ? std::string(di.dli_sname) : std::string();
+        }
+#endif
 
         // "sub_XXXXXXXX" for recompiled code, "[Name]" for an import or a runtime function, "" if unknown.
         // On the sampler thread only (cached: the same addresses come back).
@@ -136,19 +355,21 @@ namespace debug::threadtimes
             auto it = cache.find(pc);
             if (it != cache.end()) return it->second;
             std::string name;
-            Dl_info di{};
-            if (dladdr(pc, &di) && di.dli_sname)
+            const std::string raw = rawName(pc);
+            if (!raw.empty())
             {
                 // Imports are C++ functions named __imp__<Name>(PPCContext&, unsigned char*): demangle
                 // first, then keep the name up to its arguments
                 int status = 0;
-                char* d = abi::__cxa_demangle(di.dli_sname, nullptr, nullptr, &status);
-                std::string full = status == 0 && d ? d : di.dli_sname;
+                char* d = abi::__cxa_demangle(raw.c_str(), nullptr, nullptr, &status);
+                std::string full = status == 0 && d ? d : raw;
                 free(d);
+                // "(anonymous namespace)::" would end the name at its own '(' (the runtime's functions)
+                for (size_t at; (at = full.find("(anonymous namespace)::")) != std::string::npos;) full.erase(at, 23);
                 full = full.substr(0, full.find('('));
                 if (size_t sub = full.find("sub_"); sub != std::string::npos && full.size() >= sub + 12) name = full.substr(sub, 12);
                 else if (size_t imp = full.find("__imp__"); imp != std::string::npos) name = "[" + full.substr(imp + 7, 40) + "]";
-                else name = "[" + full.substr(0, 48) + "]";
+                else name = "[" + (full.size() > 48 ? full.substr(full.size() - 48) : full) + "]"; // the end names the function
             }
             return cache.emplace(pc, std::move(name)).first->second;
         }
@@ -169,7 +390,7 @@ namespace debug::threadtimes
                 std::copy(s.pc, s.pc + n, pc);
                 if (s.seq.load(std::memory_order_acquire) != i + 1 || t < t0 || t > t1) continue; // overwritten meanwhile, or outside
                 std::vector<std::string> frames;
-                for (int f = 2; f < n; f++) // past the handler and the signal trampoline
+                for (int f = kSkipFrames; f < n; f++) // past the handler and the signal trampoline (Linux)
                 {
                     const std::string& name = frameName(pc[f]);
                     if (!name.empty()) frames.push_back(name);
@@ -184,9 +405,14 @@ namespace debug::threadtimes
             if (t_counters) return t_counters;
             auto* c = new Counters;
             c->tid = tidNow();
+#ifdef _WIN32
+            c->thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, c->tid);
+            c->fd = c->thread ? 0 : -1;
+#else
             char path[64];
             snprintf(path, sizeof path, "/proc/self/task/%d/schedstat", int(c->tid));
             c->fd = open(path, O_RDONLY | O_CLOEXEC);
+#endif
             {
                 std::lock_guard g(g_lock);
                 g_slots.push_back(c);
@@ -198,7 +424,12 @@ namespace debug::threadtimes
 
         void setName(const char* name)
         {
+#ifdef _WIN32
+            wchar_t wide[32];
+            if (name && MultiByteToWideChar(CP_UTF8, 0, name, -1, wide, 32) > 0) SetThreadDescription(GetCurrentThread(), wide);
+#else
             if (name && tidNow() != getpid()) pthread_setname_np(pthread_self(), name); // not the process's own name
+#endif
         }
 
         std::string label(const Counters* c)
@@ -216,10 +447,45 @@ namespace debug::threadtimes
         struct Other
         {
             int fd = -1;
+#ifdef _WIN32
+            HANDLE thread = nullptr;
+#endif
             uint64_t run = 0, wait = 0;
             bool seen = false;
         };
 
+#ifdef _WIN32
+        bool readStats(const Counters* c, uint64_t& run, uint64_t& wait) { return readThreadTimes(c->thread, run, wait); }
+        bool readStats(const Other& o, uint64_t& run, uint64_t& wait) { return readThreadTimes(o.thread, run, wait); }
+        void closeStats(Counters* c) { CloseHandle(c->thread); c->thread = nullptr; }
+
+        // Threads this process has that never registered (the GPU driver's, SDL's): watched as one group
+        void rescanOthers(std::map<pid_t, Other>& others, const std::set<pid_t>& registered)
+        {
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snap == INVALID_HANDLE_VALUE) return;
+            const DWORD self = GetCurrentProcessId();
+            std::set<pid_t> alive;
+            THREADENTRY32 e{};
+            e.dwSize = sizeof e;
+            for (BOOL more = Thread32First(snap, &e); more; more = Thread32Next(snap, &e))
+            {
+                if (e.th32OwnerProcessID != self) continue;
+                const pid_t tid = e.th32ThreadID;
+                alive.insert(tid);
+                if (registered.count(tid) || others.count(tid)) continue;
+                if (HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid)) others[tid].thread = h;
+            }
+            CloseHandle(snap);
+            for (auto it = others.begin(); it != others.end();)
+                if (!alive.count(it->first) || registered.count(it->first))
+                {
+                    CloseHandle(it->second.thread);
+                    it = others.erase(it);
+                }
+                else ++it;
+        }
+#else
         bool readSchedstat(int fd, uint64_t& run, uint64_t& wait)
         {
             char buf[128];
@@ -228,6 +494,9 @@ namespace debug::threadtimes
             buf[n] = 0;
             return parseSchedstat(buf, run, wait);
         }
+        bool readStats(const Counters* c, uint64_t& run, uint64_t& wait) { return readSchedstat(c->fd, run, wait); }
+        bool readStats(const Other& o, uint64_t& run, uint64_t& wait) { return readSchedstat(o.fd, run, wait); }
+        void closeStats(Counters* c) { close(c->fd); }
 
         // Threads this process has that never registered (Mesa, PipeWire, SDL): watched as one group
         void rescanOthers(std::map<pid_t, Other>& others, const std::set<pid_t>& registered)
@@ -255,6 +524,7 @@ namespace debug::threadtimes
                 }
                 else ++it;
         }
+#endif
 
         void report(const std::deque<Snapshot>& ring, size_t a, size_t b, const std::vector<Counters*>& slots, double frameS, double endS)
         {
@@ -292,7 +562,7 @@ namespace debug::threadtimes
                 if (otherCpu >= 5000000 || otherQueue >= 5000000)
                     info("[hitch]   other threads (%u): cpu %.0f ms, waiting for a core %.0f ms", B.otherCount, ms(otherCpu), ms(otherQueue));
                 // What the main thread was running
-                StackSummary sum = summarizeStacks(stackSamples(uint64_t(A.t * 1e9), uint64_t(B.t * 1e9)), "sub_8240F1B8", 4, 12);
+                StackSummary sum = summarizeStacks(stackSamples(uint64_t(A.t * 1e9), uint64_t(B.t * 1e9)), "sub_8240F1B8", 4, 12, 4, g_stackCp);
                 if (sum.samples)
                 {
                     const double pct = 100.0 / double(sum.samples), rest = sum.samples > sum.fence ? 100.0 / double(sum.samples - sum.fence) : 0;
@@ -303,15 +573,21 @@ namespace debug::threadtimes
                         snprintf(buf, sizeof buf, " | %.0f%% ", count * pct);
                         line += buf + stack;
                     }
-                    info("[hitch]   guest 1's stacks (%zu samples, one per %ld ms of its CPU; innermost first): GPU fence spin %.0f%%%s", sum.samples,
-                         kStackPeriodNs / 1000000, sum.fence * pct, line.c_str());
+#ifdef _WIN32
+                    const char* per = "ms, waiting or not"; // sampled by the clock (startStackSampling)
+#else
+                    const char* per = "ms of its CPU";
+#endif
+                    info("[hitch]   %s's stacks (%zu samples, one per %ld %s; innermost first): GPU fence spin %.0f%%%s", stackLabel().c_str(),
+                         sum.samples, kStackPeriodNs / 1000000, per, sum.fence * pct, line.c_str());
                     line.clear();
                     for (const auto& [count, fn] : sum.functions)
                     {
                         snprintf(buf, sizeof buf, "%s%s %.0f%%", line.empty() ? "" : ", ", fn.c_str(), count * rest);
                         line += buf;
                     }
-                    if (!line.empty()) info("[hitch]   guest 1's functions, by share of its samples outside the fence spin: %s", line.c_str());
+                    if (!line.empty())
+                        info("[hitch]   %s's functions, by share of its samples outside the fence spin: %s", stackLabel().c_str(), line.c_str());
                 }
                 return;
             }
@@ -345,8 +621,13 @@ namespace debug::threadtimes
         void samplerLoop()
         {
             registerRole("thread timing", "bb-threadtimes");
+#ifdef _WIN32
+            if (t_counters->fd < 0) warn("[threads] can't open this thread for its CPU time: no CPU times in the reports");
+            else info("[threads] Windows doesn't count a thread's time waiting for a core: the reports' core waits are 0");
+#else
             if (t_counters->fd < 0)
                 warn("[threads] /proc/self/task/<tid>/schedstat can't be read: no CPU or core-wait times in the reports");
+#endif
             info("[threads] thread timing on (BB_PERF=1; BB_THREAD_TIMES=0 turns it off): a [hitch] report for every frame of %.0f ms or "
                  "more, and a [perf] threads line each second",
                  kHitchSeconds * 1000);
@@ -378,9 +659,9 @@ namespace debug::threadtimes
                     ThreadSample& x = s.threads[i];
                     if (c->fd == -2) continue; // gone
                     registered.insert(c->tid);
-                    if (c->fd >= 0 && !readSchedstat(c->fd, x.cpuNs, x.queueNs))
+                    if (c->fd >= 0 && !readStats(c, x.cpuNs, x.queueNs))
                     {
-                        close(c->fd);
+                        closeStats(c);
                         c->fd = -2;
                         continue;
                     }
@@ -410,7 +691,7 @@ namespace debug::threadtimes
                 for (auto& [tid, o] : others)
                 {
                     uint64_t run, wait;
-                    if (!readSchedstat(o.fd, run, wait)) continue;
+                    if (!readStats(o, run, wait)) continue;
                     if (o.seen)
                     {
                         otherCpu += run > o.run ? run - o.run : 0;
@@ -464,9 +745,13 @@ namespace debug::threadtimes
 
     uint64_t nowNs()
     {
+#ifdef _WIN32
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+#else
         timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+#endif
     }
 
     void registerGuest(uint32_t guestId)
@@ -485,7 +770,8 @@ namespace debug::threadtimes
             std::lock_guard g(g_lock);
             c->guestId = guestId;
         }
-        if (guestId == 1 && !g_stacks && !(getenv("BB_THREAD_STACKS") && getenv("BB_THREAD_STACKS")[0] == '0')) startStackSampling();
+        if (!g_stackCp && guestId == g_stackGuest && !g_stacks && !(getenv("BB_THREAD_STACKS") && getenv("BB_THREAD_STACKS")[0] == '0'))
+            startStackSampling();
     }
 
     void registerRole(const char* label, const char* threadName)
@@ -493,8 +779,11 @@ namespace debug::threadtimes
         setName(threadName);
         if (!g_on) return;
         Counters* c = counters();
-        std::lock_guard g(g_lock);
-        c->role = label;
+        {
+            std::lock_guard g(g_lock);
+            c->role = label;
+        }
+        if (g_stackCp && !g_stacks && label && !strcmp(label, "gpu command processor")) startStackSampling();
     }
 
     void nameGuest(uint32_t guestId, const char* name)

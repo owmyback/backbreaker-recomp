@@ -40,7 +40,7 @@ namespace
         std::lock_guard lock(kernel::g_dispatchLock);
         l->queue.emplace_back(id, param);
         l->signaled = true;
-        kernel::signalObjectsChanged();
+        kernel::signalObject(l);
     }
 }
 

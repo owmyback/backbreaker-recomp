@@ -71,6 +71,15 @@ namespace kernel
 
     void signalObjectsChanged() { g_dispatchCv.notify_all(); }
 
+    void signalObject(Object* o)
+    {
+        for (Waiter* w : o->waiters)
+        {
+            w->woken = true;
+            w->cv.notify_one();
+        }
+    }
+
     uint32_t registerObject(Object* o)
     {
         std::lock_guard guard(g_tableLock);
@@ -178,43 +187,68 @@ namespace kernel
     uint32_t waitForObjects(const std::vector<Object*>& objects, bool waitAll, Deadline deadline)
     {
         std::unique_lock lock(g_dispatchLock);
-        for (;;)
-        {
+        // On the objects' waiter lists from the first time it has to wait until it returns: a
+        // change to one of them wakes this thread (signalObject), and nothing else does
+        Waiter me;
+        bool listed = false;
+        auto done = [&](uint32_t result) {
+            if (listed)
+                for (Object* o : objects) o->waiters.erase(std::remove(o->waiters.begin(), o->waiters.end(), &me), o->waiters.end());
+            return result;
+        };
+        // The wait's result if it can be satisfied now: an object signaled, or one a pulse released
+        // this thread for while it waited (that pulse already left it not signaled)
+        auto satisfied = [&](uint32_t& result) {
             if (waitAll)
             {
-                bool all = true;
-                for (Object* o : objects) all = all && isSignaled(o);
-                if (all)
-                {
-                    for (Object* o : objects) acquire(o);
-                    return STATUS_SUCCESS;
-                }
-            }
-            else
-            {
-                for (size_t i = 0; i < objects.size(); i++)
-                {
-                    if (isSignaled(objects[i]))
+                for (Object* o : objects)
+                    if (!isSignaled(o) && o != me.pulsedBy)
                     {
-                        acquire(objects[i]);
-                        return uint32_t(i);
+                        me.pulsedBy = nullptr; // a pulse that can't complete a wait for all counts for nothing, as in NT
+                        return false;
                     }
+                for (Object* o : objects)
+                    if (o != me.pulsedBy) acquire(o);
+                result = STATUS_SUCCESS;
+                return true;
+            }
+            for (size_t i = 0; i < objects.size(); i++)
+            {
+                if (objects[i] == me.pulsedBy)
+                {
+                    result = uint32_t(i);
+                    return true;
+                }
+                if (isSignaled(objects[i]))
+                {
+                    acquire(objects[i]);
+                    result = uint32_t(i);
+                    return true;
                 }
             }
+            return false;
+        };
+        for (;;)
+        {
+            if (uint32_t result = 0; satisfied(result)) return done(result);
+            if (!listed)
+            {
+                for (Object* o : objects) o->waiters.push_back(&me);
+                listed = true;
+            }
+            me.woken = false;
             if (deadline)
             {
-                if (g_dispatchCv.wait_until(lock, *deadline) == std::cv_status::timeout && std::chrono::steady_clock::now() >= *deadline)
+                if (!me.cv.wait_until(lock, *deadline, [&] { return me.woken; }))
                 {
                     // one last check after the timeout
-                    if (!waitAll)
-                        for (size_t i = 0; i < objects.size(); i++)
-                            if (isSignaled(objects[i])) { acquire(objects[i]); return uint32_t(i); }
-                    return STATUS_TIMEOUT;
+                    if (uint32_t result = 0; !waitAll && satisfied(result)) return done(result);
+                    return done(STATUS_TIMEOUT);
                 }
             }
             else
             {
-                g_dispatchCv.wait(lock);
+                me.cv.wait(lock, [&] { return me.woken; });
             }
         }
     }
@@ -224,7 +258,7 @@ namespace kernel
         std::lock_guard lock(g_dispatchLock);
         e->signaled = true;
         syncGuestState(e);
-        signalObjectsChanged();
+        signalObject(e);
     }
 }
 
@@ -260,7 +294,7 @@ GUEST_IMPORT(NtSetEvent)
         prev = e->signaled;
         e->signaled = true;
         syncGuestState(e);
-        signalObjectsChanged();
+        signalObject(e);
     }
     if (ctx.r4.u32) write32(ctx.r4.u32, prev);
     ctx.r3.u64 = STATUS_SUCCESS;
@@ -276,15 +310,25 @@ GUEST_IMPORT(NtClearEvent)
     ctx.r3.u64 = STATUS_SUCCESS;
 }
 
-// Pulse: release current waiters, then reset. Approximated as set + immediate reset after a yield.
+// Pulse: the threads waiting for it now are released - all of them for a notification event, one for
+// a synchronization event - and it's left not signaled, as NT does. It used to be set, a yield and a
+// reset, and a waiter that didn't get the lock in between missed the pulse: on Linux one missed
+// 1,700 of them in a row at startup, 25 s with nothing on screen (#174). A waiter released here
+// returns from its wait as if the event had been signaled for it (waitForObjects, pulsedBy).
 GUEST_IMPORT(NtPulseEvent)
 {
     auto* o = resolve(ctx.r3.u32, "NtPulseEvent");
     if (!o) { ctx.r3.u64 = STATUS_INVALID_HANDLE; return; }
     auto* e = static_cast<Event*>(o);
-    setEvent(e);
-    std::this_thread::yield();
     std::lock_guard lock(g_dispatchLock);
+    for (Waiter* w : e->waiters)
+    {
+        if (w->pulsedBy) continue; // released already, by an earlier pulse it hasn't woken for yet
+        w->pulsedBy = e;
+        w->woken = true;
+        w->cv.notify_one();
+        if (!e->manualReset) break; // a synchronization event releases one waiter
+    }
     e->signaled = false;
     syncGuestState(e);
     ctx.r3.u64 = STATUS_SUCCESS;
@@ -298,7 +342,7 @@ GUEST_IMPORT(KeSetEvent)
     uint32_t prev = e->signaled;
     e->signaled = true;
     syncGuestState(e);
-    signalObjectsChanged();
+    signalObject(e);
     ctx.r3.u64 = prev;
 }
 
@@ -333,7 +377,7 @@ GUEST_IMPORT(NtReleaseSemaphore)
         prev = s->count;
         s->count = std::min(s->count + int32_t(ctx.r4.u32), s->maximum);
         syncGuestState(s);
-        signalObjectsChanged();
+        signalObject(s);
     }
     if (ctx.r5.u32) write32(ctx.r5.u32, uint32_t(prev));
     ctx.r3.u64 = STATUS_SUCCESS;
@@ -458,7 +502,7 @@ GUEST_IMPORT(NtSetTimerEx)
                 std::lock_guard lock(g_dispatchLock);
                 t->signaled = true;
                 syncGuestState(t);
-                signalObjectsChanged();
+                signalObject(t);
             }
             if (period <= 0) return;
             when += std::chrono::milliseconds(period);

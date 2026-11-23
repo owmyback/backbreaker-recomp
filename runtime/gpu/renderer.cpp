@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <deque>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -48,6 +49,7 @@
 #include <unordered_set>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <tuple>
 #include <vector>
@@ -143,8 +145,12 @@ namespace gpu::render
                                     hashSkips = 0, passes = 0, barriers = 0, gpuMarksDropped = 0,
                                     transfers = 0, transferTiles = 0, exportBarriers = 0, transferTilesSkipped = 0, copiesReused = 0, bytesReused = 0,
                                     geomHits = 0, geomHitBytes = 0, geomNew = 0, geomNewBytes = 0, geomForward = 0, geomWritten = 0,
-                                    geomOverBudget = 0, geomCheckFail = 0;
-                           double hashMs = 0, waitMs = 0, cpWaitMs = 0;
+                                    geomOverBudget = 0, geomCheckFail = 0, earlyFences = 0, fencesHeld = 0, roundTrips = 0,
+                                    roundTripsSlow = 0;
+                           double hashMs = 0, waitMs = 0, cpWaitMs = 0, fenceHeldMs = 0, fenceHeldMax = 0, roundTripMs = 0, roundTripMax = 0;
+                           // The shared queue (#174): waiting for its lock (the presenter holds it over its present), and in vkQueueSubmit
+                           double queueLockMs = 0, queueLockMax = 0, submitMs = 0, submitMax = 0;
+                           uint64_t submits = 0;
                            std::vector<double> gpuMs;       // BB_GPU_TIME: GPU time by kind of work (see gpuMark)
                            std::vector<uint32_t> gpuSpans;  // how many stretches of each kind
                            struct Calls { uint32_t calls = 0; uint64_t amount = 0; const char* unit = ""; };
@@ -183,9 +189,10 @@ namespace gpu::render
         // Translating the microcode takes about 2 ms for all of them, and RADV caches its own
         // pipeline compiles. So compiled SPIR-V is kept on disk, keyed by a hash of everything
         // that goes into it (the GLSL text, the stage, the color mask, the target and a format
-        // tag): $XDG_CACHE_HOME/backbreaker-recomp/spirv/<key>.spv (or ~/.cache/...). A changed
-        // translation is a different key, so the cache never needs clearing; --no-shader-cache
-        // turns it off.
+        // tag): $XDG_CACHE_HOME/backbreaker-recomp/spirv/<key>.spv (or ~/.cache/...), on Windows
+        // %LOCALAPPDATA%\backbreaker-recomp\spirv (#174: with neither variable set there, it was
+        // off, and every run compiled every shader again). A changed translation is a different key,
+        // so the cache never needs clearing; --no-shader-cache turns it off.
         bool g_shaderCacheOff = false;
         std::string g_shaderCacheDir; // empty: not set up yet, or unusable
         uint32_t g_targetEnv = 0;
@@ -196,9 +203,23 @@ namespace gpu::render
             if (tried || g_shaderCacheOff) return g_shaderCacheDir;
             tried = true;
             std::string base;
+#ifdef _WIN32
+            if (const char* l = getenv("LOCALAPPDATA"); l && *l) base = l; // beside the player's files (runtime/paths.cpp)
+#else
             if (const char* x = getenv("XDG_CACHE_HOME"); x && *x) base = x;
             else if (const char* h = getenv("HOME"); h && *h) base = std::string(h) + "/.cache";
-            if (base.empty()) return g_shaderCacheDir;
+#endif
+            if (base.empty())
+            {
+                warn("[render] shader cache off: no folder for it (%s)",
+#ifdef _WIN32
+                     "LOCALAPPDATA is not set"
+#else
+                     "neither XDG_CACHE_HOME nor HOME is set"
+#endif
+                );
+                return g_shaderCacheDir;
+            }
             std::error_code ec;
             std::string dir = base + "/backbreaker-recomp/spirv";
             std::filesystem::create_directories(dir, ec);
@@ -263,6 +284,154 @@ namespace gpu::render
             ok = (fclose(f) == 0) && ok;
             if (ok) ok = rename(tmp.c_str(), path.c_str()) == 0; // atomic: a reader sees all or nothing
             if (!ok) remove(tmp.c_str());
+        }
+
+        // Compiled pipelines, kept between runs (#174): <cache>/backbreaker-recomp/pipelines.bin,
+        // beside the SPIR-V cache and off with it. On Linux Mesa keeps a disk cache of its own, so
+        // this changes little there (155 pipelines took 51 ms on the PC). AMD's Windows driver
+        // compiled every pipeline again on every run: 157 in 7.2 s, 46 ms each, and up to 1.8 s in
+        // one frame at team select. The file is the driver's own data, used only when its header
+        // names this GPU and driver. It's written again, whole and through a temporary file, once no
+        // new pipeline has appeared for a few seconds (savePipelineCacheSoon, at swaps).
+        VkPipelineCache g_pipelineCache = VK_NULL_HANDLE;
+        std::string g_pipelineCachePath; // empty: not kept on disk
+        std::atomic<uint32_t> g_pipelinesUnsaved{0}; // created since the file was last written
+        std::atomic<double> g_lastPipelineMs{0};
+        std::atomic<bool> g_pipelineCacheWriting{false};
+        uint64_t g_pipelineCacheHash = 0; // of what the file holds: a cache that only found its pipelines there isn't written again
+
+        uint64_t hashBytes(const std::vector<uint8_t>& d)
+        {
+            uint64_t h = 1469598103934665603ull;
+            for (uint8_t b : d) h = (h ^ b) * 1099511628211ull;
+            return h;
+        }
+
+        // VkPipelineCacheHeaderVersionOne, which the driver's data starts with
+        struct PipelineCacheHeader
+        {
+            uint32_t size, version, vendorID, deviceID;
+            uint8_t uuid[VK_UUID_SIZE];
+        };
+
+        void createPipelineCache()
+        {
+            std::vector<uint8_t> data;
+            const std::string& dir = shaderCacheDir();
+            if (!dir.empty())
+            {
+                g_pipelineCachePath = std::filesystem::path(dir).parent_path().string() + "/pipelines.bin";
+                if (FILE* f = fopen(g_pipelineCachePath.c_str(), "rb"))
+                {
+                    if (fseek(f, 0, SEEK_END) == 0)
+                    {
+                        long size = ftell(f);
+                        if (size > 0 && fseek(f, 0, SEEK_SET) == 0)
+                        {
+                            data.resize(size_t(size));
+                            if (fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
+                        }
+                    }
+                    fclose(f);
+                }
+                PipelineCacheHeader h{};
+                if (data.size() >= sizeof h) memcpy(&h, data.data(), sizeof h);
+                const bool ours = data.size() >= sizeof h && h.size >= sizeof h && h.version == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+                                  h.vendorID == C->props.vendorID && h.deviceID == C->props.deviceID &&
+                                  !memcmp(h.uuid, C->props.pipelineCacheUUID, VK_UUID_SIZE);
+                if (!data.empty() && !ours)
+                {
+                    info("[render] pipeline cache: %s is from another GPU or driver, starting a new one", g_pipelineCachePath.c_str());
+                    data.clear();
+                }
+            }
+            VkPipelineCacheCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+            ci.initialDataSize = data.size();
+            ci.pInitialData = data.empty() ? nullptr : data.data();
+            if (vkCreatePipelineCache(D, &ci, nullptr, &g_pipelineCache) != VK_SUCCESS)
+            {
+                g_pipelineCache = VK_NULL_HANDLE;
+                ci.initialDataSize = 0; // the driver refused the file's contents: an empty cache instead
+                ci.pInitialData = nullptr;
+                if (!data.empty() && vkCreatePipelineCache(D, &ci, nullptr, &g_pipelineCache) != VK_SUCCESS)
+                    g_pipelineCache = VK_NULL_HANDLE;
+                data.clear();
+            }
+            if (!g_pipelineCache)
+            {
+                warn("[render] pipeline cache off: the driver could not create one");
+                g_pipelineCachePath.clear();
+            }
+            else if (!g_pipelineCachePath.empty())
+            {
+                info("[render] pipeline cache: %s (%zu KB read)", g_pipelineCachePath.c_str(), data.size() / 1024);
+                if (!data.empty()) g_pipelineCacheHash = hashBytes(data);
+            }
+        }
+
+        void pipelineCreated()
+        {
+            g_pipelinesUnsaved++;
+            g_lastPipelineMs = nowMs();
+        }
+
+        // At swaps: once no new pipeline has appeared for 3 s, the cache is written out on a thread
+        // of its own, so no frame waits for the file
+        void savePipelineCacheSoon(double now)
+        {
+            if (!g_pipelinesUnsaved || g_pipelineCachePath.empty() || now - g_lastPipelineMs < 3000.0) return;
+            if (g_pipelineCacheWriting.exchange(true)) return;
+            const uint32_t added = g_pipelinesUnsaved.exchange(0);
+            std::thread([added] {
+                size_t size = 0;
+                std::vector<uint8_t> data;
+                if (vkGetPipelineCacheData(D, g_pipelineCache, &size, nullptr) == VK_SUCCESS && size)
+                {
+                    data.resize(size);
+                    if (vkGetPipelineCacheData(D, g_pipelineCache, &size, data.data()) == VK_SUCCESS) data.resize(size);
+                    else data.clear(); // VK_INCOMPLETE: it grew in between, so the next swap tries again
+                }
+                const uint64_t hash = data.empty() ? 0 : hashBytes(data);
+                if (hash && hash == g_pipelineCacheHash) // the driver found them all in the file: nothing to write
+                {
+                    g_pipelineCacheWriting = false;
+                    return;
+                }
+                const std::string tmp = g_pipelineCachePath + ".tmp" + std::to_string(getpid());
+                bool ok = false;
+                if (!data.empty())
+                    if (FILE* f = fopen(tmp.c_str(), "wb"))
+                    {
+                        ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+                        ok = (fclose(f) == 0) && ok;
+                    }
+                if (ok)
+                {
+                    std::error_code ec;
+                    std::filesystem::rename(tmp, g_pipelineCachePath, ec); // replaces the old file (atomically on Linux)
+                    if (ec)
+                    {
+                        std::filesystem::remove(g_pipelineCachePath, ec);
+                        std::filesystem::rename(tmp, g_pipelineCachePath, ec);
+                    }
+                    ok = !ec;
+                }
+                if (ok)
+                {
+                    g_pipelineCacheHash = hash;
+                    info("[render] pipeline cache: %zu KB written (%u pipelines created since)", data.size() / 1024, added);
+                }
+                else
+                {
+                    static std::atomic<bool> warned{false};
+                    if (!warned.exchange(true)) warn("[render] pipeline cache: could not write %s", g_pipelineCachePath.c_str());
+                    std::error_code ec;
+                    std::filesystem::remove(tmp, ec);
+                    g_pipelinesUnsaved += added;
+                    g_lastPipelineMs = nowMs(); // not again at once
+                }
+                g_pipelineCacheWriting = false;
+            }).detach();
         }
 
         VkShaderModule compile(const std::string& glsl, shaderc_shader_kind kind, const char* name, std::string& error, uint32_t colorMask = 15,
@@ -411,6 +580,51 @@ void main() {
             uint64_t ownedGen = 0;
         };
 
+        // Images' memory comes from blocks of kImageBlock bytes per memory type (#174): AMD's Windows
+        // driver makes every vkAllocateMemory an allocation of the operating system's, milliseconds
+        // each, and a new scene creates dozens of images (textures, resolve destinations) in a frame:
+        // 40% of the command processor's time in a load hitch. No image is ever destroyed here, so a
+        // block only fills; when the next image doesn't fit, a new block starts and the old one stays
+        // with the images in it. An image of more than a quarter block gets memory of its own.
+        struct ImageBlock
+        {
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            VkDeviceSize size = 0, used = 0;
+        };
+        std::map<uint32_t, ImageBlock> g_imageBlocks; // by memory type
+        constexpr VkDeviceSize kImageBlock = VkDeviceSize(128) << 20;
+
+        // Binds `image` to device-local memory; `own` gets the allocation when the image has one of its own
+        void bindImageMemory(VkImage image, VkDeviceMemory& own)
+        {
+            VkMemoryRequirements req;
+            vkGetImageMemoryRequirements(D, image, &req);
+            const uint32_t type = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (req.size > kImageBlock / 4)
+            {
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = req.size;
+                mai.memoryTypeIndex = type;
+                VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &own));
+                VK_CHECK(vkBindImageMemory(D, image, own, 0));
+                return;
+            }
+            ImageBlock& b = g_imageBlocks[type];
+            const VkDeviceSize align = std::max<VkDeviceSize>(req.alignment, 1);
+            VkDeviceSize at = (b.used + align - 1) / align * align;
+            if (!b.memory || at + req.size > b.size)
+            {
+                VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+                mai.allocationSize = kImageBlock;
+                mai.memoryTypeIndex = type;
+                VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &b.memory));
+                b.size = kImageBlock;
+                at = 0;
+            }
+            VK_CHECK(vkBindImageMemory(D, image, b.memory, at));
+            b.used = at + req.size;
+        }
+
         Image createImage(VkImageType type, VkImageViewType viewType, VkFormat format, uint32_t w, uint32_t h, uint32_t depth,
                           uint32_t layers, uint32_t samples, VkImageUsageFlags usage, VkImageCreateFlags flags = 0, uint32_t levels = 1)
         {
@@ -433,13 +647,7 @@ void main() {
             ici.usage = usage;
             ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             VK_CHECK(vkCreateImage(D, &ici, nullptr, &img.image));
-            VkMemoryRequirements req;
-            vkGetImageMemoryRequirements(D, img.image, &req);
-            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-            mai.allocationSize = req.size;
-            mai.memoryTypeIndex = C->findMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            VK_CHECK(vkAllocateMemory(D, &mai, nullptr, &img.memory));
-            VK_CHECK(vkBindImageMemory(D, img.image, img.memory, 0));
+            bindImageMemory(img.image, img.memory); // img.memory: only an image with memory of its own has one
             VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
             vci.image = img.image;
             vci.viewType = viewType;
@@ -553,6 +761,10 @@ void main() {
         // everything up to submit N" is one counter: a semaphore signal covers all earlier submits.
         VkSemaphore g_timeline = VK_NULL_HANDLE;
         uint64_t g_submitSerial = 0;
+        // When each recent submit was made (BB_PERF, #174): a fence held for the GPU counts the round
+        // trip from its submit to the fence being written
+        std::deque<std::pair<uint64_t, double>> g_submitTimes;
+        uint64_t g_roundTripCounted = 0; // the last submit whose round trip is in the stats
 
         void queueSubmit(VkCommandBuffer cb, VkFence fence)
         {
@@ -572,8 +784,21 @@ void main() {
                 for (PendingWrite& w : g_pendingWrites)
                     if (!w.serial) w.serial = value; // recorded into this command buffer or an earlier one
             }
+            const double l0 = nowMs();
             std::lock_guard guard(C->queueLock);
+            const double l1 = nowMs();
             VK_CHECK(vkQueueSubmit(C->queue, 1, &si, fence));
+            const double l2 = nowMs();
+            g_perf.queueLockMs += l1 - l0;
+            g_perf.queueLockMax = std::max(g_perf.queueLockMax, l1 - l0);
+            g_perf.submitMs += l2 - l1;
+            g_perf.submitMax = std::max(g_perf.submitMax, l2 - l1);
+            g_perf.submits++;
+            if (value)
+            {
+                g_submitTimes.emplace_back(value, nowMs());
+                if (g_submitTimes.size() > 4096) g_submitTimes.pop_front();
+            }
         }
 
         struct Frame
@@ -778,14 +1003,20 @@ void main() {
             if (g_drawsSinceSubmit >= kChunkDraws) submitChunk();
         }
 
-        // Wait for a frame's early submits and make their fences reusable
+        // Wait for a frame's early submits and make their fences reusable. At most 64 fences a call:
+        // AMD's Windows driver fails a wait for more with VK_ERROR_UNKNOWN (#174; Windows waits for at
+        // most 64 objects at once), and the CP's idle submits at startup made up to 141 in one frame
+        constexpr uint32_t kFencesPerCall = 64;
         void waitChunks(Frame& f)
         {
             if (!f.chunksInFlight) return;
             double w0 = nowMs();
-            VK_CHECK(vkWaitForFences(D, f.chunksInFlight, f.chunkFences.data(), VK_TRUE, UINT64_MAX));
+            for (uint32_t at = 0; at < f.chunksInFlight; at += kFencesPerCall)
+                VK_CHECK(vkWaitForFences(D, std::min(kFencesPerCall, f.chunksInFlight - at), f.chunkFences.data() + at, VK_TRUE,
+                                         UINT64_MAX));
             g_perf.waitMs += nowMs() - w0;
-            VK_CHECK(vkResetFences(D, f.chunksInFlight, f.chunkFences.data()));
+            for (uint32_t at = 0; at < f.chunksInFlight; at += kFencesPerCall)
+                VK_CHECK(vkResetFences(D, std::min(kFencesPerCall, f.chunksInFlight - at), f.chunkFences.data() + at));
             f.chunksInFlight = 0;
         }
 
@@ -1470,7 +1701,8 @@ void main() {
             gci.pDynamicState = &dy;
             gci.layout = g_transferLayout;
             VkPipeline pl;
-            VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
+            VK_CHECK(vkCreateGraphicsPipelines(D, g_pipelineCache, 1, &gci, nullptr, &pl));
+            pipelineCreated();
             vkDestroyShaderModule(D, fs, nullptr);
             info("[render] EDRAM transfer pipeline: %s %ux -> %s %ux%s", kindName(srcKind), srcImage.samples, kindName(dstKind), destSamples,
                  convert ? " (through the EDRAM bits)" : "");
@@ -1969,7 +2201,8 @@ void main()
                 VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
                 ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs, "main", nullptr };
                 ci.layout = g_packLayout;
-                VK_CHECK(vkCreateComputePipelines(D, VK_NULL_HANDLE, 1, &ci, nullptr, &g_packPipeline));
+                VK_CHECK(vkCreateComputePipelines(D, g_pipelineCache, 1, &ci, nullptr, &g_packPipeline));
+                pipelineCreated();
                 vkDestroyShaderModule(D, cs, nullptr);
                 VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
                 VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_packSampler));
@@ -2676,7 +2909,8 @@ void main()
             gci.layout = g_layout;
             VkPipeline pl = VK_NULL_HANDLE;
             double t0 = nowMs();
-            VK_CHECK(vkCreateGraphicsPipelines(D, VK_NULL_HANDLE, 1, &gci, nullptr, &pl));
+            VK_CHECK(vkCreateGraphicsPipelines(D, g_pipelineCache, 1, &gci, nullptr, &pl));
+            pipelineCreated();
             g_compileStats.pipelines++;
             g_compileStats.pipelineMs += nowMs() - t0;
             info("[render] pipeline %zu %p: %s", g_pipelines.size() + 1, (void*)pl, pipelineKey(s).c_str());
@@ -2818,6 +3052,7 @@ void main()
             std::string error;
             g_rectGs = compile(kRectangleGs, shaderc_geometry_shader, "rectangle_list.geom", error);
             if (!g_rectGs) fatal("[render] rectangle list geometry shader: %s", error.c_str());
+            createPipelineCache();
 
             // set 0: guest data + constants (one set per frame in flight, constants by dynamic
             // offset); set 1: 32 textures, pushed per draw (a layout may have one push set only)
@@ -3461,7 +3696,8 @@ void main()
             VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
             ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, cs, "main", nullptr };
             ci.layout = g_writebackLayout;
-            VK_CHECK(vkCreateComputePipelines(D, VK_NULL_HANDLE, 1, &ci, nullptr, &g_writebackPipeline));
+            VK_CHECK(vkCreateComputePipelines(D, g_pipelineCache, 1, &ci, nullptr, &g_writebackPipeline));
+            pipelineCreated();
             vkDestroyShaderModule(D, cs, nullptr);
             VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
             VK_CHECK(vkCreateSampler(D, &si, nullptr, &g_writebackSampler));
@@ -4577,18 +4813,46 @@ void main()
 
     bool asyncFences() { return !g_disabled && !g_failed && D && g_timeline; }
 
+    // BB_EARLY_FENCES, an experiment (#174). Each fence held back until the GPU has finished the
+    // writes before it is a round trip to the GPU: 200-360 a second in a replay, about 3.7 ms each on
+    // Windows against 1.3 on Linux, which makes 100-300 ms frames around every play there.
+    //   1: fences don't wait for memory export writes still on their way (the skinning in replays
+    //      and cutscenes), only for resolve writebacks. The GPU's own reads of exported data are
+    //      looked after anyway (needsExportedData).
+    //   2: they don't wait for resolve writebacks either, so no fence waits for the GPU.
+    // Either is safe only if the game's own code never reads that memory, nor writes it, before the
+    // GPU's write lands there. Off unless set; something drawn wrong is the sign it isn't.
+    const int g_earlyFences = [] {
+        const char* v = getenv("BB_EARLY_FENCES");
+        return v && (v[0] == '1' || v[0] == '2') ? v[0] - '0' : 0;
+    }();
+
     uint64_t fenceSerial()
     {
         if (!asyncFences()) return 0;
+        static bool said = false; // here, not at startup: the log file isn't open then
+        if (g_earlyFences && !said)
+        {
+            said = true;
+            info("[render] BB_EARLY_FENCES=%d: the game's fences don't wait for %s (an experiment, #174)", g_earlyFences,
+                 g_earlyFences == 1 ? "memory export writes" : "memory export writes or resolve writebacks");
+        }
         retireCompleted();
         if (g_pendingWrites.empty()) return 0;
+        auto counts = [](const PendingWrite& w) { return g_earlyFences == 0 || (g_earlyFences == 1 && !w.exported); };
         for (const PendingWrite& w : g_pendingWrites)
-            if (!w.serial) { submitChunk(); break; } // still being recorded: hand it to the GPU now
+            if (counts(w) && !w.serial) { submitChunk(); break; } // still being recorded: hand it to the GPU now
         uint64_t serial = 0;
         for (const PendingWrite& w : g_pendingWrites)
         {
+            if (!counts(w)) continue;
             if (!w.serial) { syncGuestMemory("untagged"); return 0; } // cannot happen: a submit tags every range
             serial = std::max(serial, w.serial);
+        }
+        if (!serial) // only writes BB_EARLY_FENCES lets fences go ahead of are on their way
+        {
+            g_perf.earlyFences++;
+            return 0;
         }
         g_perf.asyncFences++;
         return serial;
@@ -4600,6 +4864,23 @@ void main()
         uint64_t done = gpuProgress();
         retire(done);
         return done;
+    }
+
+    void fenceWritten(uint64_t serial, double heldMs)
+    {
+        PerfStats& p = g_perf;
+        p.fencesHeld++;
+        p.fenceHeldMs += heldMs;
+        p.fenceHeldMax = std::max(p.fenceHeldMax, heldMs);
+        if (serial <= g_roundTripCounted) return;
+        g_roundTripCounted = serial;
+        while (!g_submitTimes.empty() && g_submitTimes.front().first < serial) g_submitTimes.pop_front();
+        if (g_submitTimes.empty() || g_submitTimes.front().first != serial) return;
+        const double ms = nowMs() - g_submitTimes.front().second;
+        p.roundTrips++;
+        p.roundTripMs += ms;
+        p.roundTripMax = std::max(p.roundTripMax, ms);
+        if (ms >= 5.0) p.roundTripsSlow++;
     }
 
     void waitGpu(uint64_t serial)
@@ -4648,6 +4929,7 @@ void main()
                 cs = {};
                 lastLog = t;
             }
+            savePipelineCacheSoon(t);
         }
         {
             static const bool perfOn = getenv("BB_PERF") != nullptr;
@@ -4671,7 +4953,8 @@ void main()
                          "%llu index/vertex copies reused (%.1f MB), "
                          "%llu early submits (%llu while the CP waited), %llu fences written when the GPU got there (%llu waited for), "
                          "%llu writebacks over pending ones; textures known unchanged without reading %llu, write faults %llu, "
-                         "pages watched %u",
+                         "pages watched %u, fences ahead of GPU writes (BB_EARLY_FENCES) %llu, fences held for the GPU %llu (mean %.1f ms, max %.0f ms), "
+                         "GPU round trips %llu (mean %.1f ms, max %.0f ms, %llu of 5 ms or more)",
                          (t - perfLast) / 1000.0, (unsigned long long)swaps, (unsigned long long)p.draws, cpu - cpuLast, p.cpWaitMs, p.waitMs,
                          (unsigned long long)p.flushes, p.hashBytes / 1048576.0, p.hashMs, (unsigned long long)p.uploads,
                          p.uploadBytes / 1048576.0, (unsigned long long)p.resolves, (unsigned long long)p.writebacks,
@@ -4680,8 +4963,20 @@ void main()
                          p.bytesReused / 1048576.0, (unsigned long long)p.chunks,
                          (unsigned long long)p.idleSubmits, (unsigned long long)p.asyncFences, (unsigned long long)p.asyncWaits,
                          (unsigned long long)p.copyInsAroundPending, (unsigned long long)p.hashSkips,
-                         (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages());
+                         (unsigned long long)(mem::watch::faults() - faultsLast), mem::watch::protectedPages(),
+                         (unsigned long long)p.earlyFences, (unsigned long long)p.fencesHeld,
+                         p.fencesHeld ? p.fenceHeldMs / double(p.fencesHeld) : 0.0, p.fenceHeldMax, (unsigned long long)p.roundTrips,
+                         p.roundTrips ? p.roundTripMs / double(p.roundTrips) : 0.0, p.roundTripMax, (unsigned long long)p.roundTripsSlow);
                     faultsLast = mem::watch::faults();
+                    {
+                        const video::PresentStats ps = video::takePresentStats();
+                        info("[perf]   queue: %llu renderer submits, waiting for the queue lock %.1f ms (max %.1f), in vkQueueSubmit %.1f ms (max %.1f) | "
+                             "%llu presents: holding the queue lock %.1f ms (max %.1f), in vkAcquireNextImageKHR %.1f ms, waiting for their own commands %.1f ms, "
+                             "%llu game frames never presented",
+                             (unsigned long long)p.submits, p.queueLockMs, p.queueLockMax, p.submitMs, p.submitMax,
+                             (unsigned long long)ps.presents, ps.queueMs, ps.queueMaxMs, ps.acquireMs, ps.fenceMs,
+                             (unsigned long long)ps.skippedFrames);
+                    }
                     if (g_geomOn)
                     {
                         char check[64] = "";

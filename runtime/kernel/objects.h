@@ -13,11 +13,23 @@
 
 namespace kernel
 {
+    struct Object;
+
+    // A thread blocked in waitForObjects, on the waiter list of every object it waits for: a change
+    // to one of those wakes it, and only those (signalObject)
+    struct Waiter
+    {
+        std::condition_variable cv;
+        bool woken = false;
+        Object* pulsedBy = nullptr; // a pulse of this object released the wait (NtPulseEvent)
+    };
+
     struct Object
     {
         enum class Type { Event, Semaphore, Thread, Timer, Socket, Other };
         Type type;
         uint32_t guest = 0; // guest DISPATCHER_HEADER address
+        std::vector<Waiter*> waiters; // threads waiting for it (under g_dispatchLock)
         explicit Object(Type t) : type(t) {}
         virtual ~Object() = default;
     };
@@ -45,7 +57,11 @@ namespace kernel
         Thread() : Object(Type::Thread) {}
     };
 
-    // All dispatcher state is protected by one lock; any state change notifies all waiters.
+    // All dispatcher state is protected by one lock. A change to an object wakes the threads waiting
+    // for that object (signalObject). It used to wake every waiting thread through one condition
+    // variable: with the game's job threads signalling thousands of events a second at a new scene,
+    // that was a storm of wake-ups, each through the kernel, and on Windows the 100-250 ms frames
+    // of #174. g_dispatchCv is left for a thread created suspended, waiting for its resume.
     extern std::mutex g_dispatchLock;
     extern std::condition_variable g_dispatchCv;
 
@@ -71,5 +87,8 @@ namespace kernel
     Deadline deadlineFromGuest(uint32_t pTimeout);
 
     void setEvent(Event* e);
-    void signalObjectsChanged(); // notify after modifying state under g_dispatchLock
+    // After making `o` signaled (or more so) under g_dispatchLock: wakes the threads waiting for it
+    void signalObject(Object* o);
+    // After a resume under g_dispatchLock: wakes threads waiting on g_dispatchCv to start
+    void signalObjectsChanged();
 }

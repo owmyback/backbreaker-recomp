@@ -1,4 +1,5 @@
 #include "disc.h"
+#include "platform.h" // Windows: O_CLOEXEC (binary) and pread
 
 #include <algorithm>
 #include <cerrno>

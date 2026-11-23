@@ -271,6 +271,95 @@ It doesn't read the rest of the disc, so damage elsewhere goes unnoticed until t
 Messages never contain the image's path. `--progress` prints `progress <0-1> <step>` lines, the form
 RecompLauncher shows as a progress bar. `scripts/setup.sh` still uses the Python tools.
 
+## Windows (#174)
+The runtime and the game build for Windows by cross-compiling on Linux with llvm-mingw (clang, lld
+and MinGW-w64 with the UCRT, all redistributable). `ppc/` is the same generated C++ as on Linux, from
+`scripts/setup.sh`'s recompile.
+
+    scripts/windows_deps.sh      # llvm-mingw, and SDL3, shaderc, the Vulkan headers and the XMA decoder for Windows
+    cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-mingw.cmake -DBB_PORTABLE=ON \
+          -DFFMPEG_XMA=$PWD/third_party/win64/ffmpeg-xma
+    ninja -C build-win backbreaker   # build-win/backbreaker.exe: 147 MB with debug information, 54 MB stripped
+
+`backbreaker.exe` is linked statically: it needs only Windows' own DLLs, the UCRT that Windows 10
+and 11 have, and `vulkan-1.dll`, which the GPU driver installs. Like every build it holds the game's
+code, so it's never shared. What's different there:
+- **Guest memory** (`runtime/memory.cpp`): one 4 GB placeholder reservation (`VirtualAlloc2`), with
+  the 512 MB of physical memory as a section viewed at 0xA0000000 and 0xC0000000 (`MapViewOfFile3`),
+  and the rest committed. Windows maps views only at 64 KB boundaries, so the console's 0xE0000000
+  view, which starts at physical 0x1000, isn't there: the range stays reserved. On Linux, with that
+  view made inaccessible, the match route (boot, menus, Exhibition, 240 s) never touched it
+  (2026-11-19). Windows 10 1803 or newer.
+- **The write watch** (`mem::watch`): `VirtualProtect`, and a vectored exception handler in
+  `runtime/main.cpp` that takes a write to a watched page before anything else sees it.
+- **Crashes, `--timeout`, Ctrl+C**: an unhandled-exception filter prints the same report as the
+  Linux signal handler (host frames as offsets into the program), a thread ends a `--timeout` run,
+  and a console handler takes Ctrl+C.
+- **Files**: the CRT opens everything in binary mode, `runtime/platform.h` has `pread`, `pwrite`,
+  `fnmatch` and `timegm`, and the manifest (`runtime/windows/`) makes UTF-8 the process's code page,
+  so paths are UTF-8 as on Linux.
+- **The player's files**: `%LOCALAPPDATA%\backbreaker-recomp` holds what `~/.local/share` and
+  `~/.config` do on Linux. The settings file is `%LOCALAPPDATA%\backbreaker-recomp\settings.ini`
+  (pasted into Explorer's address bar, that opens it), with `saves\`, `logs\` and `screenshots\`
+  beside it. A new install starts at `resolution_scale=1`, the console's 1280x720; the keys are the
+  same as on Linux ("Where files live").
+- **Presenting** (`runtime/video/presenter.cpp`): one present for each game frame, with vsync. On
+  Windows a present holds the GPU queue until the display's next refresh, and the renderer submits
+  to the same queue. Presenting once for each refresh, as Linux does, made every round trip to the
+  GPU take 3-4 ms on a 240 Hz display and the frame rate fall to 49-53 around each play; with one
+  present for each game frame they take about 1 ms and the match holds 60. `BB_PRESENT_MODE` picks
+  another way on either system: `fifo` (one for each refresh, Linux's default), `paced` (Windows'
+  default), `mailbox` or `immediate` (no present waits for a refresh).
+- **The 60 Hz vblank interrupt** (`platform::sleepUntilPrecise`): the game's frames are paced by it,
+  and a Windows sleep ends on a timer tick, up to 1-2 ms late. A high-resolution waitable timer and
+  a spin through the last half millisecond keep it on time, so frames are 16.7 ms apart as on Linux
+  (uneven frames make the game's fixed simulation steps skip and double, which shows as a jittering
+  camera). `BB_PRECISE_VBLANK=0` gives the plain sleep back.
+- **Pipelines** are kept in `pipelines.bin` beside the shader cache: AMD's Windows driver compiled
+  every one again on each run (1-2 s freezes in the menus), where Mesa keeps its own cache.
+- **Not there yet**: the guest thread sampler (`--sample-threads`), which interrupts threads with
+  signals on Linux (`runtime/debug/debug_win.cpp` stands in). `BB_PERF`'s timing and hitch reports
+  work there.
+
+**The installer for Windows** (`packaging/installer/build_installer_windows.sh`): cross-compiled on
+Linux like the game, into `build-installer-windows/Backbreaker-Recompiled-windows-x86_64.zip`
+(about 90 MB; 390 MB unpacked). The zip's folder holds `Backbreaker-Recompiled.exe` (the installer,
+`backbreaker-installer.exe`, under the name it is started by), a `README.txt` for players,
+`recomplauncher.json`, and `bundle/`: llvm-mingw's Windows release cut down to clang, lld, the MinGW-w64
+headers and x86-64 libraries; the runtime kit; `XenonRecomp.exe`; `config/`; `MANIFEST.txt` and
+`NOTICES.txt` (`packaging/installer/notices_windows.sh`). No game content, as in the AppImage. On
+Windows the installer's commands are the same ("Installer tools"), with these differences:
+- Double-clicked in Explorer with nothing installed, `Backbreaker-Recompiled.exe` asks for the disc
+  image in Windows' "Open" window and installs it; an image dropped on the program is installed
+  too. Either way the console window stays open for the result. (Once the game is installed, a
+  double-click starts it, as on Linux.)
+- The game goes in `%LOCALAPPDATA%\backbreaker-recomp\install`, with a Start-menu shortcut in
+  place of the applications-menu entry.
+- **RecompLauncher on Windows** picks the release's file by the words in its name (`windows`,
+  `x86_64`, `.zip`), unpacks it into the game's folder, and reads `recomplauncher.json` from the
+  top of it (its `docs/DEVELOPERS.md`, "Releases that install cleanly" and "Where the file goes").
+  The zip's manifest is made from the repository's by `build_installer_windows.sh`, with what
+  differs on Windows: the program is `Backbreaker-Recompiled.exe`, the built game is
+  `build/bin/backbreaker.exe`, and `settings.ini` is under the launcher's `{local}`
+  (`%LOCALAPPDATA%`, where the game keeps it; `{config}` is `AppData\Roaming` there). The program
+  isn't named `backbreaker-installer.exe` in the zip because the launcher takes a program with
+  "install" in its name for a setup program, never the game (its `install.rs`, `NOT_THE_GAME`), as
+  it did with the AppImage's first name. Not tried in RecompLauncher on Windows yet.
+- Tested under GE-Proton 11-12 (2026-11-23): from the zip's folder alone, `rebuild` translated the
+  game, compiled its 115 files and linked it in 28 s (16 threads), and `play` started the result,
+  which ran headless at full speed.
+
+**Tested** (2026-11-19, under GE-Proton 11-12 on Linux; the system's Wine 11.21 hung setting up its
+prefix): boot, the menus and the match route headless, its screenshots rendered like the Linux
+build's; XMA sound through WASAPI with no underruns; a window, its Vulkan device and the boot movie.
+To run it that way, `proton run` once creates a prefix, then Proton's own Wine runs the program with
+its console output:
+
+    export STEAM_COMPAT_DATA_PATH=/tmp/bb-pfx STEAM_COMPAT_CLIENT_INSTALL_PATH=~/.local/share/Steam
+    P=~/.local/share/Steam/compatibilitytools.d/GE-Proton11-12
+    "$P/proton" run build-win/backbreaker.exe --version
+    WINEPREFIX=/tmp/bb-pfx/pfx "$P/files/bin/wine" build-win/backbreaker.exe --headless --timeout 30
+
 ## Where files live
 `runtime/paths.cpp` (#134). Two layouts:
 - **Checkout** (the default, as before): everything relative to the working directory, so run from

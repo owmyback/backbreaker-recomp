@@ -248,6 +248,22 @@ namespace vkctx
                 vkGetPhysicalDeviceProperties2(c.gpu, &p2);
                 c.hostPointerAlignment = uint32_t(hostProps.minImportedHostPointerAlignment);
             }
+            // VK_EXT_device_fault (#174): the driver's own account when a call fails (failed()).
+            // AMD's Windows driver answers some failures with only VK_ERROR_UNKNOWN.
+            VkPhysicalDeviceFaultFeaturesEXT fault{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT };
+            if (hasExtension(c.gpu, VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
+            {
+                VkPhysicalDeviceFaultFeaturesEXT haveFault{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT };
+                VkPhysicalDeviceFeatures2 query{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+                query.pNext = &haveFault;
+                vkGetPhysicalDeviceFeatures2(c.gpu, &query);
+                if (haveFault.deviceFault)
+                {
+                    fault.deviceFault = VK_TRUE; // not the vendor's binary dump: its codes are enough to report
+                    f13.pNext = &fault;
+                    exts.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+                }
+            }
             VkDeviceCreateInfo dci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
             dci.pNext = &features;
             dci.queueCreateInfoCount = 1;
@@ -260,6 +276,8 @@ namespace vkctx
             if (c.hostMemoryImport)
                 c.getMemoryHostPointerProperties =
                     (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(c.device, "vkGetMemoryHostPointerPropertiesEXT");
+            if (fault.deviceFault)
+                c.getDeviceFaultInfo = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(c.device, "vkGetDeviceFaultInfoEXT");
             return c.cmdPushDescriptorSet != nullptr;
         }
     }
@@ -297,6 +315,93 @@ namespace vkctx
         info("[vk-val] %llu validation message(s), %llu distinct: %llu error(s), %llu warning(s)%s",
              (unsigned long long)g_valTotal, (unsigned long long)g_valUnique.load(), (unsigned long long)errors,
              (unsigned long long)warnings, errors || warnings ? "" : " - clean run");
+    }
+
+    namespace
+    {
+        const char* resultName(VkResult r)
+        {
+            switch (r)
+            {
+            case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+            case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+            case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+            case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+            case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+            case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+            case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+            case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+            case VK_ERROR_UNKNOWN: return "VK_ERROR_UNKNOWN";
+            case VK_ERROR_OUT_OF_POOL_MEMORY: return "VK_ERROR_OUT_OF_POOL_MEMORY";
+            case VK_ERROR_INVALID_EXTERNAL_HANDLE: return "VK_ERROR_INVALID_EXTERNAL_HANDLE";
+            case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
+            case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
+            case VK_TIMEOUT: return "VK_TIMEOUT";
+            case VK_NOT_READY: return "VK_NOT_READY";
+            case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+            default: return "an error this doesn't name";
+            }
+        }
+
+        const char* addressKind(VkDeviceFaultAddressTypeEXT t)
+        {
+            switch (t)
+            {
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT: return "invalid read";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT: return "invalid write";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT: return "invalid execute";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT: return "instruction pointer (unknown)";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT: return "instruction pointer (invalid)";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT: return "instruction pointer (faulting)";
+            default: return "no address";
+            }
+        }
+
+        // The driver's report (VK_EXT_device_fault), into the log; nothing when it has none
+        void logDeviceFault()
+        {
+            static std::atomic<bool> asked{false}; // once: a second failing thread doesn't ask again
+            Context* c = g_context; // set once, before any call that can fail here
+            if (!c || !c->getDeviceFaultInfo || asked.exchange(true)) return;
+            VkDeviceFaultCountsEXT counts{ VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT };
+            VkResult r = c->getDeviceFaultInfo(c->device, &counts, nullptr);
+            if (r != VK_SUCCESS && r != VK_INCOMPLETE)
+            {
+                err("[vulkan] device fault: the driver gave no report (%d)", int(r));
+                return;
+            }
+            std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+            std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+            counts.vendorBinarySize = 0; // not enabled (deviceFaultVendorBinary)
+            VkDeviceFaultInfoEXT fi{ VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT };
+            fi.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
+            fi.pVendorInfos = vendor.empty() ? nullptr : vendor.data();
+            r = c->getDeviceFaultInfo(c->device, &counts, &fi);
+            if (r != VK_SUCCESS && r != VK_INCOMPLETE)
+            {
+                err("[vulkan] device fault: the driver gave no report (%d)", int(r));
+                return;
+            }
+            if (!fi.description[0] && !counts.addressInfoCount && !counts.vendorInfoCount)
+            {
+                err("[vulkan] device fault: none reported by the driver");
+                return;
+            }
+            err("[vulkan] device fault: \"%s\", %u address(es), %u vendor record(s)", fi.description,
+                counts.addressInfoCount, counts.vendorInfoCount);
+            for (uint32_t i = 0; i < counts.addressInfoCount; i++)
+                err("[vulkan]   %s at 0x%llx (within 0x%llx)", addressKind(addresses[i].addressType),
+                    (unsigned long long)addresses[i].reportedAddress, (unsigned long long)addresses[i].addressPrecision);
+            for (uint32_t i = 0; i < counts.vendorInfoCount; i++)
+                err("[vulkan]   vendor: \"%s\" code 0x%llx data 0x%llx", vendor[i].description,
+                    (unsigned long long)vendor[i].vendorFaultCode, (unsigned long long)vendor[i].vendorFaultData);
+        }
+    }
+
+    void failed(const char* call, VkResult result)
+    {
+        if (result < 0) logDeviceFault();
+        fatal("[vulkan] %s failed: %d (%s)", call, int(result), resultName(result));
     }
 
     Context& createForWindow(SDL_Window* window, VkSurfaceKHR& surface)

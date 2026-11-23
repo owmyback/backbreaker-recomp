@@ -59,7 +59,7 @@ namespace installer
     // Steam installs on this machine for $HOME: the native one (~/.steam/steam, ~/.local/share/Steam
     // and the other places its launcher script uses) and Flathub's
     // (~/.var/app/com.valvesoftware.Steam). Only folders with a userdata/, each once (symlinks
-    // followed), native ones first.
+    // followed), native ones first. On Windows: the one the registry names.
     struct SteamInstall
     {
         std::string root;
@@ -73,7 +73,7 @@ namespace installer
 
     // A process of this user's named steam: Steam's client (ubuntu12_32/ or steamrt64/), its
     // launcher script or Flathub's, any of which may still write shortcuts.vdf on its way out.
-    // `proc` is /proc but for the tests.
+    // `proc` is /proc but for the tests. On Windows: a process named steam.exe (`proc` unused).
     bool steamRunning(const std::string& proc = "/proc");
 
     constexpr const char* kFlatpakSteam = "com.valvesoftware.Steam";

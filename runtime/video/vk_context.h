@@ -30,6 +30,9 @@ namespace vkctx
         bool hostMemoryImport = false;
         uint32_t hostPointerAlignment = 0;
         PFN_vkGetMemoryHostPointerPropertiesEXT getMemoryHostPointerProperties = nullptr;
+        // VK_EXT_device_fault, when the driver has it: what went wrong, asked for when a call fails
+        // (failed() below), since a driver's error code alone often says only "unknown" (#174)
+        PFN_vkGetDeviceFaultInfoEXT getDeviceFaultInfo = nullptr;
         std::mutex queueLock; // the queue is used by both threads (vkQueueSubmit, vkQueuePresentKHR)
 
         // Memory type with all of `flags` among `typeBits`; UINT32_MAX if there is none.
@@ -52,10 +55,14 @@ namespace vkctx
     // One line per distinct validation message seen, with how many times it repeated.
     // Called at shutdown so a run's log says whether it was clean.
     void logValidationSummary();
+
+    // A Vulkan call failed: the driver's fault report when it has one (VK_EXT_device_fault: its
+    // description, the faulting addresses, the vendor's own codes), then the run ends (FATAL)
+    [[noreturn]] void failed(const char* call, VkResult result);
 }
 
 #define VK_CHECK(x)                                                                     \
     do {                                                                                \
         VkResult r_ = (x);                                                              \
-        if (r_ != VK_SUCCESS) fatal("[vulkan] %s failed: %d", #x, int(r_));             \
+        if (r_ != VK_SUCCESS) vkctx::failed(#x, r_);                                    \
     } while (0)

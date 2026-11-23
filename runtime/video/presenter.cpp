@@ -23,6 +23,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -45,6 +46,46 @@ namespace video
         std::atomic<uint64_t> g_renderedFrame{0}, g_renderedImage{0};
         std::atomic<uint32_t> g_renderedWidth{0}, g_renderedHeight{0};
         vkctx::Context* g_ctx = nullptr;
+
+        // BB_PERF (#174): read by the renderer's [perf] report (takePresentStats). Microseconds.
+        std::atomic<uint64_t> g_statPresents{0}, g_statFenceUs{0}, g_statAcquireUs{0}, g_statQueueUs{0}, g_statQueueMaxUs{0};
+        std::atomic<uint64_t> g_statSkipped{0}; // game frames that were never presented
+        uint64_t g_presentedFrame = 0;          // the game frame the last present showed (presenter thread)
+        uint64_t usSince(std::chrono::steady_clock::time_point t0)
+        {
+            return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+        }
+
+        // BB_PRESENT_MODE (#174). The window is presented with vsync (FIFO) on the queue the
+        // renderer submits to. On Windows a present holds that queue until the display's next
+        // refresh: with one for each refresh of a 240 Hz display, the renderer's round trips to the
+        // GPU took 3-4 ms each and the frame rate fell to 49-53 around every play. With one present
+        // for each game frame they take about 1 ms, and the match holds 60. On Linux a present
+        // doesn't hold the queue (the wait is in vkAcquireNextImageKHR), so it stays as it was.
+        //   fifo:       one present for each refresh of the display (the default on Linux)
+        //   paced:      FIFO, but one present for each new game frame, not one for each refresh
+        //               (the default on Windows)
+        //   mailbox:    no present waits for a refresh; the display shows the newest picture at
+        //               each refresh, without tearing. One present for each new game frame.
+        //   immediate:  no present waits for a refresh; can tear. One for each new game frame.
+        // A mode the surface doesn't have falls back: mailbox -> immediate -> paced.
+        enum class PresentPlan { Fifo, Paced, Mailbox, Immediate };
+        const PresentPlan g_presentPlan = [] {
+            const char* v = getenv("BB_PRESENT_MODE");
+#ifdef _WIN32
+            if (!v) return PresentPlan::Paced;
+#else
+            if (!v) return PresentPlan::Fifo;
+#endif
+            if (!strcmp(v, "paced")) return PresentPlan::Paced;
+            if (!strcmp(v, "mailbox")) return PresentPlan::Mailbox;
+            if (!strcmp(v, "immediate")) return PresentPlan::Immediate;
+            return PresentPlan::Fifo;
+        }();
+        // Set with the swapchain: a present only for a new game frame. The window's loop then
+        // waits on g_frameSignal, which publishFrame signals, so a frame is shown as it arrives.
+        std::atomic<bool> g_presentPaced{false};
+        std::atomic<SDL_Semaphore*> g_frameSignal{nullptr};
 
         struct Vk
         {
@@ -262,6 +303,33 @@ namespace video
             sci.preTransform = caps.currentTransform;
             sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
             sci.presentMode = VK_PRESENT_MODE_FIFO_KHR; // vsync; only this thread waits on it
+            if (g_presentPlan != PresentPlan::Fifo)
+            {
+                uint32_t modeCount = 0;
+                vkGetPhysicalDeviceSurfacePresentModesKHR(vk.gpu, vk.surface, &modeCount, nullptr);
+                std::vector<VkPresentModeKHR> modes(modeCount);
+                vkGetPhysicalDeviceSurfacePresentModesKHR(vk.gpu, vk.surface, &modeCount, modes.data());
+                auto has = [&](VkPresentModeKHR m) { return std::find(modes.begin(), modes.end(), m) != modes.end(); };
+                const char* name = "FIFO";
+                if (g_presentPlan == PresentPlan::Mailbox && has(VK_PRESENT_MODE_MAILBOX_KHR))
+                    sci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR, name = "MAILBOX";
+                else if (g_presentPlan != PresentPlan::Paced && has(VK_PRESENT_MODE_IMMEDIATE_KHR))
+                    sci.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR, name = "IMMEDIATE";
+                g_presentPaced = true;
+                std::string list;
+                for (VkPresentModeKHR m : modes)
+                    list += std::string(list.empty() ? "" : ", ") +
+                            (m == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE" : m == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" :
+                             m == VK_PRESENT_MODE_FIFO_KHR ? "FIFO" : m == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "other");
+                static bool said = false;
+                if (!said)
+                {
+                    said = true;
+                    const char* asked = getenv("BB_PRESENT_MODE");
+                    info("[video] presenting with %s, one present for each new game frame (%s%s; the surface has %s)", name,
+                         asked ? "BB_PRESENT_MODE=" : "the default here", asked ? asked : "", list.c_str());
+                }
+            }
             sci.clipped = VK_TRUE;
             VK_CHECK(vkCreateSwapchainKHR(vk.device, &sci, nullptr, &vk.swapchain));
             vk.swapFormat = chosen.format;
@@ -439,9 +507,13 @@ namespace video
         // Returns false if the swapchain must be recreated.
         bool presentOnce(uint64_t& uploadedFrame)
         {
+            auto t0 = std::chrono::steady_clock::now();
             VK_CHECK(vkWaitForFences(vk.device, 1, &vk.inFlight, VK_TRUE, UINT64_MAX));
+            g_statFenceUs += usSince(t0);
             uint32_t index = 0;
+            t0 = std::chrono::steady_clock::now();
             VkResult r = vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX, vk.acquired, VK_NULL_HANDLE, &index);
+            g_statAcquireUs += usSince(t0);
             if (r == VK_ERROR_OUT_OF_DATE_KHR) return false;
             if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) fatal("[video] vkAcquireNextImageKHR: %d", int(r));
             VK_CHECK(vkResetFences(vk.device, 1, &vk.inFlight));
@@ -449,6 +521,8 @@ namespace video
             // New guest frame? Copy it into the staging buffer (the previous upload is complete:
             // we waited on the fence above).
             uint64_t frame = g_frameNumber.load(std::memory_order_acquire);
+            if (g_presentedFrame && frame > g_presentedFrame + 1) g_statSkipped += frame - g_presentedFrame - 1;
+            g_presentedFrame = frame;
             uint32_t front = g_front.load(), width = g_width.load(), height = g_height.load();
             // Did the renderer produce this frame? Then show its image instead of the raw copy.
             VkImage rendered = VK_NULL_HANDLE;
@@ -566,6 +640,7 @@ namespace video
             si.signalSemaphoreCount = 1;
             si.pSignalSemaphores = &vk.rendered[index];
             std::lock_guard queueGuard(g_ctx->queueLock);
+            auto q0 = std::chrono::steady_clock::now();
             VK_CHECK(vkQueueSubmit(vk.queue, 1, &si, vk.inFlight));
 
             VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -575,11 +650,27 @@ namespace video
             pi.pSwapchains = &vk.swapchain;
             pi.pImageIndices = &index;
             r = vkQueuePresentKHR(vk.queue, &pi);
+            const uint64_t queueUs = usSince(q0);
+            g_statQueueUs += queueUs;
+            if (queueUs > g_statQueueMaxUs.load(std::memory_order_relaxed)) g_statQueueMaxUs = queueUs;
+            g_statPresents++;
             if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) return false;
             if (r != VK_SUCCESS) fatal("[video] vkQueuePresentKHR: %d", int(r));
             if (vk.shotPending) { writeScreenshot(); vk.shotPending = false; }
             return true;
         }
+    }
+
+    PresentStats takePresentStats()
+    {
+        PresentStats s;
+        s.presents = g_statPresents.exchange(0);
+        s.fenceMs = g_statFenceUs.exchange(0) / 1000.0;
+        s.acquireMs = g_statAcquireUs.exchange(0) / 1000.0;
+        s.queueMs = g_statQueueUs.exchange(0) / 1000.0;
+        s.queueMaxMs = g_statQueueMaxUs.exchange(0) / 1000.0;
+        s.skippedFrames = g_statSkipped.exchange(0);
+        return s;
     }
 
     void publishRenderedFrame(VkImage image, uint32_t width, uint32_t height, uint64_t frameNumber)
@@ -596,6 +687,8 @@ namespace video
         g_width.store(width, std::memory_order_relaxed);
         g_height.store(height, std::memory_order_relaxed);
         g_frameNumber.store(frameNumber, std::memory_order_release);
+        if (g_presentPaced.load(std::memory_order_relaxed))
+            if (SDL_Semaphore* signal = g_frameSignal.load(std::memory_order_acquire)) SDL_SignalSemaphore(signal);
     }
 
     void run(bool startFullscreen)
@@ -626,8 +719,9 @@ namespace video
         info("[video] window open (%ux%u)", vk.swapExtent.width, vk.swapExtent.height);
 
         using clock = std::chrono::steady_clock;
-        auto lastTitle = clock::now(), lastLog = lastTitle;
+        auto lastTitle = clock::now(), lastLog = lastTitle, lastPresent = lastTitle;
         uint64_t lastGuestFrame = 0, presents = 0, uploadedFrame = 0;
+        g_frameSignal.store(SDL_CreateSemaphore(0), std::memory_order_release);
         bool running = true;
         while (running)
         {
@@ -667,9 +761,22 @@ namespace video
                 haveSwapchain = createSwapchain();
                 if (!haveSwapchain) { SDL_Delay(50); continue; } // minimized
             }
+            if (g_presentPaced.load(std::memory_order_relaxed))
+            {
+                // One present for each new game frame, as soon as it is published. Without one, a
+                // present every 20 ms keeps the achievements list moving in a loading screen, and
+                // the loop still turns every 4 ms for the window's events and the controllers.
+                if (g_frameNumber.load(std::memory_order_acquire) == g_presentedFrame &&
+                    clock::now() - lastPresent < std::chrono::milliseconds(20))
+                {
+                    SDL_WaitSemaphoreTimeout(g_frameSignal.load(std::memory_order_relaxed), 4);
+                    continue;
+                }
+            }
             if (!presentOnce(uploadedFrame))
                 haveSwapchain = false;
             presents++;
+            lastPresent = clock::now();
 
             auto now = clock::now();
             double dt = std::chrono::duration<double>(now - lastTitle).count();
