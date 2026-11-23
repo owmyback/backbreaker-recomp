@@ -95,6 +95,13 @@ namespace installer::platform
     // closes when the program ends, so a message would vanish unread
     bool ownsConsole();
 
+    // Leaves a console made for this process alone, so the game's window is the only one: Windows
+    // closes a console once no program is in it. For `play`, which a double-click, a Steam shortcut
+    // and RecompLauncher's Play all start with a console of its own (the launcher runs its setup
+    // step without a window, but starts the game like any program). False, and nothing changes,
+    // when the console is shared (a terminal: the game's log stays in it) or there is none.
+    bool leaveOwnConsole();
+
     // Windows' "Open" window, for the player's disc image; the chosen file's path, or empty when
     // they closed it
     std::string pickDiscImage();

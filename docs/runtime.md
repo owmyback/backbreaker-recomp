@@ -335,6 +335,17 @@ Windows the installer's commands are the same ("Installer tools"), with these di
   double-click starts it, as on Linux.)
 - The game goes in `%LOCALAPPDATA%\backbreaker-recomp\install`, with a Start-menu shortcut in
   place of the applications-menu entry.
+- **No console window beside the game.** `Backbreaker-Recompiled.exe` is a console program, so
+  Windows opens a console for it whenever it isn't started from one: a double-click, a Steam
+  shortcut, and RecompLauncher's Play (the launcher runs `prepare` without a window, but starts
+  `start` like any program). `play` leaves that console (`platform::leaveOwnConsole`) once the
+  game is built and before it starts, so the window closes and the game gets none; a build after
+  an update still shows its progress there first. The window is on screen for about 0.1 s when
+  there is nothing to build (measured from a windowless parent, 2026-11-23). What the launcher
+  redirects (it keeps the game's stderr) is passed on to the game as before. From a terminal
+  nothing changes: the console is shared with the shell, and the game's log stays in it. The
+  Start-menu shortcut starts `bin\backbreaker.exe` itself, also a console program, and this
+  doesn't cover it.
 - **RecompLauncher on Windows** picks the release's file by the words in its name (`windows`,
   `x86_64`, `.zip`), unpacks it into the game's folder, and reads `recomplauncher.json` from the
   top of it (its `docs/DEVELOPERS.md`, "Releases that install cleanly" and "Where the file goes").

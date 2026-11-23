@@ -665,6 +665,13 @@ namespace
             };
             if (int rc = build(o, {}, quiet, 0.0)) return rc;
         }
+#ifdef _WIN32
+        // A console Windows made for this program alone (a double-click, a Steam shortcut,
+        // RecompLauncher's Play) would stay open beside the game's window for the whole run. It
+        // goes here, once a build after an update has had it for its progress. In a terminal
+        // nothing changes: the console is shared, and the game's log stays in it.
+        platform::leaveOwnConsole();
+#endif
         ensureIcon(o.prefix + "/game"); // an install from before the icon
         // RecompLauncher sets RECOMPLAUNCHER_MODE for every game it starts
         const char* mode = std::getenv("RECOMPLAUNCHER_MODE");
