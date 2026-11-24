@@ -33,7 +33,7 @@ index 34add40..6483a40 100644
                          {
                              blocks.emplace_back(lBase, 0);
 diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
-index fa91527..b10489f 100644
+index fa91527..6418e4e 100644
 --- a/XenonRecomp/recompiler.cpp
 +++ b/XenonRecomp/recompiler.cpp
 @@ -177,12 +177,20 @@ void Recompiler::Analyse()
@@ -116,7 +116,20 @@ index fa91527..b10489f 100644
      int id = insn.opcode->id;
  
      // Handling instructions that don't disassemble correctly for some reason here
-@@ -649,7 +688,7 @@ bool Recompiler::Recompile(
+@@ -609,7 +648,11 @@ bool Recompiler::Recompile(
+     case PPC_INST_BCTR:
+         if (switchTable != config.switchTables.end())
+         {
+-            println("\tswitch ({}.u64) {{", r(switchTable->second.r));
++            // The low 32 bits only: the console computes the table entry's address in 32 bits, and
++            // the bounds check ahead of it is a cmplwi. An index with more in its upper half
++            // (0xFFFFFFFE from an rlwinm, plus 20, is 0x1'0000'0012) passes that check and then
++            // matches no case of a 64-bit switch.
++            println("\tswitch ({}.u32) {{", r(switchTable->second.r));
+ 
+             for (size_t i = 0; i < switchTable->second.labels.size(); i++)
+             {
+@@ -649,7 +692,7 @@ bool Recompiler::Recompile(
  
      case PPC_INST_BDZ:
          println("\t--{}.u64;", ctr());
@@ -125,7 +138,7 @@ index fa91527..b10489f 100644
          break;
  
      case PPC_INST_BDZLR:
-@@ -659,13 +698,12 @@ bool Recompiler::Recompile(
+@@ -659,13 +702,12 @@ bool Recompiler::Recompile(
  
      case PPC_INST_BDNZ:
          println("\t--{}.u64;", ctr());
@@ -141,7 +154,7 @@ index fa91527..b10489f 100644
          break;
  
      case PPC_INST_BEQ:
-@@ -827,23 +865,26 @@ bool Recompiler::Recompile(
+@@ -827,23 +869,26 @@ bool Recompiler::Recompile(
          break;
  
      case PPC_INST_DIVD:
@@ -172,7 +185,7 @@ index fa91527..b10489f 100644
          if (strchr(insn.opcode->name, '.'))
              println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
          break;
-@@ -1133,6 +1174,7 @@ bool Recompiler::Recompile(
+@@ -1133,6 +1178,7 @@ bool Recompiler::Recompile(
          println("\t{}.s64 = {};", r(insn.operands[0]), int32_t(insn.operands[1] << 16));
          break;
  
@@ -180,7 +193,7 @@ index fa91527..b10489f 100644
      case PPC_INST_LVEWX:
      case PPC_INST_LVEWX128:
      case PPC_INST_LVX:
-@@ -1260,7 +1302,8 @@ bool Recompiler::Recompile(
+@@ -1260,7 +1306,8 @@ bool Recompiler::Recompile(
          break;
  
      case PPC_INST_MFTB:
@@ -190,7 +203,7 @@ index fa91527..b10489f 100644
          break;
  
      case PPC_INST_MR:
-@@ -1877,6 +1920,8 @@ bool Recompiler::Recompile(
+@@ -1877,6 +1924,8 @@ bool Recompiler::Recompile(
  
      case PPC_INST_VCMPGTUH:
          println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
@@ -199,7 +212,7 @@ index fa91527..b10489f 100644
          break;
  
      case PPC_INST_VEXPTEFP:
-@@ -2263,6 +2308,301 @@ bool Recompiler::Recompile(
+@@ -2263,6 +2312,301 @@ bool Recompiler::Recompile(
          println("\t{}.u64 = {}.u64 ^ {};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2] << 16);
          break;
  
@@ -501,7 +514,7 @@ index fa91527..b10489f 100644
      default:
          return false;
      }
-@@ -2438,10 +2778,36 @@ bool Recompiler::Recompile(const Function& fn)
+@@ -2438,10 +2782,36 @@ bool Recompiler::Recompile(const Function& fn)
          ++data;
      }
  

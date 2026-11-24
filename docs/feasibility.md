@@ -60,3 +60,14 @@ Risk: Euphoria physics floating-point sensitivity.
   unsigned compares/saturation, carry ops) against hand-computed PowerPC results; a mutation
   (swapped pack operands) is caught.
 - Not tested yet: the simple update-form loads/stores and lane-wise ops are only reviewed, not executed.
+
+# Jump tables index with 32 bits (#186) - 2026-11-24
+- XenonRecomp emitted `switch (ctx.rN.u64)` for a `bctr` with a switch table. The console computes
+  the table entry's address in 32 bits and the bounds check ahead of it is a `cmplwi`, so only the
+  low 32 bits of the index count. The patch now emits `switch (ctx.rN.u32)` (all 439 of them).
+- What it broke: My Teams' uniform editor. At 0x827B8144 the game computes -2 with `rlwinm` (the
+  upper half of the register comes out clear: 0xFFFFFFFE) and adds 20, which is 0x1'0000'0012 in
+  64 bits. The callee, `sub_827CEDD0`, subtracts 1, passes its `cmplwi r11,19` and switches on
+  r11: no case is 0x1'0000'0011, the generated default is `__builtin_unreachable()`, and the
+  compiled jump table was read 16 GB past its end (a segmentation fault in `sub_827CEDD0`).
+- tests/instr_semantics.cpp has the sequence.

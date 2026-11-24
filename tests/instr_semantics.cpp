@@ -468,6 +468,20 @@ static int runChecks(bool mutate)
       xer.ca = r4.u32 + r5.u32 < r4.u32; r3.u64 = r4.u64 + r5.u64;
       CHECK(r3.u32 == 1 && xer.ca == 1, "addc carry: rd %x ca %d", r3.u32, xer.ca); }
 
+    // A jump table's index (bctr with a switch table) is the register's low 32 bits: the console
+    // computes the table entry's address in 32 bits, and the bounds check ahead of it is a cmplwi.
+    // Backbreaker's uniform editor (#186, 0x827B8144 calling sub_827CEDD0): rlwinm leaves 0xFFFFFFFE with
+    // the upper half clear, addi r3,r11,20 makes 0x1'0000'0012, and the callee's addi r11,r3,-1 and
+    // cmplwi r11,19 pass. A switch on all 64 bits then matches no case, and the generated default
+    // is __builtin_unreachable(): the game crashed there.
+    { PPCRegister r3{}, r11{}; PPCCRRegister cr6{}; PPCXERRegister xer{};
+      r11.u64 = 0xFFFFFFFE; r3.s64 = r11.s64 + 20; r11.s64 = r3.s64 + -1;
+      cr6.compare<uint32_t>(r11.u32, 19, xer);
+      int taken = -1;
+      if (!cr6.gt) switch (r11.u32) { case 17: taken = 17; break; default: taken = -2; break; }
+      CHECK(r11.u64 == 0x100000011ull && taken == 17, "switch index: r11 %llx took %d, want case 17 of 0x100000011",
+            (unsigned long long)r11.u64, taken); }
+
     return failures;
 }
 

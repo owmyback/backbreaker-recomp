@@ -18,7 +18,7 @@
     "label": "Building the game from your disc: under a minute on a fast PC, longer on a Steam Deck",
     "timeout": 7200,
     "done": ["{install}/build/bin/backbreaker", "{install}/build/game/.complete"],
-    "version": "1"
+    "version": "2"
   },
   "start": {
     "program": ["Backbreaker-Recompiled-x86_64.AppImage"],

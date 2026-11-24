@@ -734,7 +734,9 @@ The Deck run with it (2026-11-17) answered that the hitches in play aren't a lac
 Next: a Deck run with the sampling, to name the code. It's either the game's own logic or one of the
 runtime's imports it calls, such as memory allocation.
 
-Correctness: the analyzer fixes (#52); crashes fixed: a reused TLS slot that handed back freed data
+Correctness: the analyzer fixes (#52); jump tables indexed with the low 32 bits of the register,
+as the console does (#186, the crash in My Teams' uniform editor: `docs/feasibility.md`); crashes
+fixed: a reused TLS slot that handed back freed data
 on the second match load (#127), and the Training Camp passing drills, a race between the game's
 update and render threads over a play's player slots (#129). #50 (an assert after stick input) was
 closed as not reproducible. Test runs: `--fixed-seed` gives every run the same random numbers, so
