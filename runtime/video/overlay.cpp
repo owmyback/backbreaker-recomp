@@ -1,5 +1,5 @@
-// In-window overlay: the achievements list and the unlock pop-up (issue #101), and the fps
-// readout (#146). See overlay.h.
+// In-window overlay: the achievements list and the unlock pop-up (issue #101), the fps readout
+// (#146) and the text-entry panel (the console's on-screen keyboard). See overlay.h.
 //
 // GPU side, kept off the FPS-critical present path: nothing is created until something is first
 // shown; then one RGBA8 image and one host-visible staging buffer the size of the swapchain
@@ -8,6 +8,7 @@
 // visible panel (opaque, nearest filter, same size: a copy with format conversion). No extra
 // submits, waits or allocations per present.
 #include "overlay.h"
+#include "text_entry.h"
 #include "vk_context.h"
 #include "../apu/apu.h"
 #include "../gpu/gpu.h"
@@ -33,7 +34,8 @@ namespace overlay
     {
         using clock = std::chrono::steady_clock;
         constexpr double kToastSeconds = 5.0; // each pop-up; several unlocks at once take turns
-        constexpr uint16_t kUp = 0x0001, kDown = 0x0002, kBack = 0x0020, kLb = 0x0100, kRb = 0x0200, kA = 0x1000, kB = 0x2000,
+        constexpr uint16_t kUp = 0x0001, kDown = 0x0002, kLeft = 0x0004, kRight = 0x0008, kStart = 0x0010, kBack = 0x0020,
+                           kLs = 0x0040, kLb = 0x0100, kRb = 0x0200, kA = 0x1000, kB = 0x2000, kX = 0x4000, kY = 0x8000,
                            kGuide = 0x0400;
 
         // ---- what is shown ----
@@ -52,12 +54,16 @@ namespace overlay
         bool g_showFps = false;        // the readout (#146)
         gpu::FrameSecond g_fps;        // what it shows
         bool g_fpsDirty = false;       // only the readout changed: its rectangle is uploaded alone
+        bool g_entryOpen = false;      // the text-entry panel: the game asked for the keyboard
+        std::string g_entryTitle, g_entryDescription;
+        text_entry::State g_entry;
+        SDL_Window* g_entryWindow = nullptr; // the window taking typed text for it
 
         // ---- CPU drawing ----
         SDL_Surface* g_surface = nullptr;
         SDL_Renderer* g_sw = nullptr;
         std::map<const uint8_t*, SDL_Texture*> g_icons; // by PNG address in the SPA
-        SDL_FRect g_listRect{}, g_toastRect{}, g_fpsRect{};
+        SDL_FRect g_listRect{}, g_toastRect{}, g_fpsRect{}, g_entryRect{};
 
         // ---- GPU ----
         struct Gpu
@@ -119,6 +125,64 @@ namespace overlay
             if (i >= g_rowsVisible || g_top + i >= int(g_list.size())) return;
             if (g_top + i != g_selected) { g_selected = g_top + i; g_dirty = true; }
             setDetail(true);
+        }
+
+        // ---- the text-entry panel ----
+        std::string narrow(const std::u16string& s)
+        {
+            std::string out;
+            for (char16_t c : s) out += c >= 0x20 && c < 0x7F ? char(c) : '?'; // the font has ASCII only
+            return out;
+        }
+
+        void closeEntry(bool accepted)
+        {
+            if (!g_entryOpen) return;
+            g_entryOpen = false;
+            if (g_entryWindow) SDL_StopTextInput(g_entryWindow);
+            g_entryWindow = nullptr;
+            hid::setInputCaptured(false);
+            g_dirty = true;
+            kernel::finishTextEntry(accepted, g_entry.text); // the game gets its answer
+        }
+
+        // The game asked for the keyboard (XamShowKeyboardUI, on one of its threads): show the panel
+        void openEntryIfAsked()
+        {
+            if (g_entryOpen || !kernel::textEntryAsked()) return;
+            kernel::TextEntryRequest request;
+            if (!kernel::takeTextEntry(request)) return;
+            setOpen(false); // the list, if the game asked from under it (scripted presses reach the game)
+            g_entryTitle = narrow(request.title);
+            g_entryDescription = narrow(request.description);
+            g_entry = text_entry::State{};
+            g_entry.text = request.text;
+            g_entry.maxLength = request.maxLength;
+            g_entryOpen = true;
+            hid::setInputCaptured(true);
+            // Typed text comes as SDL_EVENT_TEXT_INPUT while a window takes it. The panel has its
+            // own keys for a controller, so no system on-screen keyboard over it (Steam Deck).
+            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
+            g_entryWindow = SDL_GetKeyboardFocus();
+            if (!g_entryWindow)
+            {
+                int count = 0;
+                if (SDL_Window** windows = SDL_GetWindows(&count))
+                {
+                    if (count > 0) g_entryWindow = windows[0];
+                    SDL_free(windows);
+                }
+            }
+            if (g_entryWindow && !SDL_StartTextInput(g_entryWindow))
+                warn("[overlay] no typed text for the keyboard panel: %s", SDL_GetError());
+            g_dirty = true;
+        }
+
+        void entryAction(text_entry::Action a)
+        {
+            if (a == text_entry::Action::Done) closeEntry(true);
+            else if (a == text_entry::Action::Cancel) closeEntry(false);
+            else g_dirty = true;
         }
 
         // ---- drawing helpers ----
@@ -418,6 +482,89 @@ namespace overlay
             outline(R, kGold, std::max(2.0f, float(s) * 0.75f));
         }
 
+        // The text-entry panel, centred: what the game asks for, the text so far, the grid of keys
+        // (text_entry.h) with the selected one lit, and what the buttons do.
+        void drawEntry(float W, float H)
+        {
+            using namespace text_entry;
+            const int s = g_scale, small = std::max(1, s - 1), big = s + 1;
+            const float glyph = 8.0f * s, pad = glyph * 1.5f;
+            const float cellW = glyph * 4, cellH = glyph * 2.8f, gap = std::max(2.0f, glyph * 0.15f);
+            const float innerW = cellW * kColumns;
+            const size_t smallChars = size_t(innerW / (8.0f * small));
+            const std::vector<std::string> about = wrap(g_entryDescription, smallChars);
+            // Each fits 2160p's 48 small characters across the grid
+            const std::vector<std::string> hints = { "Type on a keyboard, or pick with the D-pad and A",
+                                                     "X: delete   Y: space   Left stick click: abc/ABC",
+                                                     "Start, Enter: done   B, Esc: cancel" };
+            const float smallLine = 8.0f * small + glyph * 0.4f;
+            const float headerH = glyph * 0.8f + 8.0f * big + glyph * 0.6f + about.size() * smallLine + glyph * 0.4f;
+            const float fieldH = glyph * 2.6f;
+            const float footerH = glyph * 0.7f + hints.size() * smallLine + glyph * 0.3f;
+            const float panelW = innerW + pad * 2;
+            const float panelH = headerH + pad * 0.7f + fieldH + smallLine + pad * 0.5f + cellH * kRows + pad * 0.7f + footerH;
+            g_entryRect = { std::floor((W - panelW) / 2), std::floor((H - panelH) / 2), std::floor(panelW), std::floor(panelH) };
+            const SDL_FRect& P = g_entryRect;
+            fill(P, kPanel);
+
+            // Header: the game's title for the field, and its description
+            fill({ P.x, P.y, P.w, headerH }, kHeader);
+            float y = P.y + glyph * 0.8f;
+            text(P.x + pad, y, big, kText, g_entryTitle.empty() ? "ENTER TEXT" : g_entryTitle, innerW);
+            y += 8.0f * big + glyph * 0.6f;
+            for (const std::string& l : about)
+            {
+                text(P.x + pad, y, small, kDim, l);
+                y += smallLine;
+            }
+
+            // The text so far, with the place of the next character; its end when it is too long to fit
+            y = P.y + headerH + pad * 0.7f;
+            const SDL_FRect field = { P.x + pad, y, innerW, fieldH };
+            fill(field, { 8, 12, 22 });
+            outline(field, kBorder, std::max(1.0f, float(s) * 0.5f));
+            const bool full = g_entry.text.size() >= g_entry.maxLength;
+            std::string shown = g_entry.shown();
+            const size_t room = size_t((innerW - glyph * 1.6f) / glyph) - 1; // one for the cursor
+            if (shown.size() > room) shown = ".." + shown.substr(shown.size() - (room - 2));
+            const float tx = field.x + glyph * 0.8f, ty = field.y + (fieldH - glyph) / 2;
+            const float tw = text(tx, ty, s, kText, shown);
+            if (!full) text(tx + tw, ty, s, kGold, "_");
+            y += fieldH + glyph * 0.3f;
+            char count[48];
+            std::snprintf(count, sizeof(count), "%zu of %zu", g_entry.text.size(), g_entry.maxLength);
+            text(P.x + pad + innerW - textWidth(count, small), y, small, full ? kGold : kDim, count);
+            y += smallLine - glyph * 0.3f + pad * 0.5f;
+
+            // The keys
+            constexpr Color kKey{ 30, 40, 60 };
+            auto key = [&](const SDL_FRect& cell, const std::string& label, int scale, bool selected) {
+                const SDL_FRect k = { cell.x + gap, cell.y + gap, cell.w - gap * 2, cell.h - gap * 2 };
+                fill(k, selected ? kRowSel : kKey);
+                if (selected) outline(k, kGold, std::max(2.0f, float(s) * 0.75f));
+                text(k.x + (k.w - textWidth(label, scale)) / 2, k.y + (k.h - 8.0f * scale) / 2, scale, kText, label);
+            };
+            for (int r = 0; r < kCharRows; r++)
+                for (int c = 0; c < kColumns; c++)
+                    key({ P.x + pad + c * cellW, y + r * cellH, cellW, cellH }, std::string(1, g_entry.keyAt(r, c)), big,
+                        g_entry.row == r && g_entry.column == c);
+            const char* const actions[kBottomKeys] = { g_entry.lower ? "ABC" : "abc", "Space", "Delete", "Cancel", "Done" };
+            for (int k = 0; k < kBottomKeys; k++)
+                key({ P.x + pad + k * kBottomSpan * cellW, y + kCharRows * cellH, kBottomSpan * cellW, cellH }, actions[k], s,
+                    g_entry.row == kCharRows && g_entry.bottomKey() == k);
+            y += cellH * kRows + pad * 0.7f;
+
+            // Footer
+            fill({ P.x, y, P.w, P.y + P.h - y }, kHeader);
+            y += glyph * 0.7f;
+            for (const std::string& l : hints)
+            {
+                text(P.x + pad, y, small, kDim, l, innerW);
+                y += smallLine;
+            }
+            outline(P, kBorder, std::max(2.0f, float(s)));
+        }
+
         // Top-left: "28 fps  speed 94%" and, smaller, the longest frame. Its size comes from the widest
         // numbers it expects, so it doesn't change with the digits.
         void drawFps()
@@ -467,9 +614,10 @@ namespace overlay
                 SDL_SetRenderDrawColor(g_sw, 70, 90, 70, 255); // stands in for the game in a preview
                 SDL_RenderClear(g_sw);
             }
-            g_listRect = g_toastRect = g_fpsRect = {};
+            g_listRect = g_toastRect = g_fpsRect = g_entryRect = {};
             if (g_listOpen) drawList(float(w), float(h));
             if (g_listOpen && g_detail) drawDetail();
+            if (g_entryOpen) drawEntry(float(w), float(h));
             if (g_toast) drawToast(float(w), float(h));
             if (g_showFps && !g_listOpen) drawFps(); // last: on top, as its own upload and blit leave it
             SDL_FlushRenderer(g_sw);
@@ -602,6 +750,38 @@ namespace overlay
 
     bool handleEvent(const SDL_Event& e)
     {
+        // The text-entry panel takes the keyboard while it is up: typed text, and the keys that
+        // edit, confirm and cancel. F10-F12 and Alt+Enter stay the window's.
+        if (g_entryOpen)
+        {
+            if (e.type == SDL_EVENT_TEXT_INPUT)
+            {
+                if (g_entry.typeUtf8(e.text.text)) g_dirty = true;
+                return true;
+            }
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL) return true;
+            if (e.type != SDL_EVENT_KEY_DOWN) return false;
+            switch (e.key.key)
+            {
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+                if (e.key.mod & SDL_KMOD_ALT) return false;
+                if (!e.key.repeat) closeEntry(true);
+                return true;
+            case SDLK_ESCAPE:
+                if (!e.key.repeat) closeEntry(false);
+                return true;
+            case SDLK_BACKSPACE:
+                if (g_entry.backspace()) g_dirty = true;
+                return true;
+            case SDLK_UP: g_entry.move(0, -1); g_dirty = true; return true;
+            case SDLK_DOWN: g_entry.move(0, 1); g_dirty = true; return true;
+            case SDLK_LEFT: g_entry.move(-1, 0); g_dirty = true; return true;
+            case SDLK_RIGHT: g_entry.move(1, 0); g_dirty = true; return true;
+            case SDLK_F1: return true; // not the achievements list over it
+            default: return false;
+            }
+        }
         // The mouse, while the list is open: a click reads a row or goes back, the wheel scrolls
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL)
         {
@@ -653,7 +833,22 @@ namespace overlay
 
     void handlePad(uint32_t presses)
     {
+        openEntryIfAsked();
         if (!presses) return;
+        if (g_entryOpen)
+        {
+            if (presses & (kB | kBack)) { closeEntry(false); return; }
+            if (presses & kStart) { closeEntry(true); return; }
+            if (presses & kUp) g_entry.move(0, -1);
+            if (presses & kDown) g_entry.move(0, 1);
+            if (presses & kLeft) g_entry.move(-1, 0);
+            if (presses & kRight) g_entry.move(1, 0);
+            if (presses & kX) g_entry.backspace();
+            if (presses & kY) g_entry.type(u' ');
+            if (presses & kLs) g_entry.lower = !g_entry.lower;
+            entryAction((presses & kA) ? g_entry.press() : text_entry::Action::None);
+            return;
+        }
         if (presses & kGuide) { setOpen(!g_listOpen); return; }
         if (!g_listOpen) return;
         if (presses & (kB | kBack))
@@ -674,7 +869,7 @@ namespace overlay
         updateToast();
         updateFps();
         const bool fpsShown = g_showFps && !g_listOpen;
-        if (!g_listOpen && !g_toast && !fpsShown) return; // hidden: nothing recorded
+        if (!g_listOpen && !g_toast && !fpsShown && !g_entryOpen) return; // hidden: nothing recorded
         if (!extent.width || !extent.height) return;
         if (g_gpu.width != extent.width || g_gpu.height != extent.height)
         {
@@ -740,6 +935,7 @@ namespace overlay
         mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
         if (g_listOpen) blitRect(cmd, dst, g_listRect);
+        if (g_entryOpen) blitRect(cmd, dst, g_entryRect);
         if (g_toast) blitRect(cmd, dst, g_toastRect);
         if (fpsShown) blitRect(cmd, dst, g_fpsRect);
     }
@@ -761,9 +957,25 @@ namespace overlay
         g_surface = nullptr;
     }
 
-    bool writePreview(const char* path, uint32_t width, uint32_t height, bool detail)
+    bool writePreview(const char* path, uint32_t width, uint32_t height, bool detail, bool keyboard)
     {
         if (!ensureSurface(width, height)) return false;
+        if (keyboard)
+        {
+            // The panel as the game's team name field would open it, a few keys in
+            g_entryTitle = "TEAM NAME";
+            g_entryDescription = "Enter a name for your team.";
+            g_entry = text_entry::State{};
+            g_entry.text = u"MY TEAM";
+            g_entry.maxLength = 15;
+            g_entry.row = 2;
+            g_entry.column = 3;
+            g_entryOpen = true;
+            draw(width, height, true);
+            bool ok = SDL_SavePNG(g_surface, path);
+            if (!ok) warn("[overlay] could not write %s: %s", path, SDL_GetError());
+            return ok;
+        }
         refreshList();
         g_listOpen = true;
         g_selected = 0;

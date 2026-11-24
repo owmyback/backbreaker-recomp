@@ -688,6 +688,7 @@ with the same line: 0 errors, and only the loader's own note left.
     heap when the thread exits
   - `files.cpp` file system (game:\ -> game/disc, cache:\ -> game/cache; saves mounted at runtime)
   - `xam_content.cpp` saves: content packages in game/saves/<type>/<name>/, mounted as save:\
+  - `xam_keyboard.cpp` the on-screen keyboard: a request for the overlay's text-entry panel
   - `memory_imports.cpp`, `sync.cpp`, `strings.cpp`, `system.cpp`, `xex.cpp`, `variables.cpp`
 - `runtime/generated/imports.cpp` - weak logging stub for every import (from tools/gen_imports.py);
   compiled into the game, not the runtime library (see "Runtime kit")
@@ -860,7 +861,9 @@ the game does not even import `XamShowAchievementsUI`. The runtime draws one ins
   the earned ones; secret ones show as "Secret achievement" until earned; totals at the top.
   Up/Down (d-pad, left stick or arrow keys) moves, LB/RB or PgUp/PgDn a page, Home/End, and the
   mouse wheel scrolls; B, Back, Esc, F1 or Guide closes it. While it is open the game sees a neutral
-  controller (scripted `--press` input still goes through).
+  controller, and the button that closed it stays released for the game until it is let go (the B
+  that closes the list was otherwise the game's "back" too). A direction kept held moves again,
+  after 0.4 s and then 8 times a second.
 - **One achievement in full:** a row has room for one line of the name and one of the description,
   cut with `..`, and some descriptions are longer. A, Enter (not Alt+Enter, which is full screen) or
   a left click on a row opens that achievement on a card over the dimmed list: its large icon, the
@@ -893,7 +896,8 @@ the game does not even import `XamShowAchievementsUI`. The runtime draws one ins
 - `--overlay-preview <file.png>[@WxH]` draws the list and a pop-up over a grey backdrop into a PNG
   (default 1920x1080) and exits: the drawing can be checked without a window or a GPU.
   `--overlay-preview-detail` draws the list with the achievement with the longest text open in full
-  instead, to check the card's wrapping.
+  instead, to check the card's wrapping. `--overlay-preview-keyboard` draws the text-entry panel
+  (see "On-screen keyboard").
 
 How it is drawn: on the CPU with SDL3's software renderer (its built-in 8x8 font, scaled by
 2/3/4/6 at 720p/1080p/1440p/2160p; icons decoded with `SDL_LoadPNG_IO`), only when what is shown
@@ -976,6 +980,35 @@ while the game slows down. The readout is drawn by the overlay (`runtime/video/o
 hidden while the achievements list is open. It redraws once a second and then uploads only its own
 rectangle. Windowed runs only. `--overlay-preview` draws it with sample numbers when it's on.
 
+## On-screen keyboard
+#186. My Teams asks the console for its on-screen keyboard (`XamShowKeyboardUI`) to name a custom team,
+its city and the city's abbreviation: for the first two as soon as a new team's editor opens, and
+again whenever A is pressed on one of the three fields. Without an answer nothing happened, so A
+on those fields seemed to do nothing. The runtime answers in two ways
+(`runtime/kernel/xam_keyboard.cpp`):
+- **In a window** the overlay shows a text-entry panel (`runtime/video/overlay.cpp`, the keys and
+  the text in `runtime/video/text_entry.h`, tested by `tests/text_entry_test.cpp`): the game's
+  title for the field, the text so far with how many characters the game allows, and a grid of
+  keys. Type on a keyboard (Backspace deletes, Enter confirms, Esc cancels), or use the controller:
+  d-pad or left stick to move over the keys, A to press one, X deletes, Y is a space, a left stick
+  click switches between capitals and small letters, Start confirms, B or Back cancels. The call
+  returns `ERROR_IO_PENDING` and its `XOVERLAPPED` completes with the text in the game's buffer, or
+  with `ERROR_CANCELLED`, which leaves the field as it was. The game sees a neutral controller
+  meanwhile, as under the achievements list. The game shows these three fields in capitals whatever
+  the case typed.
+- **Headless**, or with `--keyboard-text <text>` in any run, the call completes at once and the
+  panel is never shown: with that text, or without the option with the text the game offered
+  ("MY TEAM", "MY CITY"). The log has each request and its answer (`[xam] keyboard "TEAM NAME"
+  (flags 1, 14 characters): ...`).
+- The panel's font is the overlay's (printable ASCII): a character outside it, typed on a keyboard,
+  is kept in the text and shows as `?` in the panel.
+- `--overlay-preview-keyboard <file.png>[@WxH]` draws the panel into a PNG and exits.
+- Checked on the PC on 2026-11-24: headless with `--keyboard-text`, the team's name and city show
+  the text and the abbreviation its first three letters; in a window (under `gamescope --backend
+  headless`) with scripted presses, deleting "MY TEAM", picking O, W, L from the grid and Start
+  names the team OWL, and B on the city's panel leaves "MY CITY". Both on a build that also had
+  the jump table fix of #186.
+
 ## Fixes to the game's own code
 - Tackle Alley at 60 fps (`runtime/tackle_alley.cpp`, #139): after a tackle the next attempt never
   started (the player stood still, the clock frozen). The between-attempts stage (43) starts a
@@ -1001,7 +1034,9 @@ Settings -> Game Controller -> pointer navigation, or the stick also moves the m
 
 ## Scripted input
 `--press "start@12,a@20,down@24.5"` presses each button that many seconds after launch (held
-150 ms), reported as pad state and as keystrokes, added to any real controller on user 0. Routes
+150 ms), reported as pad state and as keystrokes, added to any real controller on user 0. A press
+that begins while the overlay has the controllers (the achievements list, the keyboard panel) goes
+to the overlay instead, and the log says so (`scripted press: a (the overlay's)`). Routes
 count on the title screen about 4 s after launch: headless runs skip the two boot logo movies
 (about 21 s) unless given `--skip-intro 0` (see "Movies").
 Buttons: a b x y start back up down left right lb rb lt rt ls rs (`lt`/`rt` pull the trigger fully

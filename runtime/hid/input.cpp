@@ -42,7 +42,7 @@ namespace
     constexpr double kHoldSeconds = 0.15;
     constexpr uint16_t XINPUT_KEYSTROKE_KEYDOWN = 0x0001, XINPUT_KEYSTROKE_KEYUP = 0x0002;
 
-    struct Press { double at; const Button* button; };
+    struct Press { double at; const Button* button; bool taken = false; }; // taken: by the overlay, once
     // Scripted stick holds: full deflection of one axis (0 lx, 1 ly, 2 rx, 3 ry) for `duration`
     struct StickHold { double at, duration; int axis; int16_t value; };
     struct Stick { const char* name; int axis; int16_t value; };
@@ -50,13 +50,24 @@ namespace
         { "ls_left", 0, -32768 }, { "ls_right", 0, 32767 }, { "ls_down", 1, -32768 }, { "ls_up", 1, 32767 },
         { "rs_left", 2, -32768 }, { "rs_right", 2, 32767 }, { "rs_down", 3, -32768 }, { "rs_up", 3, 32767 },
     };
-    struct KeyEvent { double at; uint16_t vk; uint16_t flags; const char* name; };
+    struct KeyEvent { double at; uint16_t vk; uint16_t flags; const char* name; double pressAt; }; // pressAt: when its press began
 
     std::mutex g_scriptLock;
     std::vector<Press> g_presses;
     std::vector<StickHold> g_stickHolds;
     std::vector<KeyEvent> g_keyEvents; // sorted by time
     size_t g_nextKeyEvent = 0;
+
+    // The overlay (the achievements list, the keyboard panel) takes the controllers while it is
+    // open: the game then reads a neutral pad, and the overlay reads the button presses. A
+    // scripted press that begins while it has them is the overlay's too, for its whole hold: the A
+    // that picks the panel's "Done" must not press the game's button under it next.
+    std::atomic<bool> g_captured{false};
+    std::atomic<double> g_captureFrom{1e300}, g_captureTo{-1e300}; // the latest capture, in now()'s seconds
+    bool overlayOwns(double pressAt)
+    {
+        return pressAt >= g_captureFrom.load(std::memory_order_relaxed) && pressAt < g_captureTo.load(std::memory_order_relaxed);
+    }
     const auto g_start = std::chrono::steady_clock::now();
 
     double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count(); }
@@ -98,10 +109,11 @@ namespace
             if (user < kMaxUsers && g_host[user].connected) p = g_host[user].pad;
         }
         if (user != 0) return p;
+        if (g_captured.load(std::memory_order_relaxed)) return p; // the overlay's, scripted input too
         double t = now();
         std::lock_guard guard(g_scriptLock);
         for (auto& press : g_presses)
-            if (t >= press.at && t < press.at + kHoldSeconds)
+            if (t >= press.at && t < press.at + kHoldSeconds && !overlayOwns(press.at))
             {
                 p.buttons |= press.button->mask; // scripted presses add to the real pad
                 if (press.button->trigger == 1) p.lt = 255;
@@ -208,8 +220,8 @@ namespace hid
             }
             double t = std::atof(item.c_str() + at + 1);
             g_presses.push_back({ t, button });
-            g_keyEvents.push_back({ t, button->vk, XINPUT_KEYSTROKE_KEYDOWN, button->name });
-            g_keyEvents.push_back({ t + kHoldSeconds, button->vk, XINPUT_KEYSTROKE_KEYUP, button->name });
+            g_keyEvents.push_back({ t, button->vk, XINPUT_KEYSTROKE_KEYDOWN, button->name, t });
+            g_keyEvents.push_back({ t + kHoldSeconds, button->vk, XINPUT_KEYSTROKE_KEYUP, button->name, t });
         }
         std::sort(g_keyEvents.begin(), g_keyEvents.end(), [](auto& a, auto& b) { return a.at < b.at; });
         info("[hid] scripted %zu button presses, %zu stick holds", g_presses.size(), g_stickHolds.size());
@@ -241,7 +253,11 @@ GUEST_IMPORT(XamInputGetKeystrokeEx)
         }
     }
     std::lock_guard guard(g_scriptLock);
-    if (g_nextKeyEvent >= g_keyEvents.size() || g_keyEvents[g_nextKeyEvent].at > now())
+    // Not the presses the overlay took (takeMenuPresses logs those)
+    const double t = now();
+    while (g_nextKeyEvent < g_keyEvents.size() && g_keyEvents[g_nextKeyEvent].at <= t && overlayOwns(g_keyEvents[g_nextKeyEvent].pressAt))
+        g_nextKeyEvent++;
+    if (g_nextKeyEvent >= g_keyEvents.size() || g_keyEvents[g_nextKeyEvent].at > t)
     {
         ctx.r3.u64 = ERROR_EMPTY;
         return;
@@ -314,12 +330,12 @@ namespace
     SDL_JoystickID g_openId[kMaxUsers] = {};
     bool g_sdlReady = false;
 
-    // The overlay (achievements list, #101) takes the controllers while it is open: the game then
-    // reads a neutral pad, and the overlay reads the button presses. kGuideMask is outside the
+    // The overlay's presses from real controllers (g_captured, above). kGuideMask is outside the
     // XINPUT_GAMEPAD_* buttons the game sees.
     constexpr uint16_t kGuideMask = 0x0400;
-    std::atomic<bool> g_captured{false};
     uint16_t g_menuHeld[kMaxUsers] = {};
+    double g_menuRepeat[kMaxUsers] = {};      // when a held direction counts as pressed again
+    uint16_t g_heldAtRelease[kMaxUsers] = {}; // buttons the game doesn't see until they are let go
     std::atomic<uint32_t> g_menuPresses{0};
 }
 
@@ -372,6 +388,7 @@ namespace hid
             if (!g_open[u])
             {
                 if (h.connected) h = HostPad{}; // keys released, rumble off
+                g_menuHeld[u] = g_heldAtRelease[u] = 0;
                 continue;
             }
             h.connected = true;
@@ -382,9 +399,29 @@ namespace hid
             if (SDL_GetGamepadButton(g_open[u], SDL_GAMEPAD_BUTTON_GUIDE)) menu |= kGuideMask;
             if (raw.ly > 16384) menu |= 0x0001;
             if (raw.ly < -16384) menu |= 0x0002;
-            g_menuPresses.fetch_or(uint32_t(menu & ~g_menuHeld[u]), std::memory_order_relaxed);
+            if (raw.lx < -16384) menu |= 0x0004;
+            if (raw.lx > 16384) menu |= 0x0008;
+            uint16_t presses = menu & ~g_menuHeld[u];
+            // A direction kept held presses again, after 0.4 s and then 8 times a second: a long
+            // list, the keyboard's grid
+            const uint16_t directions = menu & 0x000F;
+            if (!directions || directions != (g_menuHeld[u] & 0x000F)) g_menuRepeat[u] = t + 0.4;
+            else if (t >= g_menuRepeat[u])
+            {
+                presses |= directions;
+                g_menuRepeat[u] = t + 0.125;
+            }
+            g_menuPresses.fetch_or(uint32_t(presses), std::memory_order_relaxed);
             g_menuHeld[u] = menu;
-            h.pad = g_captured.load(std::memory_order_relaxed) ? Pad{} : raw; // keys below release too
+            // What the overlay was closed with (B on the list, A on the keyboard's Done) is still
+            // down when the game gets the controllers back: it stays released until it is let go,
+            // or the game would take it as a press of its own
+            const bool captured = g_captured.load(std::memory_order_relaxed);
+            if (captured) g_heldAtRelease[u] = raw.buttons;
+            else g_heldAtRelease[u] &= raw.buttons;
+            Pad seen = raw;
+            seen.buttons &= uint16_t(~g_heldAtRelease[u]);
+            h.pad = captured ? Pad{} : seen; // keys below release too
             // Keystroke edges
             for (size_t k = 0; k < std::size(kKeys); k++)
             {
@@ -405,9 +442,35 @@ namespace hid
         }
     }
 
-    void setInputCaptured(bool captured) { g_captured = captured; }
+    void setInputCaptured(bool captured)
+    {
+        if (captured == g_captured.load(std::memory_order_relaxed)) return;
+        if (captured)
+        {
+            g_captureFrom = now(); // first: no press is in (new from, old to)
+            g_captureTo = 1e300;
+        }
+        else
+            g_captureTo = now();
+        g_captured = captured;
+    }
 
-    uint32_t takeMenuPresses() { return g_menuPresses.exchange(0, std::memory_order_relaxed); }
+    uint32_t takeMenuPresses()
+    {
+        uint32_t presses = g_menuPresses.exchange(0, std::memory_order_relaxed);
+        if (!g_captured.load(std::memory_order_relaxed)) return presses;
+        // Scripted presses that begin while the overlay has the controllers
+        const double t = now();
+        std::lock_guard guard(g_scriptLock);
+        for (auto& press : g_presses)
+            if (!press.taken && t >= press.at && overlayOwns(press.at))
+            {
+                press.taken = true;
+                presses |= press.button->mask;
+                info("[hid] scripted press: %s (the overlay's)", press.button->name);
+            }
+        return presses;
+    }
 
     void startInputThread()
     {

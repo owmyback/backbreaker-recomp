@@ -742,6 +742,10 @@ update and render threads over a play's player slots (#129). #50 (an assert afte
 closed as not reproducible. Test runs: `--fixed-seed` gives every run the same random numbers, so
 the Exhibition route reaches the same coin toss, wind and kickoff (#71).
 
+My Teams (#186): A on a custom team's name, city or abbreviation did nothing, because the game asks
+for the console's on-screen keyboard and the runtime had none. The window's overlay now has a
+text-entry panel for a keyboard or the controller (`docs/runtime.md`, "On-screen keyboard").
+
 ## Phase 10 - Packaging (started)
 
 `scripts/setup.sh "<iso>"` (`54f3038`, #4) takes a checkout and an image of your own disc to a

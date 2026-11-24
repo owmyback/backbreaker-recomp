@@ -38,6 +38,20 @@ namespace kernel
     uint64_t achievementUnlockCount();                 // new unlocks so far this run (cheap: an atomic)
     std::vector<uint16_t> unlockedSince(uint64_t index); // ids of this run's unlocks from that index on, in order
     const std::string& savesRoot();
+
+    // The on-screen keyboard (xam_keyboard.cpp): XamShowKeyboardUI leaves a request for the overlay's
+    // text-entry panel, which finishes it when the player confirms or cancels. Text is UTF-16, as
+    // the game has it.
+    struct TextEntryRequest
+    {
+        std::u16string title, description, text; // text: what the field starts with
+        size_t maxLength = 0;                     // in characters
+    };
+    void setTextEntryInteractive(bool on);            // a window is there to ask in; without one, answered at once
+    void setTextEntryAnswer(const std::string& utf8); // --keyboard-text: the answer to every request, never shown
+    bool textEntryAsked();                            // a request nobody took yet (cheap: an atomic)
+    bool takeTextEntry(TextEntryRequest& out);        // false when there is none
+    void finishTextEntry(bool accepted, const std::u16string& text);
     // Runtime mounts, used by XAM content packages: device path prefix such as
     // "\Device\Content\1" -> host directory, and symbolic links such as "save:" -> device path.
     void addMount(const std::string& devicePrefix, const std::string& hostRoot, bool writable);

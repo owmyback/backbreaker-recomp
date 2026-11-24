@@ -25,6 +25,9 @@ and Windows using XenonRecomp. Requires a legally owned disc image; no game data
   and there's no F1 key: in Steam, open the game's controller settings and map the back grip R4 to
   the keyboard key F1 (#145). The list has the 26 achievements you can earn offline, worth 1000 G:
   the three online ones are left out, since they can only be earned online.
+- **Naming a custom team (My Teams):** the game asks for the console's on-screen keyboard, and a
+  panel with the text and a grid of keys opens over the game. Type on a keyboard and press Enter, or
+  use the controller: d-pad and A pick the keys, X deletes, Y is a space, Start confirms, B cancels.
 - **Mods:** plays, the AI's audibles, minigames and menus can be changed; see `docs/modding.md`.
 
 ## Start here
@@ -203,6 +206,12 @@ the test makes up: the rewritten index, the appended data and reads across it, c
 names, both byte orders, and an index that doesn't parse:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/pack_overlay_test.cpp runtime/kernel/pack_overlay.cpp -o build/pack_overlay_test && build/pack_overlay_test
+
+The text-entry panel that stands in for the console's on-screen keyboard
+(`runtime/video/text_entry.h`): its grid of keys, the selection going around the edges, the game's
+length limit, and typed UTF-8:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/text_entry_test.cpp -o build/text_entry_test && build/text_entry_test
 
 The tools' own tests (`tests/test_*.py`; `tests/test_pkd.py` for `tools/pkd.py`) need no game files either:
 

@@ -21,10 +21,12 @@ namespace hid
     // User 0 stays connected without a real controller (scripted / headless runs).
     void setVirtualPad(bool enabled);
 
-    // For the in-window overlay (#101). While captured, the game reads real controllers as neutral
-    // (scripted presses still go through). takeMenuPresses() returns the buttons newly pressed
-    // on any real controller since the last call: XINPUT_GAMEPAD_* masks (the left stick counts
-    // as d-pad up/down), plus 0x0400 for the Guide (PS) button.
+    // For the in-window overlay (#101). While captured, the game reads the controllers as neutral,
+    // and a button held when the capture ends stays released for the game until it is let go.
+    // takeMenuPresses() returns the buttons newly pressed on any real controller since the last
+    // call: XINPUT_GAMEPAD_* masks (the left stick counts as the d-pad, and a direction kept held
+    // presses again), plus 0x0400 for the Guide (PS) button. Scripted presses (--press) that begin
+    // while captured go to the overlay as well, and not to the game.
     void setInputCaptured(bool captured);
     uint32_t takeMenuPresses();
 }

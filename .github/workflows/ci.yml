@@ -90,6 +90,12 @@ jobs:
       - name: Run player's achievements list test
         run: ./build/achievement_list_test
 
+      - name: Build text-entry panel test (header-only)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/text_entry_test.cpp -o build/text_entry_test
+
+      - name: Run text-entry panel test
+        run: ./build/text_entry_test
+
       - name: Build frame timing test (header-only)
         run: clang++ -std=c++20 -Wall -Wextra -O2 tests/frame_stats_test.cpp -o build/frame_stats_test
 
