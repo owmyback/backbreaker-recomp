@@ -14,6 +14,8 @@
 //   - firstReads names each replacement once, when a read first covers it
 //   - a big-endian index is rewritten big-endian
 //   - an index that doesn't parse: no overlay, and a log line that says why
+//   - readEntry: an entry's bytes straight from the archive, by a name in another case; through an
+//     overlay the replacement instead; an empty entry; no such entry, no such archive
 //
 // No game files. Build and run: .github/workflows/ci.yml
 //   clang++ -std=c++20 -Wall -Wextra -O2 tests/pack_overlay_test.cpp runtime/kernel/pack_overlay.cpp -o build/pack_overlay_test
@@ -254,6 +256,27 @@ int main()
         ok(!parseIndex(junk, pkd.size(), parsed, why) && !why.empty(), "parseIndex gives the reason");
         Bytes past = pkh;
         ok(!parseIndex(past, 100, parsed, why), "entries past the end of the data: refused");
+    }
+
+    // readEntry: what the game would read for one entry
+    {
+        const std::string h = pack.string() + ".pkh", d = pack.string() + ".pkd";
+        std::string got = "stale";
+        ok(readEntry(h, d, nullptr, "MEDIA\\playdatabase\\offense\\DAGGER.pd", got) && Bytes(got.begin(), got.end()) == play,
+           "readEntry: the archive's own bytes, the name in another case");
+        ok(readEntry(h, d, nullptr, "shaders\\post_process.fx360", got) && Bytes(got.begin(), got.end()) == big,
+           "readEntry: an entry longer than a block");
+        ok(!readEntry(h, d, nullptr, "media\\PlayDatabase\\Offense\\Nothing.pd", got) && got.empty(), "readEntry: no such entry");
+        ok(!readEntry(g_dir / "nowhere.pkh", g_dir / "nowhere.pkd", nullptr, "shaders\\post_process.fx360", got), "readEntry: no such archive");
+        std::vector<std::string> log;
+        auto o = build(pack, g_dir / "one", log);
+        ok(o && readEntry(h, d, o.get(), "media\\PlayDatabase\\Offense\\Dagger.pd", got) &&
+               got == "<play name=\"Dagger\">\r\n  <route deep=\"1\"/>\r\n</play>\r\n",
+           "readEntry through an overlay: the mods folder's replacement");
+        ok(o && readEntry(h, d, o.get(), "media\\ui\\Final_XUI\\Single Player\\Title.xui", got) && Bytes(got.begin(), got.end()) == menu,
+           "readEntry through an overlay: an entry that isn't replaced");
+        fs::path withEmpty = makePack("e", { { "a.txt", {} }, { "b.txt", text("b") } });
+        ok(readEntry(withEmpty.string() + ".pkh", withEmpty.string() + ".pkd", nullptr, "a.txt", got) && got.empty(), "readEntry: an empty entry");
     }
 
     fs::remove_all(g_dir);

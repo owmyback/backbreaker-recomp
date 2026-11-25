@@ -79,4 +79,10 @@ namespace kernel::pack
         std::vector<Replacement> m_files;  // in offset order
         std::unique_ptr<std::atomic<bool>[]> m_read;
     };
+
+    // One entry's bytes: from the archive at pkh/pkd, or through `overlay` when the archive has one,
+    // so that a replacement from the mods folder is what comes back, as the game gets it. Names are
+    // matched without regard to case. False when the archive can't be read or has no such entry.
+    bool readEntry(const std::filesystem::path& pkh, const std::filesystem::path& pkd, const Overlay* overlay,
+                   const std::string& name, std::string& out);
 }

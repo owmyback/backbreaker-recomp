@@ -163,6 +163,12 @@ jobs:
       - name: Run archive entry override test
         run: ./build/pack_overlay_test
 
+      - name: Build play number test (a save's audibles between the disc's version and Title Update 2, made-up lists)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/play_numbers_test.cpp runtime/play_numbers.cpp -o build/play_numbers_test
+
+      - name: Run play number test
+        run: ./build/play_numbers_test
+
       - name: Build installer test (#138, synthetic images, test vectors, the menu entry and the Steam shortcut)
         # -I XenonUtils: the kernel's export tables come from the XenonRecomp clone above
         run: |

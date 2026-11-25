@@ -268,6 +268,58 @@ namespace kernel::pack
         return long(n);
     }
 
+    bool readEntry(const fs::path& pkh, const fs::path& pkd, const Overlay* overlay, const std::string& name, std::string& out)
+    {
+        out.clear();
+        std::vector<uint8_t> index;
+        uint64_t dataSize = 0;
+        int fd = -1;
+        if (overlay)
+        {
+            index.resize(overlay->size(true));
+            overlay->read(true, index.data(), uint32_t(index.size()), 0);
+            dataSize = overlay->size(false);
+        }
+        else
+        {
+            std::ifstream in(pkh, std::ios::binary);
+            index.assign(std::istreambuf_iterator<char>(in), {});
+            struct stat st{};
+            if (index.empty() || stat(pkd.string().c_str(), &st) != 0)
+                return false;
+            dataSize = uint64_t(st.st_size);
+        }
+        Index parsed;
+        std::string why;
+        if (!parseIndex(index, dataSize, parsed, why))
+            return false;
+        const std::string want = lower(name);
+        for (auto& e : parsed.entries)
+        {
+            if (lower(e.name) != want)
+                continue;
+            out.resize(e.size);
+            uint64_t got;
+            if (overlay)
+                got = uint64_t(std::max(0l, overlay->read(false, reinterpret_cast<uint8_t*>(out.data()), e.size, e.offset)));
+            else
+            {
+                fd = ::open(pkd.string().c_str(), O_RDONLY | O_CLOEXEC);
+                if (fd < 0)
+                    return false;
+                got = readFully(fd, reinterpret_cast<uint8_t*>(out.data()), e.size, e.offset);
+                close(fd);
+            }
+            if (got != e.size)
+            {
+                out.clear();
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
     std::vector<std::string> Overlay::firstReads(uint64_t offset, uint32_t len) const
     {
         std::vector<std::string> out;

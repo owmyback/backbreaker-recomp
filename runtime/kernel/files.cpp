@@ -173,6 +173,22 @@ namespace
         return false;
     }
 
+    // The overlay for the archive at these host paths, or null: built at the first use. Under g_fsLock.
+    std::shared_ptr<const kernel::pack::Overlay> packAt(const fs::path& pkh, const fs::path& pkd)
+    {
+        if (g_discOverlay.empty())
+            return nullptr;
+        auto [it, fresh] = g_packs.try_emplace(pkh.string());
+        if (fresh)
+        {
+            std::vector<std::string> log;
+            it->second = kernel::pack::Overlay::build(pkh, pkd, g_discOverlay, log);
+            for (auto& line : log)
+                info("%s", line.c_str());
+        }
+        return it->second;
+    }
+
     // The overlay for a read-only .pkh or .pkd, or null. `index`: guest is the .pkh. Under g_fsLock.
     std::shared_ptr<const kernel::pack::Overlay> packFor(const std::string& guest, bool& index)
     {
@@ -187,15 +203,7 @@ namespace
         bool writableIndex = false, writableData = false;
         if (!resolve(stem + ".pkh", pkh, writableIndex) || !resolve(stem + ".pkd", pkd, writableData) || writableIndex || writableData)
             return nullptr;
-        auto [it, fresh] = g_packs.try_emplace(pkh.string());
-        if (fresh)
-        {
-            std::vector<std::string> log;
-            it->second = kernel::pack::Overlay::build(pkh, pkd, g_discOverlay, log);
-            for (auto& line : log)
-                info("%s", line.c_str());
-        }
-        return it->second;
+        return packAt(pkh, pkd);
     }
 
     // NtReadFile from an archive with replaced entries: into guest memory through a host buffer, as
@@ -358,6 +366,23 @@ namespace kernel
                 g_discOverlay = dir;
                 info("[mods] files in %s replace the disc's at the same path, and the archive's entries", dir.c_str());
             }
+    }
+
+    bool readArchiveEntry(const std::string& archive, const std::string& entry, std::string& out)
+    {
+        std::lock_guard guard(g_fsLock);
+        fs::path pkh, pkd;
+        bool writable = false;
+        if (!resolve(archive + ".pkh", pkh, writable) || !resolve(archive + ".pkd", pkd, writable))
+            return false;
+        return pack::readEntry(pkh, pkd, packAt(pkh, pkd).get(), entry, out);
+    }
+
+    bool readHostArchiveEntry(const std::string& archive, const std::string& entry, std::string& out)
+    {
+        std::lock_guard guard(g_fsLock);
+        const fs::path pkh = archive + ".pkh", pkd = archive + ".pkd";
+        return pack::readEntry(pkh, pkd, packAt(pkh, pkd).get(), entry, out);
     }
 
     void removeMount(const std::string& devicePrefix)

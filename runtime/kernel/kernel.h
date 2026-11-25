@@ -21,6 +21,12 @@ namespace kernel
                         const std::string& updateRoot = {});
     // The mods folder (#134): a file in dir replaces the disc's file at the same path. After initFileSystem.
     void setDiscOverlay(const std::string& dir);
+    // One entry of a game archive (.pkh + .pkd), as the game reads it: with the mods folder's
+    // replacement when there is one. `archive` is the guest path without its extension
+    // ("game:\\packedfilesx360\\PackedOutputX360"), or for readHostArchiveEntry a host path
+    // without one, for an archive that isn't mounted. False when the archive or the entry isn't there.
+    bool readArchiveEntry(const std::string& archive, const std::string& entry, std::string& out);
+    bool readHostArchiveEntry(const std::string& archive, const std::string& entry, std::string& out);
     // Achievements (xam_achievements.cpp): reads the title's list from the loaded image and the
     // unlocks earned so far from dir (game/achievements). After the image and XEX header load.
     void initAchievements(const std::string& dir);

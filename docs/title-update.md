@@ -36,6 +36,14 @@ the installer once, and the shortcuts start that version from then on.
 Building takes about as long as installing did: half a minute on a fast PC, a few minutes on a Steam
 Deck. Saves, settings and mods are shared by both versions.
 
+**A season carries over, its audibles too.** A Season or Road to Backbreaker save keeps each team's
+audibles as play numbers, and the update numbers its plays differently: it has more of them, in
+another order. The game's own loading code doesn't allow for that, so a season started on the
+disc's version came up in the update with offensive plays as every team's defensive audibles. The
+game here renumbers a save's audibles when the other version made it, either way round ("Play
+numbers in saves" below). On the disc's version, an audible that is one of the update's new plays
+becomes the team's default one.
+
 **To go back to the disc's version,** take the package out of the update folder and start the game
 through the installer. Both versions stay built, so switching either way takes about a second. While a package is in the
 folder that can't be used (another game's, a damaged copy), the installer says so and starts the
@@ -130,6 +138,38 @@ The runtime's source is the same for both. Where it knows the game by address,
 - **Everything else** (a global's address, a return address inside a function, an offset in a
   structure that grew) is written `BB_EXE(disc, tu2)` where it is used.
 
+### Play numbers in saves
+
+The game numbers its plays as it loads them at boot: the files listed in
+`media\PlayDatabase\Offensive_Plays.xml` from 0, then `Defensive_Plays.xml`'s, then
+`Special_Plays.xml`'s. The update's archive has its own two lists, so the numbers differ:
+
+| | Disc | Title Update #2 |
+|---|---|---|
+| Offensive plays | 0-78 | 0-137 |
+| Defensive plays | 79-135 | 138-237 |
+| Special plays | 136-147 | 238-249 |
+
+A league save (Season, Road to Backbreaker) keeps each team's eight audibles as those numbers, and
+the two functions that read them back are the same code in both versions: look the number up, give
+the team that play. So the disc's 81 (Inferno, a defensive audible) is FB Power in the update.
+
+`runtime/saved_audibles.cpp` notes the numbers a loader reads and, when it is done, checks each
+team's against this version's lists (`runtime/play_numbers.cpp`): a defensive audible that isn't
+one of its defensive plays, or an offensive one that isn't one of its offensive plays, can only
+have been numbered by the other version, and the defensive ranges above don't overlap, so a save
+from the other version always shows. Such a team's audibles are renumbered by play file, through
+both versions' lists as the game reads them (with the mods folder's replacements). Where this
+version doesn't have the play, or the other version's lists aren't there (the disc's version with
+the update's files gone from `game/extracted/tu2`), the audible is the team's default, the one the
+game gives a new team. The log says what was done:
+
+    [saves] 56 team(s) in this save had audibles numbered by the disc's play list: 448 renumbered for this version's, 0 set to the team's default
+
+The next save then holds this version's numbers, and the other version renumbers them back when it
+loads it. Audibles are the only play numbers the two loaders read; whether a save holds anything
+else that differs between the versions hasn't been looked into.
+
 ## Regenerating the generated parts
 
 The switch tables and the function list in `config/backbreaker_tu2.toml`, as `scripts/setup.sh
@@ -188,7 +228,20 @@ The installer, the same day, in scratch install folders with an update folder of
   same `title-update` (27 s), `play` on the update, the package taken out (the disc's version) and
   put back, headless each time; and the package dropped on the program with nothing installed.
 
-Not checked yet: the play-lock fix (Training Camp's passing drills) and the Tackle Alley fix at 60
-fps, whose addresses and offsets were carried over by reading the code, not by playing them; the
-achievements; a whole match; a real Windows PC; a Steam Deck; RecompLauncher starting a game with a
-package in the folder.
+A save's audibles (`runtime/saved_audibles.cpp`), the same day, headless, with copies of a Road to
+Backbreaker save the disc's version made (56 teams, their audibles the game's defaults) and of the
+same save with its audibles written in the update's numbers, each loaded from the Leagues menu:
+
+- The update, before the fix: every team's defensive audibles were offensive plays (FB Power, PA
+  Pitch Slant, HB Screen), its offensive ones other offensive plays.
+- The update with the disc's save: 448 audibles renumbered, and every team has the plays the disc's
+  version shows for it. With the update-numbered save: nothing changed, the same plays.
+- The disc's version with its own save: nothing changed. With the update-numbered save: 448
+  renumbered, the same plays as with its own. With one audible set to a play only the update has:
+  447 renumbered and that one the team's default.
+
+Not checked yet: a Season save (the other of the two loaders, the same sequence by reading it);
+calling a renumbered audible in a match; the play-lock fix (Training Camp's passing drills) and the
+Tackle Alley fix at 60 fps, whose addresses and offsets were carried over by reading the code, not
+by playing them; the achievements; a whole match; a real Windows PC; a Steam Deck; RecompLauncher
+starting a game with a package in the folder.

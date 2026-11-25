@@ -205,9 +205,17 @@ see when one fails:
 
 Archive entries replaced from the mods folder (`runtime/kernel/pack_overlay.cpp`, #169), on archives
 the test makes up: the rewritten index, the appended data and reads across it, case-insensitive
-names, both byte orders, and an index that doesn't parse:
+names, both byte orders, an index that doesn't parse, and one entry read back with and without a
+replacement:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/pack_overlay_test.cpp runtime/kernel/pack_overlay.cpp -o build/pack_overlay_test && build/pack_overlay_test
+
+Play numbers (`runtime/play_numbers.cpp`): a league save keeps each team's audibles as play numbers,
+which mean other plays in Title Update 2 than on the disc. On play lists the test makes up: reading
+a list, the same play's number in the other version, telling a save from the other version, and
+renumbering its audibles, with plays only one version has:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/play_numbers_test.cpp runtime/play_numbers.cpp -o build/play_numbers_test && build/play_numbers_test
 
 The text-entry panel that stands in for the console's on-screen keyboard
 (`runtime/video/text_entry.h`): its grid of keys, the selection going around the edges, the game's

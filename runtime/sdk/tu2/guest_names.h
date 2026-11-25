@@ -3,8 +3,18 @@
 // update's, where the same function is. "by hand": paired by reading both, not by the matcher.
 #pragma once
 
+#define sub_82150000 sub_82150000 // same; saved_audibles.cpp
+#define __imp__sub_82150000 __imp__sub_82150000
+#define sub_82150210 sub_82150210 // same; saved_audibles.cpp
+#define __imp__sub_82150210 __imp__sub_82150210
+#define sub_821503A8 sub_821503A8 // same; saved_audibles.cpp
+#define __imp__sub_821503A8 __imp__sub_821503A8
 #define sub_8215B710 sub_8215B778 // changed; tackle_alley.cpp
 #define __imp__sub_8215B710 __imp__sub_8215B778
+#define sub_8223E118 sub_8223EAB0 // same; saved_audibles.cpp
+#define __imp__sub_8223E118 __imp__sub_8223EAB0
+#define sub_8223E150 sub_8223EAE8 // same; saved_audibles.cpp
+#define __imp__sub_8223E150 __imp__sub_8223EAE8
 #define sub_8226AE10 sub_8226C990 // same; tackle_alley.cpp
 #define __imp__sub_8226AE10 __imp__sub_8226C990
 #define sub_8226AE80 sub_8226C9A8 // same; tackle_alley.cpp
@@ -19,8 +29,12 @@
 #define __imp__sub_82278F08 __imp__sub_8227A9E0
 #define sub_822813A0 sub_82283420 // changed; intro_movies.cpp
 #define __imp__sub_822813A0 __imp__sub_82283420
+#define sub_82292AF8 sub_82294CF0 // same; saved_audibles.cpp
+#define __imp__sub_82292AF8 __imp__sub_82294CF0
 #define sub_82323D28 sub_823289B0 // same; play_lock.cpp
 #define __imp__sub_82323D28 __imp__sub_823289B0
+#define sub_82329B40 sub_8232E7D0 // same; saved_audibles.cpp
+#define __imp__sub_82329B40 __imp__sub_8232E7D0
 #define sub_8232FA50 sub_82334910 // changed; play_lock.cpp
 #define __imp__sub_8232FA50 __imp__sub_82334910
 #define sub_8236E8D0 sub_82374AB0 // changed; play_lock.cpp
@@ -31,6 +45,8 @@
 #define __imp__sub_8237E7F8 __imp__sub_82385BF0
 #define sub_82381928 sub_82388D20 // same; scene_size.cpp
 #define __imp__sub_82381928 __imp__sub_82388D20
+#define sub_823A9FC0 sub_823B3DD0 // same; saved_audibles.cpp
+#define __imp__sub_823A9FC0 __imp__sub_823B3DD0
 #define sub_823C7858 sub_823D1D40 // changed; tackle_alley.cpp
 #define __imp__sub_823C7858 __imp__sub_823D1D40
 #define sub_823DBCD0 sub_823E67A8 // changed; play_lock.cpp
