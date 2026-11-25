@@ -42,7 +42,9 @@ namespace video
         // ---- Published by the guest (command processor thread) ----
         std::atomic<uint64_t> g_frameNumber{0};
         std::atomic<uint32_t> g_front{0}, g_width{0}, g_height{0};
-        // ---- Published by the renderer (same thread as above, before publishFrame) ----
+        // ---- Published by the renderer (same thread as above, before publishFrame: its frame
+        // number is never behind g_frameNumber while it produces the frames, and for a moment at
+        // each swap one ahead) ----
         std::atomic<uint64_t> g_renderedFrame{0}, g_renderedImage{0};
         std::atomic<uint32_t> g_renderedWidth{0}, g_renderedHeight{0};
         vkctx::Context* g_ctx = nullptr;
@@ -525,9 +527,17 @@ namespace video
             g_presentedFrame = frame;
             uint32_t front = g_front.load(), width = g_width.load(), height = g_height.load();
             // Did the renderer produce this frame? Then show its image instead of the raw copy.
+            // The renderer publishes its frame before the guest's number goes up (onSwap, then
+            // publishFrame, on one thread), so between the two it is one ahead of `frame`: still
+            // its picture, and the newest there is. Asking for the same number here took the raw
+            // copy whenever a present fell into that gap, and during a match the front buffer's
+            // memory is black with a few rows of stale pixels across the middle: one refresh of
+            // black and "static". The gap is a microsecond, tens of them on the frames the
+            // renderer prunes its geometry cache, and a 240 Hz display looks four times a game
+            // frame: there it showed every minute or two (#167's flashing lines look like it too).
             VkImage rendered = VK_NULL_HANDLE;
             uint32_t renderedWidth = 0, renderedHeight = 0;
-            if (frame && g_renderedFrame.load(std::memory_order_acquire) == frame)
+            if (frame && g_renderedFrame.load(std::memory_order_acquire) >= frame)
             {
                 rendered = VkImage(g_renderedImage.load());
                 renderedWidth = g_renderedWidth.load();
