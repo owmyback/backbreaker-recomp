@@ -118,11 +118,23 @@ else()
     list(REMOVE_ITEM RUNTIME_SOURCES ${WINDOWS_ONLY_SOURCES})
 endif()
 add_library(backbreaker_runtime STATIC ${RUNTIME_SOURCES})
-target_include_directories(backbreaker_runtime PRIVATE ${CMAKE_SOURCE_DIR}/runtime
-    ${RUNTIME_SDK} ${XENON}/XenonUtils ${XENON}/thirdparty/simde)
-# guest_exe.h first in every source: the guest function names and BB_EXE() for this executable
+target_include_directories(backbreaker_runtime PRIVATE ${RUNTIME_SDK})
 target_compile_definitions(backbreaker_runtime PRIVATE ${EXECUTABLE_DEFINITIONS})
-target_compile_options(backbreaker_runtime PRIVATE -include ${CMAKE_SOURCE_DIR}/runtime/guest_exe.h)
+set(RUNTIME_TARGETS backbreaker_runtime)
+# The runtime kit (BB_RUNTIME_ONLY) carries the runtime for the title update's executable as well,
+# so the installer can build either game on the player's machine (installer/title_update.h): the
+# same sources, compiled for the other layout and addresses.
+if (BB_RUNTIME_ONLY AND BB_EXECUTABLE STREQUAL "disc")
+    add_library(backbreaker_runtime_tu2 STATIC ${RUNTIME_SOURCES})
+    target_include_directories(backbreaker_runtime_tu2 PRIVATE ${CMAKE_SOURCE_DIR}/runtime/sdk/tu2 ${CMAKE_SOURCE_DIR}/runtime/sdk)
+    target_compile_definitions(backbreaker_runtime_tu2 PRIVATE BB_TU2=1)
+    list(APPEND RUNTIME_TARGETS backbreaker_runtime_tu2)
+endif()
+foreach (runtime IN LISTS RUNTIME_TARGETS)
+    target_include_directories(${runtime} PRIVATE ${CMAKE_SOURCE_DIR}/runtime ${XENON}/XenonUtils ${XENON}/thirdparty/simde)
+    # guest_exe.h first in every source: the guest function names and BB_EXE() for this executable
+    target_compile_options(${runtime} PRIVATE -include ${CMAKE_SOURCE_DIR}/runtime/guest_exe.h)
+endforeach()
 
 # Build identity (issue #75): which source a binary came from, printed at startup, in the window
 # title, in every capture's summary.txt and by --version. cmake/git_version.cmake regenerates the
@@ -134,9 +146,11 @@ add_custom_target(build_version ALL
             -DOUT=${BUILD_VERSION_HEADER} -P ${CMAKE_SOURCE_DIR}/cmake/git_version.cmake
     BYPRODUCTS ${BUILD_VERSION_HEADER}
     COMMENT "build identity (git)")
-add_dependencies(backbreaker_runtime build_version)
-target_include_directories(backbreaker_runtime PRIVATE ${CMAKE_BINARY_DIR}/generated)
-target_compile_options(backbreaker_runtime PRIVATE ${RUNTIME_FLAGS})
+foreach (runtime IN LISTS RUNTIME_TARGETS)
+    add_dependencies(${runtime} build_version)
+    target_include_directories(${runtime} PRIVATE ${CMAKE_BINARY_DIR}/generated)
+    target_compile_options(${runtime} PRIVATE ${RUNTIME_FLAGS})
+endforeach()
 # The CPU check runs before anything built for x86-64-v3 can, so it is built for baseline x86-64
 # (the later -march wins) and reports a missing instruction set instead of crashing (#134)
 set_source_files_properties(${CMAKE_SOURCE_DIR}/runtime/cpu_check.cpp PROPERTIES COMPILE_OPTIONS "-march=x86-64")
@@ -150,7 +164,9 @@ option(BB_PORTABLE "Link SDL3, shaderc and the C++ runtime statically (scripts/s
 if (BB_PORTABLE)
     find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3-static)
     find_library(SHADERC_COMBINED shaderc_combined REQUIRED)
-    target_link_libraries(backbreaker_runtime PUBLIC Vulkan::Vulkan SDL3::SDL3-static ${SHADERC_COMBINED})
+    foreach (runtime IN LISTS RUNTIME_TARGETS)
+        target_link_libraries(${runtime} PUBLIC Vulkan::Vulkan SDL3::SDL3-static ${SHADERC_COMBINED})
+    endforeach()
     set(GAME_LINK_OPTIONS -static-libstdc++ -static-libgcc)
     set(KIT_STATIC_LIBS $<TARGET_FILE:SDL3::SDL3-static> ${SHADERC_COMBINED})
     if (WIN32)
@@ -166,7 +182,9 @@ if (BB_PORTABLE)
     endif()
 else()
     find_package(SDL3 REQUIRED CONFIG COMPONENTS SDL3)
-    target_link_libraries(backbreaker_runtime PUBLIC Vulkan::Vulkan SDL3::SDL3 shaderc_shared)
+    foreach (runtime IN LISTS RUNTIME_TARGETS)
+        target_link_libraries(${runtime} PUBLIC Vulkan::Vulkan SDL3::SDL3 shaderc_shared)
+    endforeach()
     set(GAME_LINK_OPTIONS)
     set(KIT_STATIC_LIBS)
     set(KIT_LINK -lvulkan -lSDL3 -lshaderc_shared)
@@ -177,9 +195,11 @@ endif()
 # play as silence.
 set(FFMPEG_XMA ${CMAKE_SOURCE_DIR}/third_party/ffmpeg-xma CACHE PATH "The XMA decoder's install prefix (scripts/build_xma_decoder.sh --prefix)")
 if (EXISTS ${FFMPEG_XMA}/lib/libavcodec.a AND EXISTS ${FFMPEG_XMA}/lib/libavutil.a)
-    target_include_directories(backbreaker_runtime PRIVATE ${FFMPEG_XMA}/include)
-    target_compile_definitions(backbreaker_runtime PRIVATE BB_XMA_DECODER=1)
-    target_link_libraries(backbreaker_runtime PUBLIC ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a m)
+    foreach (runtime IN LISTS RUNTIME_TARGETS)
+        target_include_directories(${runtime} PRIVATE ${FFMPEG_XMA}/include)
+        target_compile_definitions(${runtime} PRIVATE BB_XMA_DECODER=1)
+        target_link_libraries(${runtime} PUBLIC ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a m)
+    endforeach()
     list(APPEND KIT_STATIC_LIBS ${FFMPEG_XMA}/lib/libavcodec.a ${FFMPEG_XMA}/lib/libavutil.a)
     list(APPEND KIT_LINK @KIT@/lib/libavcodec.a @KIT@/lib/libavutil.a)
     if (WIN32)
@@ -238,11 +258,14 @@ target_compile_options(xenos-translate PRIVATE -Wall)
 # --- The runtime kit (#138) ---------------------------------------------------------------------
 # Everything a machine with the player's ppc/ and import glue needs to link the game against this
 # runtime without building it:  cmake --install <build> --component runtime --prefix <kit>
-#   lib/                              libbackbreaker_runtime.a (+ the static libraries it links)
+#   lib/                              libbackbreaker_runtime.a (+ the static libraries it links), and
+#                                     libbackbreaker_runtime_tu2.a, the runtime for the title update's executable
 #   include/                          the headers ppc/ and the import glue are compiled with
 #   share/backbreaker-runtime/        version.txt, the runtime's ppc_config.h, and the compile and
 #                                     link arguments: one per line, @KIT@ = the kit's folder,
 #                                     @PPC@ = the player's ppc/, @GAME@ = the game's own objects
+#   share/backbreaker-runtime/tu2/    the title update's ppc_config.h and game-link.args (the compile
+#                                     arguments are the same for both)
 # packaging/installer/link_game.sh uses them. The kit holds no game content: only this repo's
 # runtime, its open-source libraries and simde's headers.
 set(KIT_SHARE share/backbreaker-runtime)
@@ -274,6 +297,15 @@ foreach (step ppc-compile imports-compile game-link)
     install(FILES ${CMAKE_BINARY_DIR}/kit-args/${step}.args DESTINATION ${KIT_SHARE} COMPONENT runtime)
 endforeach()
 install(TARGETS backbreaker_runtime ARCHIVE DESTINATION lib COMPONENT runtime)
+if (TARGET backbreaker_runtime_tu2)
+    set(tu2_link ${KIT_GAME_LINK})
+    list(TRANSFORM tu2_link REPLACE "libbackbreaker_runtime\\.a$" "libbackbreaker_runtime_tu2.a")
+    list(JOIN tu2_link "\n" text)
+    file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/kit-args/tu2/game-link.args CONTENT "${text}\n" NEWLINE_STYLE UNIX)
+    install(FILES ${CMAKE_BINARY_DIR}/kit-args/tu2/game-link.args ${CMAKE_SOURCE_DIR}/runtime/sdk/tu2/ppc_config.h
+        DESTINATION ${KIT_SHARE}/tu2 COMPONENT runtime)
+    install(TARGETS backbreaker_runtime_tu2 ARCHIVE DESTINATION lib COMPONENT runtime)
+endif()
 if (WIN32)
     # The game's manifest (runtime/windows/backbreaker.manifest: the UTF-8 code page its file calls
     # rely on) as an object the installer links in, made with the same windres as the CMake build's
@@ -304,7 +336,8 @@ install(SCRIPT cmake/kit_version.cmake COMPONENT runtime)
 # tools/xdvdfs.py, xex_decrypt.py, gen_imports.py and title_icon.py do, without Python or OpenSSL.
 # Builds without game files, SDL3 or Vulkan; the kernel's export tables come from XenonUtils/xbox/.
 set(INSTALLER_SOURCES installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp
-    installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp installer/platform.cpp)
+    installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp installer/platform.cpp
+    installer/title_update.cpp)
 add_executable(backbreaker-installer installer/main.cpp ${INSTALLER_SOURCES})
 target_include_directories(backbreaker-installer PRIVATE ${XENON}/XenonUtils)
 target_compile_options(backbreaker-installer PRIVATE -Wall -Wextra)

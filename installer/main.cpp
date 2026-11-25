@@ -10,6 +10,7 @@
 #include "menu_entry.h"
 #include "platform.h"
 #include "steam_shortcut.h"
+#include "title_update.h"
 #include "xex.h"
 
 #include <cctype>
@@ -88,6 +89,9 @@ namespace
         "  install <image> [options]         check, copy the game's files, build the game\n"
         "  play [options] [-- <game options>]  build what changed (a new runtime relinks in seconds), start the game\n"
         "  rebuild [options]                 translate, compile and link again\n"
+        "  title-update <package> [options]  Title Update 2 from your copy of its package (TU_134U1UQ_...): kept in\n"
+        "                                    the update folder, and the game built with it. Take the package out\n"
+        "                                    of that folder to go back to the disc's version.\n"
         "  add-to-steam [--prefix <dir>]     Backbreaker in Steam's library, with its icon (close Steam first)\n"
         "  ppc-inputs [--bundle <dir>]       a hash of what this bundle translates and compiles the game with\n"
         "options: --prefix <dir>   where the game is installed (default: "
@@ -100,6 +104,13 @@ namespace
         "         --jobs <n>       parallel compiles (default: by CPU threads and free memory)\n"
         "         --progress       'progress <0-1> <step>' lines for a launcher\n"
         "         --bundle <dir>   the toolchain, runtime kit and XenonRecomp (default: beside this program)\n"
+        "         --update-dir <dir>  the update folder (default: "
+#ifdef _WIN32
+        "%LOCALAPPDATA%\\backbreaker-recomp\\update"
+#else
+        "~/.local/share/backbreaker-recomp/update"
+#endif
+        ")\n"
 #ifdef _WIN32
         "         --no-menu-entry  install: no Backbreaker in the Start menu (--progress never adds one)\n"
 #else
@@ -541,6 +552,7 @@ namespace
     struct Options
     {
         std::string image, prefix, bundle;
+        std::string updateDir; // --update-dir, else updateFolder()
         unsigned jobs = 0;
         bool progress = false;
         bool menuEntry = true; // install: --no-menu-entry
@@ -559,18 +571,46 @@ namespace
             if (s == "--progress") o.progress = true;
             else if (s == "--no-menu-entry" && wantImage) o.menuEntry = false;
             else if (s == "--no-steam" && wantImage) o.steam = false;
-            else if ((s == "--prefix" || s == "--bundle" || s == "--jobs") && i + 1 < a.size()) {
+            else if ((s == "--prefix" || s == "--bundle" || s == "--jobs" || s == "--update-dir") && i + 1 < a.size()) {
                 const std::string& v = a[++i];
                 if (s == "--prefix") o.prefix = v;
                 else if (s == "--bundle") o.bundle = v;
+                else if (s == "--update-dir") o.updateDir = v;
                 else o.jobs = unsigned(std::strtoul(v.c_str(), nullptr, 10));
             } else if (wantImage && o.image.empty() && s.rfind("--", 0) != 0) o.image = s;
             else return false;
         }
         if (o.prefix.empty()) o.prefix = defaultPrefix();
+        if (o.updateDir.empty()) o.updateDir = updateFolder();
         std::error_code ec;
         o.prefix = std::filesystem::absolute(o.prefix, ec).lexically_normal().string();
+        o.updateDir = std::filesystem::absolute(o.updateDir, ec).lexically_normal().string();
         return !wantImage || !o.image.empty();
+    }
+
+    // Which executable the game is built from: the one patched with Title Update 2 while the
+    // update's package is in the update folder (installer/title_update.h), the disc's otherwise.
+    // A package that can't be used is said so, and the disc's version is built.
+    bool useTitleUpdate(const Options& o, const Bundle& bundle)
+    {
+        // The folder is made here, so a player looking for where the package goes finds it
+        std::error_code ec;
+        std::filesystem::create_directories(o.updateDir, ec);
+        const UpdateResult r = syncTitleUpdate(o.updateDir, o.prefix + "/game");
+        if (r.status == UpdateStatus::None) return false;
+        if (r.status == UpdateStatus::Unusable) {
+            std::fprintf(stderr, "backbreaker-installer: the title update isn't used: %s\n", r.message.c_str());
+            return false;
+        }
+        if (!bundleHasTitleUpdate(bundle)) {
+            std::fprintf(stderr, "backbreaker-installer: the title update isn't used: this installer's bundle has no support for it\n");
+            return false;
+        }
+        if (r.extracted) {
+            std::printf("[installer] %s found in %s\n", r.message.c_str(), nativePath(o.updateDir).c_str());
+            std::fflush(stdout);
+        }
+        return true;
     }
 
     int build(const Options& o, BuildOptions bo, const ProgressFn& progress, double from)
@@ -580,6 +620,7 @@ namespace
         if (!findBundle(o.bundle, bundle, error)) return fail(kFailed, error);
         bo.prefix = o.prefix;
         bo.jobs = o.jobs;
+        bo.titleUpdate = useTitleUpdate(o, bundle);
         if (buildGame(bundle, bo, progress, from, 1.0, error) == BuildResult::Failed) return fail(kBuildFailed, error);
         return kOk;
     }
@@ -626,6 +667,42 @@ namespace
         bo.recompile = true;
         bo.relink = true;
         return build(o, bo, makeProgress(o.progress), 0.0);
+    }
+
+    // The update's package into the update folder, and the game built with it when it is installed
+    int cmdTitleUpdate(const Options& o)
+    {
+        namespace fs = std::filesystem;
+        std::vector<uint8_t> patch, index, data;
+        std::string error;
+        // o.image is the package here. Its path is not printed, as the disc image's isn't.
+        if (!readTitleUpdate(o.image, patch, index, data, error))
+            return fail(kDamaged, "the file " + error + ". The update's package is the file Xbox Live delivered, " +
+                                      "TU_134U1UQ_0000008000000.00000000000G2, 4,108,288 bytes.");
+        std::error_code ec;
+        fs::create_directories(o.updateDir, ec);
+        const fs::path to = fs::path(o.updateDir) / fs::path(o.image).filename();
+        if (!fs::equivalent(o.image, to, ec)) {
+            fs::copy_file(o.image, to, fs::copy_options::overwrite_existing, ec);
+            if (ec) return fail(kFailed, "can't copy the package into " + o.updateDir + " (" + ec.message() + ")");
+        }
+        std::printf("[installer] Title Update 2 is in %s; take it out of that folder to go back to the disc's version\n",
+                    nativePath(o.updateDir).c_str());
+        if (!fs::exists(o.prefix + "/game/.complete", ec)) {
+            std::printf("[installer] the game isn't installed in %s yet: the update is used once it is (%s install <your disc image>%s)\n",
+                        o.prefix.c_str(), selfCommand().c_str(), prefixOption(o.prefix).c_str());
+            return kOk;
+        }
+        InstallLock lock;
+        if (!lock.acquire(o.prefix, error)) return fail(kFailed, error);
+        Bundle bundle;
+        if (!findBundle(o.bundle, bundle, error)) return fail(kFailed, error);
+        if (!bundleHasTitleUpdate(bundle)) return fail(kFailed, "this installer's bundle has no support for the title update");
+        if (int rc = build(o, {}, makeProgress(o.progress), 0.0)) return rc;
+        if (!o.progress)
+            std::printf("[installer] the game is built with Title Update 2. Start it with: %s play%s\n", selfCommand().c_str(),
+                        prefixOption(o.prefix).c_str());
+        return kOk;
     }
 
     int cmdAddToSteam(const Options& o)
@@ -743,6 +820,7 @@ int main(int argc, char** argv)
     if (c == "install" && parseOptions(a, true, o)) return cmdInstall(o);
     if (c == "play" && parseOptions(a, false, o)) return cmdPlay(o);
     if (c == "rebuild" && parseOptions(a, false, o)) return cmdRebuild(o);
+    if (c == "title-update" && parseOptions(a, true, o) && o.gameArgs.empty()) return cmdTitleUpdate(o);
     if (c == "add-to-steam" && parseOptions(a, false, o) && o.gameArgs.empty()) return cmdAddToSteam(o);
     if (c == "ppc-inputs" && parseOptions(a, false, o) && o.gameArgs.empty()) return cmdPpcInputs(o);
 #ifdef _WIN32
@@ -750,7 +828,8 @@ int main(int argc, char** argv)
     // like `install <image>`, and the console window Explorer opened stays up for the result.
     std::error_code ec;
     if (a.size() == 1 && std::filesystem::is_regular_file(a[0], ec) && parseOptions({"install", a[0]}, true, o)) {
-        const int rc = cmdInstall(o);
+        // ... or the title update's package, dropped the same way
+        const int rc = looksLikeStfs(a[0]) ? cmdTitleUpdate(o) : cmdInstall(o);
         if (platform::ownsConsole()) {
             std::fprintf(stderr, "\nPress Enter to close this window.");
             std::getchar();

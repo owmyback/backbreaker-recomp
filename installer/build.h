@@ -5,7 +5,8 @@
 // (packaging/installer/build_installer.sh), next to the program:
 //   <bundle>/kit/           the runtime kit (CMakeLists.txt, "The runtime kit")
 //   <bundle>/xenonrecomp/   XenonRecomp (built with patches/) and its ppc_context.h
-//   <bundle>/config/        config/backbreaker.toml and the switch tables
+//   <bundle>/config/        config/backbreaker.toml and the switch tables, and the title update's
+//                           backbreaker_tu2.toml and switch tables
 //   <bundle>/toolchain/     clang, lld and their libraries
 //   <bundle>/sysroot/       Ubuntu 22.04's glibc, libstdc++ and Vulkan loader for linking (glibc 2.35 floor)
 // and the install folder (by default ~/.local/share/backbreaker-recomp/install) gets the checkout's
@@ -43,6 +44,9 @@ namespace installer
     // only relinks; the release workflow compares it with the last release's (#160), since
     // RecompLauncher reruns `install` only when prepare.version changes.
     std::string bundlePpcInputs(const Bundle& bundle);
+    // Does the bundle have what the title update's build needs (its config, and the kit's runtime
+    // for the patched executable)? One made before the update was supported doesn't.
+    bool bundleHasTitleUpdate(const Bundle& bundle);
 
     // $XDG_DATA_HOME when absolute (as the specification says), else ~/.local/share; %LOCALAPPDATA% on Windows
     std::string dataHome();
@@ -58,6 +62,10 @@ namespace installer
         unsigned jobs = 0;     // 0: chooseJobs()
         bool recompile = false; // run XenonRecomp and compile ppc/ again even when current
         bool relink = false;    // link again even when current
+        // Build from the executable patched with Title Update 2 (installer/title_update.h), whose
+        // files are in <prefix>/game/extracted/tu2: ppc-tu2/ and obj-tu2/ instead of ppc/ and obj/.
+        // The program is the same file either way, the variant linked last.
+        bool titleUpdate = false;
     };
 
     enum class BuildResult { UpToDate, Relinked, Rebuilt, Failed };

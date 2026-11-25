@@ -78,12 +78,13 @@ install -m 644 $XENON/XenonUtils/ppc_context.h "$B/xenonrecomp/"
     echo "XenonRecomp $(git -C $XENON rev-parse HEAD)"
     echo "patches/xenonrecomp-backbreaker-instructions.patch $(sha256sum patches/xenonrecomp-backbreaker-instructions.patch | cut -d' ' -f1)"
 } >"$B/xenonrecomp/SOURCE"
-install -m 644 config/backbreaker.toml config/backbreaker_switch_tables.toml "$B/config/"
+install -m 644 config/backbreaker.toml config/backbreaker_switch_tables.toml \
+    config/backbreaker_tu2.toml config/backbreaker_tu2_switch_tables.toml "$B/config/"
 
 say "the runtime kit and the installer (BB_PORTABLE, no game files)"
 cmake -S . -B $OUT/build -G Ninja -DCMAKE_TOOLCHAIN_FILE="$REPO/cmake/llvm-mingw.cmake" -DBB_PORTABLE=ON \
     -DBB_RUNTIME_ONLY=ON -DFFMPEG_XMA="$REPO/third_party/win64/ffmpeg-xma" >/dev/null
-ninja -C $OUT/build -j "$jobs" backbreaker_runtime backbreaker-installer >/dev/null
+ninja -C $OUT/build -j "$jobs" backbreaker_runtime backbreaker_runtime_tu2 backbreaker-installer >/dev/null
 cmake --install $OUT/build --component runtime --prefix "$B/kit" >/dev/null
 install -m 755 $OUT/build/backbreaker-installer.exe "$STAGE/Backbreaker-Recompiled.exe"
 $LM/bin/x86_64-w64-mingw32-strip "$STAGE/Backbreaker-Recompiled.exe"

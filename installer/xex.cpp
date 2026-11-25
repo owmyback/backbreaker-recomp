@@ -119,6 +119,16 @@ namespace installer
             error = "default.xex has no readable file format header: the image is damaged";
             return false;
         }
+        if (encryption == 0 && compression == 0) {
+            // What XenonRecomp writes after applying a title update's patch: the image as it is,
+            // after the headers
+            if (peOffset + 2 > data_.size() || data_[peOffset] != 'M' || data_[peOffset + 1] != 'Z') {
+                error = "the patched executable has no program after its headers";
+                return false;
+            }
+            pe.assign(data_.begin() + peOffset, data_.end());
+            return true;
+        }
         if (encryption > 1 || compression != 1) {
             error = "default.xex is stored in a way this installer doesn't handle (encryption " + std::to_string(encryption) +
                     ", compression " + std::to_string(compression) + "): not the retail disc's executable";

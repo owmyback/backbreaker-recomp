@@ -116,6 +116,7 @@ jobs:
         run: |
           # The AppImage itself, unpacked to a temporary folder: a runner has no FUSE
           "$APPIMAGE" --appimage-extract-and-run --help | grep -q '^  add-to-steam '
+          "$APPIMAGE" --appimage-extract-and-run --help | grep -q '^  title-update '
           [ "$("$APPIMAGE" --appimage-extract-and-run ppc-inputs)" = "$(sed -n 's/^ppc inputs //p' "$MANIFEST")" ]
           # No extended attributes: with them, symlinks become inodes RecompLauncher's reader can't
           # read, and it ignores the manifest (build_installer.sh, -no-xattrs). The SquashFS starts
@@ -266,7 +267,8 @@ jobs:
           for f in Backbreaker-Recompiled.exe README.txt recomplauncher.json bundle/MANIFEST.txt bundle/NOTICES.txt bundle/toolchain/bin/clang++.exe \
             bundle/toolchain/bin/ld.lld.exe bundle/toolchain/include/stdio.h bundle/xenonrecomp/XenonRecomp.exe \
             bundle/xenonrecomp/ppc_context.h bundle/config/backbreaker.toml bundle/kit/lib/libbackbreaker_runtime.a \
-            bundle/kit/share/backbreaker-runtime/game-link.args; do
+            bundle/kit/share/backbreaker-runtime/game-link.args bundle/config/backbreaker_tu2.toml \
+            bundle/kit/lib/libbackbreaker_runtime_tu2.a bundle/kit/share/backbreaker-runtime/tu2/game-link.args; do
             grep -qx "Backbreaker-Recompiled-windows-x86_64/$f" <<<"$names" || { echo "::error::the zip has no $f"; exit 1; }
           done
           # RecompLauncher finds the manifest at the top of the zip's folder and runs the program by this name

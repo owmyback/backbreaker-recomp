@@ -4,16 +4,19 @@
 // The same code is checked byte for byte against the Python tools on a real disc (see the PR).
 // Also the applications-menu entry, and the Steam shortcut's shortcuts.vdf against files written
 // here byte by byte, with a temporary HOME and a made-up /proc (never the machine's own Steam).
+// And the title update's package reader (installer/title_update.h) on packages made here.
 // Build:
 //   clang++ -std=c++20 -Wall -Wextra -O2 -I third_party/XenonRecomp/XenonUtils tests/installer_test.cpp \
 //       installer/crypto.cpp installer/disc.cpp installer/xex.cpp installer/game_check.cpp \
-//       installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp -o build/installer_test
+//       installer/menu_entry.cpp installer/steam_shortcut.cpp installer/build.cpp installer/platform.cpp \
+//       installer/title_update.cpp -o build/installer_test
 #include "../installer/crypto.h"
 #include "../installer/disc.h"
 #include "../installer/build.h"
 #include "../installer/game_check.h"
 #include "../installer/menu_entry.h"
 #include "../installer/steam_shortcut.h"
+#include "../installer/title_update.h"
 #include "../installer/xex.h"
 
 #include <algorithm>
@@ -152,6 +155,56 @@ static std::vector<uint8_t> makeXex(uint32_t titleId, uint16_t encryption = 0)
     x.str("MZabcd");
     x.pad(0x210);
     return x.b;
+}
+
+// An STFS package (installer/title_update.h) with one hash table per group, as a title update has:
+// the file table in block 0, then each file's blocks as given, chained through the hash table.
+struct StfsFileSpec
+{
+    std::string name;
+    int parent;                   // an index into the files, -1 at the top
+    bool folder;
+    std::vector<uint32_t> blocks; // where its data goes, in order
+    std::vector<uint8_t> data;
+};
+
+static std::vector<uint8_t> makeStfs(uint32_t titleId, const std::vector<StfsFileSpec>& files, const char* magic = "LIVE")
+{
+    const size_t first = 0xB000; // header size 0xAD0E, rounded up to a block
+    uint32_t last = 0;
+    for (const auto& f : files)
+        for (uint32_t b : f.blocks) last = std::max(last, b);
+    std::vector<uint8_t> d(first + 0x1000 * (last + 2), 0);
+    auto be32 = [&](size_t at, uint32_t v) { for (int i = 0; i < 4; i++) d[at + i] = uint8_t(v >> (24 - 8 * i)); };
+    auto link = [&](uint32_t block, uint32_t next) {
+        const size_t o = first + block * 0x18;
+        d[o + 0x14] = 0x80;
+        d[o + 0x15] = uint8_t(next >> 16); d[o + 0x16] = uint8_t(next >> 8); d[o + 0x17] = uint8_t(next);
+    };
+    std::memcpy(d.data(), magic, 4);
+    be32(0x340, 0xAD0E);
+    be32(0x360, titleId);
+    const char name[] = "Test Update";
+    for (size_t i = 0; name[i]; i++) d[0x411 + 2 * i + 1] = uint8_t(name[i]);
+    d[0x379] = 0x24; d[0x37B] = 1; // the volume descriptor: its size, one hash table per group
+    d[0x37C] = 1;                  // the file table: one block, at block 0
+    link(0, 0xFFFFFF);
+    for (size_t i = 0; i < files.size(); i++) {
+        const StfsFileSpec& f = files[i];
+        uint8_t* e = &d[first + 0x1000 + i * 0x40];
+        std::memcpy(e, f.name.data(), f.name.size());
+        e[0x28] = uint8_t(f.name.size() | (f.folder ? 0x80 : 0));
+        e[0x29] = e[0x2C] = uint8_t(f.blocks.size());
+        if (!f.blocks.empty()) { e[0x2F] = uint8_t(f.blocks[0]); e[0x30] = uint8_t(f.blocks[0] >> 8); }
+        e[0x32] = uint8_t(uint16_t(f.parent) >> 8); e[0x33] = uint8_t(f.parent);
+        for (int k = 0; k < 4; k++) e[0x34 + k] = uint8_t(f.data.size() >> (24 - 8 * k));
+        for (size_t k = 0; k < f.blocks.size(); k++) {
+            const size_t at = k * 0x1000, n = std::min<size_t>(0x1000, f.data.size() - std::min(at, f.data.size()));
+            std::memcpy(&d[first + 0x1000 * (f.blocks[k] + 1)], f.data.data() + std::min(at, f.data.size()), n);
+            link(f.blocks[k], k + 1 < f.blocks.size() ? f.blocks[k + 1] : 0xFFFFFF);
+        }
+    }
+    return d;
 }
 
 static std::string tempDir()
@@ -650,6 +703,100 @@ int main()
         expect(bundlePpcInputs(b) != bySource, "a new config changes it");
         put(b.config + "/backbreaker.toml", "config");
         expect(bundlePpcInputs(b) == bySource, "and back again");
+        // The title update's parts are not the disc build's inputs: adding them rebuilds nothing
+        expect(!bundleHasTitleUpdate(b), "a bundle without the title update's parts");
+        put(b.config + "/backbreaker_tu2.toml", "update config");
+        put(b.config + "/backbreaker_tu2_switch_tables.toml", "update tables");
+        put(b.kit + "/share/backbreaker-runtime/tu2/game-link.args", "link");
+        expect(!bundleHasTitleUpdate(b), "... or with only some of them");
+        put(b.kit + "/share/backbreaker-runtime/tu2/ppc_config.h", "layout");
+        expect(bundleHasTitleUpdate(b), "a bundle with all of them");
+        expect(bundlePpcInputs(b) == bySource, "which leave the disc build's inputs as they were");
+    }
+
+    // --- The title update's package (installer/title_update.h) -----------------------------------
+    {
+        std::vector<uint8_t> big(0x1000 + 9);
+        for (size_t i = 0; i < big.size(); i++) big[i] = uint8_t(i * 7);
+        const std::vector<uint8_t> small{'s', 'e', 'c', 'o', 'n', 'd'};
+        // a.bin's two blocks are not next to each other: 1, then 3
+        const std::vector<StfsFileSpec> files{{"sub", -1, true, {}, {}}, {"a.bin", 0, false, {1, 3}, big}, {"B.txt", -1, false, {2}, small}};
+        StfsPackage p;
+        std::string error;
+        expect(p.parse(makeStfs(0x464F07DA, files), error), "an STFS package parses");
+        expect(p.titleId() == 0x464F07DA && p.displayName() == "Test Update", "its title ID and name");
+        expect(p.entries().size() == 3 && p.entries()[0].folder && p.entries()[1].path == "sub/a.bin" &&
+                   p.entries()[1].size == big.size() && p.entries()[2].path == "B.txt",
+               "its files, with their folder");
+        std::vector<uint8_t> out;
+        expect(p.find("SUB/A.BIN") && p.read(*p.find("SUB/A.BIN"), out, error) && out == big,
+               "a file whose blocks are apart is read through the hash table's chain");
+        expect(p.find("b.txt") && p.read(*p.find("b.txt"), out, error) && out == small, "a small file, found without regard to case");
+        expect(!p.find("sub") && !p.find("missing"), "a folder or a missing name is not a file");
+
+        StfsPackage bad;
+        std::vector<uint8_t> xexBytes = makeXex(0x464F07DA);
+        xexBytes.resize(0xA000);
+        expect(!bad.parse(xexBytes, error) && error.find("not an Xbox 360 package") != std::string::npos, "an executable is not a package");
+        std::vector<uint8_t> cut = makeStfs(0x464F07DA, files);
+        cut.resize(0xB000 + 0x1000 + 0x1800); // ends inside block 1
+        StfsPackage cutPackage;
+        expect(cutPackage.parse(cut, error) && !cutPackage.read(*cutPackage.find("sub/a.bin"), out, error) &&
+                   error.find("cut short") != std::string::npos,
+               "a file past the end of a cut-short package is an error, not a crash");
+        std::vector<uint8_t> loop = makeStfs(0x464F07DA, {{"x", 0, false, {1}, small}}); // its own parent
+        expect(StfsPackage().parse(loop, error) || !error.empty(), "an entry that is its own parent doesn't hang");
+
+        // Is it Title Update 2? Another game's package, one without the patch, one with another patch
+        const std::string updates = dir + "/update";
+        std::filesystem::create_directories(updates);
+        std::vector<uint8_t> patch, index, data;
+        writeFile(updates + "/other", makeStfs(0x12345678, files));
+        expect(looksLikeStfs(updates + "/other") && !readTitleUpdate(updates + "/other", patch, index, data, error) &&
+                   error.find("another game") != std::string::npos,
+               "another game's package is refused");
+        writeFile(updates + "/nopatch", makeStfs(0x464F07DA, files));
+        expect(!readTitleUpdate(updates + "/nopatch", patch, index, data, error) && error.find("without default.xexp") != std::string::npos,
+               "a Backbreaker package without the patch is refused");
+        const std::vector<StfsFileSpec> lookalike{{"default.xexp", -1, false, {1}, small},
+                                                  {"PatchPackedOutputX360.pkh", -1, false, {2}, small},
+                                                  {"PatchPackedOutputX360.pkd", -1, false, {3}, small}};
+        writeFile(updates + "/lookalike", makeStfs(0x464F07DA, lookalike));
+        expect(!readTitleUpdate(updates + "/lookalike", patch, index, data, error) && error.find("doesn't know") != std::string::npos,
+               "a package whose patch is not the known one is refused");
+        writeFile(updates + "/notes.txt", {'h', 'i'});
+        expect(!looksLikeStfs(updates + "/notes.txt") && !looksLikeStfs(updates + "/missing"), "other files are not packages");
+
+        // The update folder: nothing there, only other files, only packages that can't be used
+        const std::string game = dir + "/tu-game";
+        expect(syncTitleUpdate(dir + "/no-such-folder", game).status == UpdateStatus::None, "no update folder: the disc's version");
+        const std::string onlyNotes = dir + "/update-notes";
+        std::filesystem::create_directories(onlyNotes);
+        writeFile(onlyNotes + "/notes.txt", {'h', 'i'});
+        expect(syncTitleUpdate(onlyNotes, game).status == UpdateStatus::None, "a folder without a package: the disc's version");
+        const UpdateResult unusable = syncTitleUpdate(updates, game);
+        expect(unusable.status == UpdateStatus::Unusable && unusable.message.find("lookalike in the update folder") == 0 &&
+                   !std::filesystem::exists(game + "/extracted/tu2"),
+               "packages that can't be used: said so, by name, and nothing is written");
+    }
+
+    // --- The patched executable XenonRecomp writes: not encrypted, not compressed ----------------
+    {
+        Bytes x;
+        x.str("XEX2");
+        x.u32(0); x.u32(0x200); x.u32(0); x.u32(0x100); x.u32(1);
+        x.u32(0x3FF); x.u32(0x80);
+        x.pad(0x80);
+        x.u32(8); x.u16(0); x.u16(0); // no encryption, no compression
+        x.pad(0x200);
+        x.str("MZ, the image as it is");
+        Xex plain;
+        std::string error;
+        std::vector<uint8_t> pe;
+        expect(plain.parse(x.b, error) && plain.decryptToPe(pe, error) && std::string(pe.begin(), pe.end()) == "MZ, the image as it is",
+               "a plain XEX gives the bytes after its headers");
+        x.b[0x200] = 'X';
+        expect(plain.parse(x.b, error) && !plain.decryptToPe(pe, error), "... and is refused when no program is there");
     }
 
     std::filesystem::remove_all(dir);

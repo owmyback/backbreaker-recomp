@@ -121,6 +121,28 @@ namespace installer
             return true;
         }
 
+        // What differs between the two executables the game can be built from (docs/title-update.md).
+        // The update's build has folders of its own, so both stay compiled and switching only links;
+        // the program, bin/backbreaker, is whichever was linked last.
+        struct Variant
+        {
+            bool update;
+            const char* config;   // in <bundle>/config and, copied, <prefix>/config
+            const char* switches;
+            const char* xex;      // under <prefix>, what the import glue is made from
+            const char* pe;
+            const char* ppc;      // folders under <prefix>
+            const char* obj;
+            const char* share;    // under the kit's share/backbreaker-runtime: its layout and link arguments
+        };
+        const Variant kDisc{false, "backbreaker.toml", "backbreaker_switch_tables.toml", "/game/extracted/default.xex",
+                            "/game/extracted/default.pe", "/ppc", "/obj", ""};
+        const Variant kUpdate{true, "backbreaker_tu2.toml", "backbreaker_tu2_switch_tables.toml", "/game/extracted/tu2/default.xex",
+                              "/game/extracted/tu2/default.pe", "/ppc-tu2", "/obj-tu2", "/tu2"};
+        const char kUpdatePatch[] = "/game/extracted/tu2/default.xexp";
+
+        std::string kitShare(const Bundle& b, const Variant& v = kDisc) { return b.kit + "/share/backbreaker-runtime" + v.share; }
+
         struct Stamp
         {
             std::string ppc, link;
@@ -145,10 +167,26 @@ namespace installer
             fs::rename(path + ".tmp", path, ec);
         }
 
-        // ppc/ depends on the bundle's part (bundlePpcInputs) and the player's executable
-        std::string ppcInputs(const Bundle& b, const std::string& prefix)
+        // What the bundle gives a variant's ppc/: bundlePpcInputs for the disc's, which the release
+        // workflow compares between releases, and the same with the update's config for the update's
+        std::string bundleInputs(const Bundle& b, const Variant& v)
         {
-            return textHash(bundlePpcInputs(b) + "\n" + fileHash(prefix + "/game/extracted/default.xex") + "\n");
+            std::error_code ec;
+            std::string all;
+            for (const std::string& f : {fs::exists(b.xenonRecompSource, ec) ? b.xenonRecompSource : b.xenonRecomp,
+                                         b.ppcContext, b.config + "/" + v.config, b.config + "/" + v.switches,
+                                         kitShare(b) + "/ppc-compile.args", b.kit + "/include/ppc_hooks.h"})
+                all += fileHash(f) + "\n";
+            for (const std::string& f : kPpcExtraFlags) all += f + "\n";
+            return textHash(all);
+        }
+
+        // ppc/ depends on the bundle's part and the player's executable; the update's on its patch too
+        std::string ppcInputs(const Bundle& b, const std::string& prefix, const Variant& v)
+        {
+            std::string all = bundleInputs(b, v) + "\n" + fileHash(prefix + "/game/extracted/default.xex") + "\n";
+            if (v.update) all += fileHash(prefix + kUpdatePatch) + "\n";
+            return textHash(all);
         }
 
         // The link depends on every file of the kit (by name, size and time: a new bundle has new
@@ -191,18 +229,45 @@ namespace installer
 
         // XenonRecomp into <prefix>/ppc, with the config copied beside the game files: its paths
         // are relative to the config's folder (file_path = "../game/extracted/default.xex")
-        bool recompile(const Bundle& b, const std::string& prefix, std::string& error)
+        // For the update, XenonRecomp first applies the update's patch to the disc's executable and
+        // writes the patched one (the config's patch_file_path and patched_file_path), from which
+        // the image the game loads is then taken.
+        bool recompile(const Bundle& b, const std::string& prefix, const Variant& v, std::string& error)
         {
+            const std::string ppcDir = prefix + v.ppc, objDir = prefix + v.obj;
             std::error_code ec;
             fs::create_directories(prefix + "/config", ec);
-            fs::create_directories(prefix + "/ppc", ec);
-            fs::create_directories(prefix + "/obj", ec);
-            for (const char* f : {"backbreaker.toml", "backbreaker_switch_tables.toml"})
+            fs::create_directories(ppcDir, ec);
+            fs::create_directories(objDir, ec);
+            for (const char* f : {v.config, v.switches})
                 fs::copy_file(b.config + "/" + f, prefix + "/config/" + f, fs::copy_options::overwrite_existing, ec);
-            for (auto& e : fs::directory_iterator(prefix + "/ppc", ec)) fs::remove(e.path(), ec);
-            if (!run({b.xenonRecomp, prefix + "/config/backbreaker.toml", b.ppcContext}, b.toolchainLib,
-                     prefix + "/obj/xenonrecomp.log", error))
+            for (auto& e : fs::directory_iterator(ppcDir, ec)) fs::remove(e.path(), ec);
+            if (v.update) {
+                // Made again from the disc's executable and the patch: one left by an earlier run
+                // would be used as it is
+                fs::remove(prefix + v.xex, ec);
+                fs::remove(prefix + v.pe, ec);
+            }
+            if (!run({b.xenonRecomp, prefix + "/config/" + v.config, b.ppcContext}, b.toolchainLib,
+                     objDir + "/xenonrecomp.log", error))
                 return false;
+            if (v.update) {
+                std::ifstream in(prefix + v.xex, std::ios::binary);
+                std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()), pe;
+                Xex patched;
+                if (data.empty()) {
+                    error = "the title update's patch didn't apply to your disc's executable (log: " + objDir +
+                            "/xenonrecomp.log):" + tail(objDir + "/xenonrecomp.log", 5);
+                    return false;
+                }
+                if (!patched.parse(std::move(data), error) || !patched.decryptToPe(pe, error)) return false;
+                std::ofstream out(prefix + v.pe, std::ios::binary | std::ios::trunc);
+                out.write(reinterpret_cast<const char*>(pe.data()), std::streamsize(pe.size()));
+                if (!out.flush()) {
+                    error = "can't write " + prefix + v.pe;
+                    return false;
+                }
+            }
             // The layout check of CMakeLists.txt and link_game.sh
             auto layout = [](const std::string& path) {
                 std::vector<std::string> v;
@@ -226,32 +291,33 @@ namespace installer
                 std::sort(v.begin(), v.end());
                 return v;
             };
-            if (layout(prefix + "/ppc/ppc_config.h") != layout(b.kit + "/share/backbreaker-runtime/ppc_config.h")) {
-                error = "the executable's layout (ppc/ppc_config.h) isn't the one this runtime is built for";
+            if (layout(ppcDir + "/ppc_config.h") != layout(kitShare(b, v) + "/ppc_config.h")) {
+                error = "the executable's layout (ppc_config.h) isn't the one this runtime is built for";
                 return false;
             }
             return true;
         }
 
         // Compiles every ppc/*.cpp into obj/, `jobs` at a time, progress by source size
-        bool compilePpc(const Bundle& b, const std::string& prefix, unsigned jobs, const Progress& progress, double from,
-                        double to, std::string& error)
+        bool compilePpc(const Bundle& b, const std::string& prefix, const Variant& v, unsigned jobs, const Progress& progress,
+                        double from, double to, std::string& error)
         {
+            const std::string ppcDir = prefix + v.ppc, objDir = prefix + v.obj;
             struct Unit { std::string source, object; uint64_t size; };
             std::vector<Unit> units;
             std::error_code ec;
-            for (auto& e : fs::directory_iterator(prefix + "/ppc", ec))
+            for (auto& e : fs::directory_iterator(ppcDir, ec))
                 if (e.path().extension() == ".cpp")
-                    units.push_back({e.path().string(), prefix + "/obj/" + e.path().stem().string() + ".o", uint64_t(e.file_size())});
+                    units.push_back({e.path().string(), objDir + "/" + e.path().stem().string() + ".o", uint64_t(e.file_size())});
             // Biggest first, so the longest compiles don't start last
             std::sort(units.begin(), units.end(), [](const Unit& a, const Unit& c) { return a.size > c.size; });
             uint64_t total = 0, done = 0;
             for (const Unit& u : units) total += u.size;
-            for (auto& e : fs::directory_iterator(prefix + "/obj", ec))
+            for (auto& e : fs::directory_iterator(objDir, ec))
                 if (e.path().filename().string().rfind("ppc_", 0) == 0) fs::remove(e.path(), ec);
 
             std::vector<std::string> base = toolchainCompile(b);
-            for (const std::string& a : readArgs(b.kit + "/share/backbreaker-runtime/ppc-compile.args", b.kit, prefix + "/ppc"))
+            for (const std::string& a : readArgs(kitShare(b) + "/ppc-compile.args", b.kit, ppcDir))
                 base.push_back(a);
             base.insert(base.end(), kPpcExtraFlags.begin(), kPpcExtraFlags.end());
 
@@ -294,15 +360,15 @@ namespace installer
             return !failed && finished == units.size();
         }
 
-        bool link(const Bundle& b, const std::string& prefix, std::string& error)
+        bool link(const Bundle& b, const std::string& prefix, const Variant& v, std::string& error)
         {
-            const std::string share = b.kit + "/share/backbreaker-runtime";
+            const std::string ppcDir = prefix + v.ppc, objDir = prefix + v.obj;
             std::error_code ec;
             fs::create_directories(prefix + "/bin", ec);
             // The import glue, from the player's executable (tools/gen_imports.py's output)
             std::vector<uint8_t> xexData, pe;
             {
-                std::ifstream x(prefix + "/game/extracted/default.xex", std::ios::binary), p(prefix + "/game/extracted/default.pe", std::ios::binary);
+                std::ifstream x(prefix + v.xex, std::ios::binary), p(prefix + v.pe, std::ios::binary);
                 xexData.assign(std::istreambuf_iterator<char>(x), std::istreambuf_iterator<char>());
                 pe.assign(std::istreambuf_iterator<char>(p), std::istreambuf_iterator<char>());
             }
@@ -310,25 +376,25 @@ namespace installer
             std::string cpp;
             std::vector<std::string> stats;
             if (!xex.parse(std::move(xexData), error) || !xex.generateImports(pe, kernelExports(), cpp, stats, error)) return false;
-            if (!writeText(prefix + "/obj/imports.cpp", cpp)) {
-                error = "can't write " + prefix + "/obj/imports.cpp";
+            if (!writeText(objDir + "/imports.cpp", cpp)) {
+                error = "can't write " + objDir + "/imports.cpp";
                 return false;
             }
             std::vector<std::string> argv = toolchainCompile(b);
-            for (const std::string& a : readArgs(share + "/imports-compile.args", b.kit, prefix + "/ppc")) argv.push_back(a);
-            argv.insert(argv.end(), {"-c", prefix + "/obj/imports.cpp", "-o", prefix + "/obj/imports.o"});
-            if (!run(argv, b.toolchainLib, prefix + "/obj/imports.log", error)) return false;
+            for (const std::string& a : readArgs(kitShare(b) + "/imports-compile.args", b.kit, ppcDir)) argv.push_back(a);
+            argv.insert(argv.end(), {"-c", objDir + "/imports.cpp", "-o", objDir + "/imports.o"});
+            if (!run(argv, b.toolchainLib, objDir + "/imports.log", error)) return false;
 
-            std::vector<std::string> game{prefix + "/obj/imports.o"};
-            for (auto& e : fs::directory_iterator(prefix + "/obj", ec))
+            std::vector<std::string> game{objDir + "/imports.o"};
+            for (auto& e : fs::directory_iterator(objDir, ec))
                 if (e.path().extension() == ".o" && e.path().filename().string().rfind("ppc_", 0) == 0) game.push_back(e.path().string());
             std::sort(game.begin() + 1, game.end());
             argv = toolchainCompile(b);
             argv.push_back("-fuse-ld=lld");
-            for (const std::string& a : readArgs(share + "/game-link.args", b.kit, prefix + "/ppc", game)) argv.push_back(a);
+            for (const std::string& a : readArgs(kitShare(b, v) + "/game-link.args", b.kit, ppcDir, game)) argv.push_back(a);
             const std::string program = prefix + "/" + gameProgram();
             argv.insert(argv.end(), {"-o", program + ".tmp"});
-            if (!run(argv, b.toolchainLib, prefix + "/obj/link.log", error)) return false;
+            if (!run(argv, b.toolchainLib, objDir + "/link.log", error)) return false;
             fs::rename(program + ".tmp", program, ec);
             if (ec) {
                 error = "can't write " + program + " (" + ec.message() + ")";
@@ -384,18 +450,15 @@ namespace installer
         return true;
     }
 
-    std::string bundlePpcInputs(const Bundle& b)
+    std::string bundlePpcInputs(const Bundle& b) { return bundleInputs(b, kDisc); }
+
+    bool bundleHasTitleUpdate(const Bundle& b)
     {
         std::error_code ec;
-        std::string all;
-        for (const std::string& f : {fs::exists(b.xenonRecompSource, ec) ? b.xenonRecompSource : b.xenonRecomp,
-                                     b.ppcContext, b.config + "/backbreaker.toml",
-                                     b.config + "/backbreaker_switch_tables.toml",
-                                     b.kit + "/share/backbreaker-runtime/ppc-compile.args",
-                                     b.kit + "/include/ppc_hooks.h"})
-            all += fileHash(f) + "\n";
-        for (const std::string& f : kPpcExtraFlags) all += f + "\n";
-        return textHash(all);
+        for (const std::string& f : {b.config + "/" + kUpdate.config, b.config + "/" + kUpdate.switches,
+                                     kitShare(b, kUpdate) + "/game-link.args", kitShare(b, kUpdate) + "/ppc_config.h"})
+            if (!fs::exists(f, ec)) return false;
+        return true;
     }
 
     std::string dataHome()
@@ -433,26 +496,33 @@ namespace installer
                           std::string& error)
     {
         const std::string& prefix = o.prefix;
-        const std::string stampPath = prefix + "/obj/build.stamp";
+        const Variant& v = o.titleUpdate ? kUpdate : kDisc;
+        const Variant& other = o.titleUpdate ? kDisc : kUpdate;
+        if (v.update && !bundleHasTitleUpdate(b)) {
+            error = "this installer's bundle has no support for the title update";
+            return BuildResult::Failed;
+        }
+        const std::string stampPath = prefix + v.obj + "/build.stamp";
         std::error_code ec;
-        fs::create_directories(prefix + "/obj", ec);
+        fs::create_directories(prefix + v.obj, ec);
         Stamp stamp = readStamp(stampPath);
-        const std::string ppc = ppcInputs(b, prefix);
-        bool objects = fs::exists(prefix + "/obj/ppc_func_mapping.o", ec);
+        const std::string ppc = ppcInputs(b, prefix, v);
+        bool objects = fs::exists(prefix + v.obj + "/ppc_func_mapping.o", ec);
         BuildResult result = BuildResult::UpToDate;
         if (o.recompile || stamp.ppc != ppc || !objects) {
             std::string why;
             const unsigned jobs = o.jobs ? o.jobs : chooseJobs(why);
-            progress(from, "translating the game's code (XenonRecomp)");
-            if (!recompile(b, prefix, error)) return BuildResult::Failed;
+            progress(from, v.update ? "patching the game's executable with the title update and translating its code (XenonRecomp)"
+                                    : "translating the game's code (XenonRecomp)");
+            if (!recompile(b, prefix, v, error)) return BuildResult::Failed;
             progress(from + (to - from) * 0.02, "compiling the game, " + (why.empty() ? std::to_string(jobs) + " at a time" : why));
             stamp.ppc.clear(); // a failed compile leaves no stamp that says ppc/ is current
             writeStamp(stampPath, stamp);
-            if (!compilePpc(b, prefix, jobs, progress, from + (to - from) * 0.02, from + (to - from) * 0.96, error))
+            if (!compilePpc(b, prefix, v, jobs, progress, from + (to - from) * 0.02, from + (to - from) * 0.96, error))
                 return BuildResult::Failed;
             // The sources are no longer needed (XenonRecomp makes them again in seconds); the
             // headers stay, for compiling the import glue
-            for (auto& e : fs::directory_iterator(prefix + "/ppc", ec))
+            for (auto& e : fs::directory_iterator(prefix + v.ppc, ec))
                 if (e.path().extension() == ".cpp") fs::remove(e.path(), ec);
             stamp.ppc = ppc;
             stamp.link.clear();
@@ -462,7 +532,14 @@ namespace installer
         const std::string linkHash = linkInputs(b, ppc);
         if (o.relink || result == BuildResult::Rebuilt || stamp.link != linkHash || !fs::exists(prefix + "/" + gameProgram(), ec)) {
             progress(from + (to - from) * 0.97, "linking the game");
-            if (!link(b, prefix, error)) return BuildResult::Failed;
+            // The program is this variant's from here on: the other's stamp must not say it is current
+            const std::string otherStampPath = prefix + other.obj + "/build.stamp";
+            if (fs::exists(otherStampPath, ec)) {
+                Stamp otherStamp = readStamp(otherStampPath);
+                otherStamp.link.clear();
+                writeStamp(otherStampPath, otherStamp);
+            }
+            if (!link(b, prefix, v, error)) return BuildResult::Failed;
             stamp.link = linkHash;
             writeStamp(stampPath, stamp);
             if (result == BuildResult::UpToDate) result = BuildResult::Relinked;

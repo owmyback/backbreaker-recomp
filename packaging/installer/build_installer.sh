@@ -17,7 +17,8 @@
 #   sysroot/     the files of Ubuntu's libc6, libc6-dev, linux-libc-dev, libstdc++-12-dev,
 #                libgcc-12-dev, libvulkan-dev and libvulkan1 - so the game a player builds needs
 #                glibc 2.35, like the portable build (#134)
-#   kit/         the runtime kit, built with BB_PORTABLE (SDL3, shaderc, FFmpeg static)
+#   kit/         the runtime kit, built with BB_PORTABLE (SDL3, shaderc, FFmpeg static): the runtime for
+#                the disc's executable and the one for the title update's
 #   xenonrecomp/ XenonRecomp with patches/, its ppc_context.h, and SOURCE: the commit and patch
 #   config/      config/*.toml
 #   MANIFEST.txt every package and version in it, for the licences' source offers, and what an
@@ -82,12 +83,15 @@ install -m 644 $XENON/XenonUtils/ppc_context.h "$B/xenonrecomp/"
     echo "XenonRecomp $(git -C $XENON rev-parse HEAD)"
     echo "patches/xenonrecomp-backbreaker-instructions.patch $(sha256sum patches/xenonrecomp-backbreaker-instructions.patch | cut -d' ' -f1)"
 } >"$B/xenonrecomp/SOURCE"
-install -m 644 config/backbreaker.toml config/backbreaker_switch_tables.toml "$B/config/"
+# The title update's config too: the installer builds from the patched executable when the player
+# has given it the update (installer/title_update.h)
+install -m 644 config/backbreaker.toml config/backbreaker_switch_tables.toml \
+    config/backbreaker_tu2.toml config/backbreaker_tu2_switch_tables.toml "$B/config/"
 
 say "the runtime kit and the installer (BB_PORTABLE, no game files)"
 cmake -B $OUT/build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBB_PORTABLE=ON \
     -DBB_RUNTIME_ONLY=ON -DFFMPEG_XMA="$REPO/third_party/ffmpeg-xma-portable" >/dev/null
-ninja -C $OUT/build backbreaker_runtime backbreaker-installer >/dev/null
+ninja -C $OUT/build backbreaker_runtime backbreaker_runtime_tu2 backbreaker-installer >/dev/null
 cmake --install $OUT/build --component runtime --prefix "$B/kit" >/dev/null
 install -m 755 $OUT/build/backbreaker-installer "$APPDIR/usr/bin/"
 
