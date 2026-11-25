@@ -1,4 +1,4 @@
-// Title Update 2 for the installer (docs/title-update.md): the one patch Backbreaker got on Xbox
+// Title Update 2 for the installer (docs/title-update.md): a patch Backbreaker got on Xbox
 // Live. The player gives the installer the update's package, the file Xbox Live delivered
 // (TU_134U1UQ_0000008000000.00000000000G2, an STFS package), and the game is then built from the
 // disc's executable with the update's patch applied, and reads the update's own archive.

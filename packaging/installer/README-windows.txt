@@ -41,7 +41,7 @@ Settings
     skip_intro=0         1 skips the logos at the start
 
 Title Update 2
-  Backbreaker got one patch on Xbox Live: more plays, changed catching, kicking and player
+  Backbreaker got a patch on Xbox Live: more plays, changed catching, kicking and player
   ratings, replay cameras. If you have your own copy of its package (the file
   TU_134U1UQ_0000008000000.00000000000G2), drag it onto Backbreaker-Recompiled.exe once the
   game is installed. The game is built again with the update, which takes about as long as

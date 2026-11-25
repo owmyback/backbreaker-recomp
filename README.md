@@ -29,7 +29,7 @@ and Windows using XenonRecomp. Requires a legally owned disc image; no game data
   panel with the text and a grid of keys opens over the game. Type on a keyboard and press Enter, or
   use the controller: d-pad and A pick the keys, X deletes, Y is a space, Start confirms, B cancels.
 - **Mods:** plays, the AI's audibles, minigames and menus can be changed; see `docs/modding.md`.
-- **Title Update #2:** the game's one Xbox Live patch, from your own copy of its package; see `docs/title-update.md`.
+- **Title Update #2:** a patch the game got on Xbox Live, from your own copy of its package; see `docs/title-update.md`.
 
 ## Start here
 - `docs/ROADMAP.md` - phases, current status, what each phase did and what is next

@@ -1,6 +1,6 @@
 # Title Update #2
 
-Backbreaker got one patch on Xbox Live after launch, "Title Update #2" (the "Greathouse" patch:
+Backbreaker got a patch on Xbox Live after launch, "Title Update #2" (the "Greathouse" patch:
 its splash screen is signed Greathouse #3). It replaces the executable and adds an archive of its
 own with 59 more offensive and 43 more defensive plays, changed plays, tackling and Training Camp
 changes and a new play selection screen. The executable is a rebuild, not a small fix: the code
