@@ -45,9 +45,10 @@ Title Update 2
   ratings, replay cameras. If you have your own copy of its package (the file
   TU_134U1UQ_0000008000000.00000000000G2), drag it onto Backbreaker-Recompiled.exe once the
   game is installed. The game is built again with the update, which takes about as long as
-  installing did. The package is kept in %LOCALAPPDATA%\backbreaker-recomp\update: take it out
-  of that folder and start the game to go back to the disc's version, put it back to return to
-  the update. Switching takes a second, since both stay built.
+  installing did. The package is kept in %LOCALAPPDATA%\backbreaker-recomp\update. To go back
+  to the disc's version, take it out of that folder and double-click Backbreaker-Recompiled.exe;
+  put it back and double-click again to return to the update. Switching takes a second, since
+  both stay built. The Start menu's shortcut starts whichever version was built last.
 
 Update
   Unzip the new release over this folder (or beside it, and delete the old one), then start

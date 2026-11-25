@@ -7,6 +7,8 @@
 // mods/ and saves/): the `title-update` command copies it there, or the player does. While a
 // usable package is in that folder the game is the updated one; take it out and the next `play`
 // goes back to the disc's version. Both builds' compiled code is kept, so switching only links.
+// Only this program looks in the folder: the menu entry and the Steam shortcut start the game's
+// program itself, the version linked last.
 //
 // StfsPackage is tools/stfs.py in C++: layout after Free60's STFS notes and Velocity's
 // StfsPackage. Every offset read from the file is bounds-checked; the hashes are not verified,

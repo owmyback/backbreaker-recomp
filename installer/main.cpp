@@ -90,8 +90,8 @@ namespace
         "  play [options] [-- <game options>]  build what changed (a new runtime relinks in seconds), start the game\n"
         "  rebuild [options]                 translate, compile and link again\n"
         "  title-update <package> [options]  Title Update 2 from your copy of its package (TU_134U1UQ_...): kept in\n"
-        "                                    the update folder, and the game built with it. Take the package out\n"
-        "                                    of that folder to go back to the disc's version.\n"
+        "                                    the update folder, and the game built with it. To go back to the\n"
+        "                                    disc's version, take the package out of that folder, then play.\n"
         "  add-to-steam [--prefix <dir>]     Backbreaker in Steam's library, with its icon (close Steam first)\n"
         "  ppc-inputs [--bundle <dir>]       a hash of what this bundle translates and compiles the game with\n"
         "options: --prefix <dir>   where the game is installed (default: "
@@ -686,8 +686,8 @@ namespace
             fs::copy_file(o.image, to, fs::copy_options::overwrite_existing, ec);
             if (ec) return fail(kFailed, "can't copy the package into " + o.updateDir + " (" + ec.message() + ")");
         }
-        std::printf("[installer] Title Update 2 is in %s; take it out of that folder to go back to the disc's version\n",
-                    nativePath(o.updateDir).c_str());
+        std::printf("[installer] Title Update 2 is in %s; to go back to the disc's version, take it out of that folder and run: %s play%s\n",
+                    nativePath(o.updateDir).c_str(), selfCommand().c_str(), prefixOption(o.prefix).c_str());
         if (!fs::exists(o.prefix + "/game/.complete", ec)) {
             std::printf("[installer] the game isn't installed in %s yet: the update is used once it is (%s install <your disc image>%s)\n",
                         o.prefix.c_str(), selfCommand().c_str(), prefixOption(o.prefix).c_str());

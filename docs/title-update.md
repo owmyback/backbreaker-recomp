@@ -21,17 +21,23 @@ With the game installed (the AppImage, the Windows zip or RecompLauncher), eithe
   package>`. On Windows, drag the package onto `Backbreaker-Recompiled.exe`. It checks the package,
   keeps a copy in the update folder and builds the updated game, showing its progress. For a game
   RecompLauncher set up, add `--prefix` with the game's `build` folder, as its start command does.
-- **Or put the package in the update folder yourself** and start the game:
+- **Or put the package in the update folder yourself** and start the game through the installer:
   `~/.local/share/backbreaker-recomp/update` (`$XDG_DATA_HOME`), or
   `%LOCALAPPDATA%\backbreaker-recomp\update` on Windows. It is beside the mods folder, which
-  RecompLauncher's **Open Mods Folder** opens, and it is made the first time the game is started.
-  The first start after that builds the updated game without showing progress.
+  RecompLauncher's **Open Mods Folder** opens, and it is made the first time the installer starts
+  the game. That start then builds the updated game (on Linux without showing progress).
+
+**The installer is what looks in the update folder**, each time it starts the game: RecompLauncher's
+Play, a double-click on the AppImage or on `Backbreaker-Recompiled.exe`, or the `play` command. The
+applications-menu entry, the Start-menu shortcut and the Steam shortcut start the game's program
+itself, which is the version built last: after adding or removing a package, start the game through
+the installer once, and the shortcuts start that version from then on.
 
 Building takes about as long as installing did: half a minute on a fast PC, a few minutes on a Steam
 Deck. Saves, settings and mods are shared by both versions.
 
-**To go back to the disc's version,** take the package out of the update folder and start the game.
-Both versions stay built, so switching either way takes about a second. While a package is in the
+**To go back to the disc's version,** take the package out of the update folder and start the game
+through the installer. Both versions stay built, so switching either way takes about a second. While a package is in the
 folder that can't be used (another game's, a damaged copy), the installer says so and starts the
 disc's version.
 
