@@ -1,6 +1,9 @@
 // The game's profiler markers were compiled to an empty function, sub_824972A8(category, name),
 // but every call still passes a readable scope name ("NmgCommsVoice::Initialise", ...).
 // Overriding the weak symbol lets crash reports show which part of the game was running.
+// In the title update's executable the linker folded every empty function into one (at 0x82656E18
+// there), so the same hook also sees the game's compiled-out debug prints (category, format): their
+// format strings show up among the scope names.
 #include "kernel.h"
 #include "../memory.h"
 

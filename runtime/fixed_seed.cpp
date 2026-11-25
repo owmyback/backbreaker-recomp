@@ -35,7 +35,7 @@ extern "C" PPC_FUNC(__imp__sub_82643358); // draw: float from the low 16 bits, o
 
 namespace
 {
-    constexpr uint32_t kState = 0x82CC5430;  // u32 x, u32 carry, u64 multiplier
+    constexpr uint32_t kState = BB_EXE(0x82CC5430, 0x82CC80F0); // u32 x, u32 carry, u64 multiplier
     constexpr uint32_t kCarry = 0x0002CD2D;   // the carry the game seeds with
 
     struct Stream

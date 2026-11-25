@@ -358,7 +358,7 @@ int main(int argc, char** argv)
     timeBeginPeriod(1);
 #endif
     blockEndSignals(); // first: every thread started from here on inherits the mask
-    std::string image; // the positional argument; default <data>/extracted/default.pe once paths are known
+    std::string image; // the positional argument; default <data>/extracted/default.pe (tu2/default.pe for the update) once paths are known
     paths::Options pathOptions; // --data-dir, --user-dir (#134)
     bool dumpShaders = false;
     int timeout = 0;
@@ -495,8 +495,8 @@ int main(int argc, char** argv)
     if (!logFile.empty())
         info("[log] this run's log: %s (the two runs before it: backbreaker.1.log, backbreaker.2.log)", logFile.c_str());
     if (image.empty())
-        image = paths::data() + "/extracted/default.pe";
-    const std::string xex = paths::data() + "/extracted/default.xex";
+        image = paths::data() + BB_EXE("/extracted/default.pe", "/extracted/tu2/default.pe");
+    const std::string xex = paths::data() + BB_EXE("/extracted/default.xex", "/extracted/tu2/default.xex");
     if (dumpShaders)
         gpu::capture::dumpAllShaders(paths::captures() + "/shaders");
 
@@ -537,7 +537,10 @@ int main(int argc, char** argv)
     kernel::loadXexHeader(xex);
     kernel::patchImports();
     kernel::startTimeStampThread(); // keeps KeTimeStampBundle current while the game runs
-    kernel::initFileSystem(paths::data() + "/disc", paths::user() + "/cache", paths::user() + "/saves");
+    // update:\ is where the console mounts an installed title update: its patched executable looks
+    // for the update's own archive there (UPDATE:PatchPackedOutputX360, registered after the disc's)
+    kernel::initFileSystem(paths::data() + "/disc", paths::user() + "/cache", paths::user() + "/saves",
+                           BB_EXE(std::string(), paths::data() + "/extracted/tu2"));
     if (std::filesystem::is_directory(paths::mods()))
         kernel::setDiscOverlay(paths::mods());
     kernel::initAchievements(paths::user() + "/achievements");

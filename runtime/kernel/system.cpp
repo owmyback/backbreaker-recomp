@@ -267,3 +267,18 @@ GUEST_IMPORT(KeBugCheck) { fatal("guest KeBugCheck(%08X)", ctx.r3.u32); }
 GUEST_IMPORT(KeBugCheckEx) { fatal("guest KeBugCheckEx(%08X, %08X, %08X, %08X)", ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32); }
 GUEST_IMPORT(HalReturnToFirmware) { info("guest requested HalReturnToFirmware(%u) - exiting", ctx.r3.u32); kernel::printSummary(); std::exit(0); }
 GUEST_IMPORT(XamLoaderTerminateTitle) { info("guest requested XamLoaderTerminateTitle - exiting"); kernel::printSummary(); std::exit(0); }
+
+// Launch data: what a title that started this one with XamLoaderLaunchTitle left for it. Only the
+// title update's executable asks. Nothing launched the game here, so there is none:
+// ERROR_NOT_FOUND and a size of 0, as Xenia's xam_info.cc answers without launch data.
+// u32 XamLoaderGetLaunchDataSize(u32* Size)
+GUEST_IMPORT(XamLoaderGetLaunchDataSize)
+{
+    if (ctx.r3.u32)
+        write32(ctx.r3.u32, 0);
+    ctx.r3.u64 = 1168; // ERROR_NOT_FOUND
+}
+// u32 XamLoaderGetLaunchData(void* Buffer, u32 Size)
+GUEST_IMPORT(XamLoaderGetLaunchData) { ctx.r3.u64 = 1168; }
+// void XamLoaderSetLaunchData(void* Data, u32 Size): for the next title, and there is none
+GUEST_IMPORT(XamLoaderSetLaunchData) {}

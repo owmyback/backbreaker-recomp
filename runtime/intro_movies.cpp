@@ -17,8 +17,8 @@ extern "C" PPC_FUNC(__imp__sub_82804660); // NmgMovie::Play(path, flags)
 namespace
 {
     std::atomic<bool> g_skip{ false };
-    constexpr uint32_t k505Return = 0x82281440;    // sub_822813A0 after playing media\Movies\Xbox360\505.wmv
-    constexpr uint32_t kNmLogoReturn = 0x82281450; // ... and after nmlogo.wmv
+    constexpr uint32_t k505Return = BB_EXE(0x82281440, 0x822834D4);    // sub_822813A0 after playing media\Movies\Xbox360\505.wmv
+    constexpr uint32_t kNmLogoReturn = BB_EXE(0x82281450, 0x822834E4); // ... and after nmlogo.wmv
 }
 
 namespace intro_movies

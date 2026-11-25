@@ -25,7 +25,7 @@ extern "C" PPC_FUNC(__imp__sub_8237E7F8); // play lock: leave
 
 namespace
 {
-    constexpr uint32_t kUnlockedBuildReturn = 0x8236EA8C; // in sub_8236E8D0, after its call of sub_8232FA50
+    constexpr uint32_t kUnlockedBuildReturn = BB_EXE(0x8236EA8C, 0x82374C6C); // in sub_8236E8D0, after its call of sub_8232FA50
     constexpr uint32_t kPlayBuilt = 100;                   // u8: the play's slots exist
 }
 

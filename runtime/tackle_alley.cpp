@@ -27,11 +27,11 @@ extern "C" PPC_FUNC(__imp__sub_8215B710); // the play-flow state machine's updat
 
 namespace
 {
-    constexpr uint32_t kGameObject = 0x82B5B7D8;  // pointer to the game manager
-    constexpr uint32_t kFadeActive = 0x82B5B4E4;  // u8: a fade is running (sub_8226AE10 reads it)
-    constexpr uint32_t kFadeType = 0x82B5B4E0;    // u32: 1 = to black, 2 = back in
-    constexpr uint32_t kFlowState = 22128;        // play flow: current state
-    constexpr uint32_t kStateRequestNext = 64;    // the state that requests stage 4
+    constexpr uint32_t kGameObject = BB_EXE(0x82B5B7D8, 0x82B5D598); // pointer to the game manager
+    constexpr uint32_t kFadeActive = BB_EXE(0x82B5B4E4, 0x82B5D2A4); // u8: a fade is running (sub_8226AE10 reads it)
+    constexpr uint32_t kFadeType = BB_EXE(0x82B5B4E0, 0x82B5D2A0);   // u32: 1 = to black, 2 = back in
+    constexpr uint32_t kFlowState = BB_EXE(22128, 22304);             // play flow: current state (the object grew in the update)
+    constexpr uint32_t kStateRequestNext = 64;    // the state that requests stage 4 (the update kept the 72 states and 45 stages)
     constexpr uint32_t kStageBetweenAttempts = 43;
 
     uint32_t load32(uint8_t* base, uint32_t a) { return __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + a)); }

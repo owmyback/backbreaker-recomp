@@ -379,7 +379,8 @@ namespace kernel
         g_symlinks.erase(lower(name));
     }
 
-    void initFileSystem(const std::string& discRoot, const std::string& cacheRoot, const std::string& savesRoot)
+    void initFileSystem(const std::string& discRoot, const std::string& cacheRoot, const std::string& savesRoot,
+                        const std::string& updateRoot)
     {
         fs::create_directories(cacheRoot);
         fs::create_directories(savesRoot);
@@ -390,6 +391,8 @@ namespace kernel
             { "\\device\\harddisk0\\cache0", cacheRoot, true },
             { "\\device\\harddisk0\\cache1", cacheRoot, true },
         };
+        if (!updateRoot.empty())
+            g_mounts.push_back({ "\\device\\update", updateRoot, false });
         std::sort(g_mounts.begin(), g_mounts.end(), [](auto& a, auto& b) { return a.prefix.size() > b.prefix.size(); });
         g_symlinks = {
             { "game:", "\\Device\\Cdrom0" },
@@ -399,6 +402,12 @@ namespace kernel
             { "cache:", "\\Device\\Harddisk0\\Cache0" },
             { "\\??\\cache:", "\\Device\\Harddisk0\\Cache0" },
         };
+        if (!updateRoot.empty())
+        {
+            g_symlinks["update:"] = "\\Device\\Update";
+            g_symlinks["\\??\\update:"] = "\\Device\\Update";
+            info("file system: update:\\ -> %s", updateRoot.c_str());
+        }
         info("file system: game:\\ -> %s, cache:\\ -> %s", discRoot.c_str(), cacheRoot.c_str());
     }
 }

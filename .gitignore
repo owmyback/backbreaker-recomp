@@ -26,3 +26,5 @@ build-portable/
 build-installer/
 build-installer-windows/
 dist/
+ppc-tu2/
+build-tu2/

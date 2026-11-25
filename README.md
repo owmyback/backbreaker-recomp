@@ -34,6 +34,7 @@ and Windows using XenonRecomp. Requires a legally owned disc image; no game data
 - `docs/ROADMAP.md` - phases, current status, what each phase did and what is next
 - `docs/runtime.md` - building and running the runtime, its layout and debugging aids
 - `docs/modding.md` - changing plays, the AI's audibles, minigames and menus, and sharing it as changes
+- `docs/title-update.md` - building the game from the executable patched with Title Update #2 (experimental, by hand)
 - `docs/feasibility.md` - the original analysis and recompiler notes
 - `CONTRIBUTING.md` - rules (no game files, ever), workflow and testing for contributors
 
