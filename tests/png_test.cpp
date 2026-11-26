@@ -15,7 +15,7 @@
 // as long as it is a valid zlib stream. Un-filtering is written here anyway, for all five filter
 // types, so a writer that filters its rows still round-trips.
 //
-// No game files. Build and run: README "Tests" / .github/workflows/ci.yml
+// No game files. Build and run: docs/testing.md / .github/workflows/ci.yml
 //   clang++ -std=c++20 -Wall -Wextra -O2 tests/png_test.cpp runtime/debug/png.cpp -lz -o build/png_test
 
 #include "../runtime/debug/png.h"

@@ -21,7 +21,7 @@ current status are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 - Build tools: clang (18+), cmake, ninja, python3, git, openssl. Rendering work also needs Vulkan
   headers/loader, SDL3 and glslang/shaderc development packages.
 - Without game files: you can build XenonRecomp with our patch and run the tests (see README,
-  "XenonRecomp setup" and "Tests").
+  "XenonRecomp setup", and [`docs/testing.md`](docs/testing.md)).
 - With your own disc image: follow README ("Reproduce extraction", "Recompile") and
   [`docs/runtime.md`](docs/runtime.md) to build and run `build/backbreaker`.
 
@@ -71,7 +71,8 @@ Rules for agents:
 
 ## Testing
 
-- Instruction semantics: `tests/instr_semantics.cpp` (see README, "Tests").
+- Tests without game files (instruction semantics, the runtime's parsers and converters, the
+  tools): [`docs/testing.md`](docs/testing.md) has the command for each; CI runs them all.
 - Runtime: `./build/backbreaker --timeout 60` prints a status line every second and, on a crash or
   timeout, each thread's recent kernel calls and profiler scopes.
 - Scripted input: `--press "a@20,a@26"`. GPU frame capture: `--capture-frame 1200`.

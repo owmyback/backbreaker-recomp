@@ -1,6 +1,7 @@
 // Checks runtime/gpu/tiling.h (issue #12, roadmap phase 4): the tiled byte offset of a block in a
-// 2D surface, and the tile/untile helpers. No game files, no generated headers - see README
-// "Tests" for the build command, which compiles this file together with tests/tiling_test_odr.cpp
+// 2D surface, and the tile/untile helpers. No game files, no generated headers - see
+// docs/testing.md for the build command, which compiles this file together with
+// tests/tiling_test_odr.cpp
 // (a second translation unit including the header, so a non-inline definition fails to link).
 //
 // Spot values below are hand-computed from the address decomposition in tiling.h. With

@@ -14,7 +14,7 @@
 //     version has, and a number on the wrong side of the list it came from, come back -1; with no
 //     other list at all, everything does
 //
-// No game files. Build and run: README "Tests" / .github/workflows/ci.yml
+// No game files. Build and run: docs/testing.md / .github/workflows/ci.yml
 //   clang++ -std=c++20 -Wall -Wextra -O2 tests/play_numbers_test.cpp runtime/play_numbers.cpp -o build/play_numbers_test
 
 #include "../runtime/play_numbers.h"

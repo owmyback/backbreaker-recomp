@@ -170,7 +170,7 @@ Goal: every guest function translates to C++ that compiles.
   push (`.github/workflows/ci.yml`), which also builds the patched XenonRecomp and lints
   `scripts/setup.sh` with shellcheck (#26).
 
-Verify: see README "Recompile" and "Tests".
+Verify: see README "Recompile" and `docs/testing.md`.
 
 Open issues: #2 (tests for the remaining new instructions).
 

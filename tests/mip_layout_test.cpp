@@ -1,5 +1,5 @@
 // Checks runtime/gpu/mip_layout.h (issue #46): where each mip level of a texture is in guest
-// memory. No game files, no generated headers - see README "Tests" for the build command.
+// memory. No game files, no generated headers - see docs/testing.md for the build command.
 //
 // Expected values are hand-computed from Xenia's GetGuestTextureLayout / GetPackedMipOffset
 // (texture_util.cc). Two cases are the examples Xenia's own comments describe: an 80x260 tiled

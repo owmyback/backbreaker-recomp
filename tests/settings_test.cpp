@@ -14,7 +14,7 @@
 //   - skip_intro: 0 or 1, default 0; anything else the default
 //   - a file that can't be written: save returns false
 //
-// No game files. Build and run: README "Tests" / .github/workflows/ci.yml
+// No game files. Build and run: docs/testing.md / .github/workflows/ci.yml
 //   clang++ -std=c++20 -Wall -Wextra -O2 -I runtime tests/settings_test.cpp runtime/settings.cpp -o build/settings_test
 
 #include "../runtime/settings.h"

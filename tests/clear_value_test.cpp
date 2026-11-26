@@ -1,5 +1,5 @@
 // Checks runtime/gpu/clear_value.h (issue #43): resolve clear registers -> host clear values, per
-// render target format. No game files, no generated headers - see README "Tests" for the build
+// render target format. No game files, no generated headers - see docs/testing.md for the build
 // command.
 //
 // Expected values are worked out by hand from the formats' bit layouts (Xenia's xenos.h and
