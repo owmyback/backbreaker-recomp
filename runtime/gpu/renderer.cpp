@@ -21,6 +21,7 @@
 #include "geometry_cache.h"
 #include "gpu.h"
 #include "shader_translator.h"
+#include "spare_images.h"
 #include "state.h"
 #include "mip_layout.h"
 #include "tiling.h"
@@ -549,6 +550,7 @@ void main() {
             VkFormat format = VK_FORMAT_UNDEFINED;
             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
             uint32_t width = 0, height = 0, samples = 1, levels = 1;
+            VkImageUsageFlags usage = 0;
             VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
             // EDRAM render targets only: where the image lives in EDRAM
             bool edram = false, edramWide = false; // wide: 64 bits per sample
@@ -634,6 +636,7 @@ void main() {
             img.height = h;
             img.samples = samples;
             img.levels = levels;
+            img.usage = usage;
             img.aspect = format == kDepthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
             VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
             ici.flags = flags;
@@ -1872,9 +1875,48 @@ void main() {
         }
 
         // Resolve destinations, by guest physical address (the latest image written there).
-        // Replaced images are kept alive: the presenter may still be showing them.
         std::map<uint32_t, Image> g_resolved;
-        std::vector<Image> g_retired;
+
+        // Replaced images, and the stencil and packed planes that went with them, wait in g_spare
+        // for the next request of their kind (spare_images.h, #189): not in the frame they were
+        // replaced in, and not while the presenter has them (g_shownFront, the front buffer image
+        // of the last swap). They were once put aside for good, and My Teams' uniform editor, which
+        // resolves 512x512 and 1024x1024 to one address in turn, took 21 MB for each colour tried.
+        spare::Pool<Image> g_spare;
+        VkImage g_shownFront = VK_NULL_HANDLE;
+
+        spare::Kind spareKind(const Image& img) { return { uint32_t(img.format), img.width, img.height, uint32_t(img.usage) }; }
+
+        void retireImage(const Image& img) { g_spare.put(spareKind(img), uint64_t(img.image), img, g_frameSerial); }
+
+        // A 2D image with one level, layer and sample: a spare of that kind, or a new one. A spare
+        // comes back as the image and its layout only, with nothing of what it was used for.
+        Image spareOrNewImage(VkFormat format, uint32_t w, uint32_t h, VkImageUsageFlags usage, bool* spare = nullptr)
+        {
+            Image kind, old;
+            kind.format = format;
+            kind.width = w;
+            kind.height = h;
+            kind.usage = usage;
+            const bool have = g_spare.take(spareKind(kind), g_frameSerial, uint64_t(g_shownFront), old);
+            if (spare) *spare = have;
+            if (!have) return createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, format, w, h, 1, 1, 1, usage);
+            Image img;
+            img.image = old.image;
+            img.memory = old.memory;
+            img.view = old.view;
+            img.depthView = old.depthView;
+            img.stencilView = old.stencilView;
+            img.format = old.format;
+            img.aspect = old.aspect;
+            img.width = old.width;
+            img.height = old.height;
+            img.samples = old.samples;
+            img.levels = old.levels;
+            img.usage = old.usage;
+            img.layout = old.layout;
+            return img;
+        }
 
         // ---------------------------------------------------------------- textures
 
@@ -2142,8 +2184,7 @@ void main() {
         {
             Image& st = g_stencilOf[dest.image];
             if (!st.image)
-                st = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8_UINT, dest.width, dest.height, 1, 1, 1,
-                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+                st = spareOrNewImage(VK_FORMAT_R8_UINT, dest.width, dest.height, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
             return st;
         }
 
@@ -2209,8 +2250,7 @@ void main()
             }
             PackedDepth& pd = g_packedDepth[dest.image];
             if (!pd.img.image)
-                pd.img = createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, dest.width, dest.height, 1, 1, 1,
-                                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+                pd.img = spareOrNewImage(VK_FORMAT_R8G8B8A8_UNORM, dest.width, dest.height, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
             uint64_t gen = g_depthGeneration[dest.image];
             if (pd.generation != gen)
             {
@@ -2351,15 +2391,15 @@ void main()
 
         void retireResolved(std::map<uint32_t, Image>::iterator it)
         {
-            g_retired.push_back(it->second);
+            retireImage(it->second);
             if (auto st = g_stencilOf.find(it->second.image); st != g_stencilOf.end())
             {
-                g_retired.push_back(st->second);
+                retireImage(st->second);
                 g_stencilOf.erase(st);
             }
             if (auto pd = g_packedDepth.find(it->second.image); pd != g_packedDepth.end())
             {
-                g_retired.push_back(pd->second.img);
+                retireImage(pd->second.img);
                 g_packedDepth.erase(pd);
             }
             g_depthGeneration.erase(it->second.image);
@@ -3297,7 +3337,7 @@ void main()
         }
 
         // Destination image for a resolve to `destBase`: replaced when the size or format changes
-        // (the old one is retired, the presenter may still show it)
+        // (the old one becomes a spare, see g_spare)
         Image& resolveDestination(uint32_t destBase, uint32_t destPitch, uint32_t destHeight, uint32_t dw, uint32_t dh, VkFormat format,
                                   uint32_t guestBytes)
         {
@@ -3309,10 +3349,12 @@ void main()
             }
             if (it == g_resolved.end())
             {
-                it = g_resolved.emplace(destBase, createImage(VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, format, dw * g_scale, dh * g_scale, 1, 1, 1,
-                                                              VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                                                  VK_IMAGE_USAGE_SAMPLED_BIT)).first;
-                info("[render] resolve destination %08X: %ux%u%s", destBase, dw, dh, format == VK_FORMAT_R32_SFLOAT ? " (depth)" : "");
+                bool spare = false;
+                it = g_resolved.emplace(destBase, spareOrNewImage(format, dw * g_scale, dh * g_scale,
+                                                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                                      VK_IMAGE_USAGE_SAMPLED_BIT, &spare)).first;
+                info("[render] resolve destination %08X: %ux%u%s%s", destBase, dw, dh, format == VK_FORMAT_R32_SFLOAT ? " (depth)" : "",
+                     spare ? ", in an image kept from before" : "");
             }
             it->second.resolvePitch = std::max(it->second.resolvePitch, dw);
             it->second.guestBase = destBase;
@@ -5129,7 +5171,11 @@ void main()
 
         Frame& submitted = f;
         submitAndAdvance(); // also waits for the frame in flight before it
-        if (front) video::publishRenderedFrame(front->image, w, h, frameNumber);
+        if (front)
+        {
+            video::publishRenderedFrame(front->image, w, h, frameNumber);
+            g_shownFront = front->image; // not to be reused while the presenter has it (g_spare)
+        }
         if (shot)
         {
             if (submitted.submitted) VK_CHECK(vkWaitForFences(D, 1, &submitted.fence, VK_TRUE, UINT64_MAX));

@@ -90,6 +90,13 @@ length limit, and typed UTF-8:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/text_entry_test.cpp -o build/text_entry_test && build/text_entry_test
 
+The images the renderer has taken out of use and gives to the next request of the same kind
+(`runtime/gpu/spare_images.h`, #189): not in the frame they were replaced in, not the one on screen,
+and My Teams' uniform editor, which replaces one image eight times for each change of a colour,
+making no new image after the first changes:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/spare_images_test.cpp -o build/spare_images_test && build/spare_images_test
+
 The tools' own tests (`tests/test_*.py`; `tests/test_pkd.py` for `tools/pkd.py`) need no game files either:
 
     python3 -m unittest discover -s tests -p 'test_*.py'

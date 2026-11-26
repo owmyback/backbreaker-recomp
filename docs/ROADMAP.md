@@ -738,7 +738,9 @@ Correctness: the analyzer fixes (#52); jump tables indexed with the low 32 bits 
 as the console does (#186, the crash in My Teams' uniform editor: `docs/feasibility.md`); crashes
 fixed: a reused TLS slot that handed back freed data
 on the second match load (#127), and the Training Camp passing drills, a race between the game's
-update and render threads over a play's player slots (#129). #50 (an assert after stick input) was
+update and render threads over a play's player slots (#129); My Teams' uniform editor no longer
+takes 21 MB of graphics memory, never given back, for each change of a colour (#189: replaced
+resolve images are used again). #50 (an assert after stick input) was
 closed as not reproducible. Test runs: `--fixed-seed` gives every run the same random numbers, so
 the Exhibition route reaches the same coin toss, wind and kickoff (#71).
 

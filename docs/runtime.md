@@ -1440,7 +1440,11 @@ Register names come from `runtime/gpu/generated/register_names.cpp`, generated b
   block and the event either way
 - WAIT_REG_MEM spins with yield
 - Renderer: resolve destination images are never freed (one per guest address; ~375 during the
-  first load); resolves to formats other
+  first load). One that is replaced, because a resolve to its address has another size or format,
+  waits for the next resolve of its size and format and is used again from the frame after
+  (`runtime/gpu/spare_images.h`, #189: My Teams' uniform editor resolves 512x512 and 1024x1024 to
+  one address in turn, and took 21 MB of graphics memory for each change of a colour). Resolves to
+  formats other
   than 8_8_8_8, 2_10_10_10 and D24S8 depth are not written back to guest memory (depth stencil is
   written as 0), nor are destinations resolved every frame; a resolve's own format conversion is
   skipped on the GPU side (textures sample the resolve image in the render target's format); 1D/3D
