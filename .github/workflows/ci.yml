@@ -114,6 +114,12 @@ jobs:
       - name: Run spare image test
         run: ./build/spare_images_test
 
+      - name: Build resolve tile test (header-only, #198)
+        run: clang++ -std=c++20 -Wall -Wextra -O2 tests/resolve_tiles_test.cpp -o build/resolve_tiles_test
+
+      - name: Run resolve tile test
+        run: ./build/resolve_tiles_test
+
       - name: Build thread timing test (header-only, #146)
         run: clang++ -std=c++20 -Wall -Wextra -O2 -pthread tests/thread_times_test.cpp -o build/thread_times_test
 

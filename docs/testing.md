@@ -97,6 +97,12 @@ making no new image after the first changes:
 
     mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/spare_images_test.cpp -o build/spare_images_test && build/spare_images_test
 
+Which resolve destination a resolve is a tile of (`runtime/gpu/resolve_tiles.h`, #198): the four strips
+of the match's 1280x720 scene with the report's ten older destinations between them, the rows of
+the crowd's atlas (#55), an image last resolved long ago (#140), and how far below it looks:
+
+    mkdir -p build && clang++ -std=c++20 -Wall -Wextra -O2 tests/resolve_tiles_test.cpp -o build/resolve_tiles_test && build/resolve_tiles_test
+
 The tools' own tests (`tests/test_*.py`; `tests/test_pkd.py` for `tools/pkd.py`) need no game files either:
 
     python3 -m unittest discover -s tests -p 'test_*.py'

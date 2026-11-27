@@ -21,6 +21,7 @@
 #include "geometry_cache.h"
 #include "gpu.h"
 #include "shader_translator.h"
+#include "resolve_tiles.h"
 #include "spare_images.h"
 #include "state.h"
 #include "mip_layout.h"
@@ -1876,6 +1877,7 @@ void main() {
 
         // Resolve destinations, by guest physical address (the latest image written there).
         std::map<uint32_t, Image> g_resolved;
+        uint32_t g_resolvedSpan = 0; // the most bytes of guest memory any of them has spanned (tiles::span): see resolveInto
 
         // Replaced images, and the stencil and packed planes that went with them, wait in g_spare
         // for the next request of their kind (spare_images.h, #189): not in the frame they were
@@ -3357,6 +3359,7 @@ void main()
                      spare ? ", in an image kept from before" : "");
             }
             it->second.resolvePitch = std::max(it->second.resolvePitch, dw);
+            if (guestBytes) g_resolvedSpan = std::max(g_resolvedSpan, tiles::span(dw, dh, it->second.resolvePitch, guestBytes));
             it->second.guestBase = destBase;
             it->second.guestPitch = destPitch;
             it->second.guestHeight = destHeight;
@@ -3391,7 +3394,8 @@ void main()
         // tile's place inside the same tiled texture. If `destBase` lies inside an existing resolve
         // destination of the same pitch and format, return that image and the tile's position in it:
         // the 32-aligned (x, y) whose tiled offset (Xenia's Tiled2D) is the address difference and
-        // which keeps the `extent` inside the image. The offset is in the destination's guest layout,
+        // which keeps the `extent` inside the image (resolve_tiles.h, #198, which also says how far
+        // below the address it looks). The offset is in the destination's guest layout,
         // `bytes` per pixel: the crowd's impostor atlas (#55) is drawn as 8_8_8_8 a row of fans at a
         // time and resolved as 1_5_5_5, each row 256 KB on, i.e. 128 rows of 2-byte pixels further
         // down; counted in the image's 4-byte pixels that was 64 rows, and every row of fans landed
@@ -3405,23 +3409,18 @@ void main()
         Image* resolveInto(uint32_t destBase, uint32_t destPitch, VkFormat format, uint32_t bytes, VkExtent2D extent, VkOffset2D& offset)
         {
             if (!bytes || !destPitch) return nullptr;
-            auto it = g_resolved.lower_bound(destBase);
-            for (int n = 0; n < 4 && it != g_resolved.begin(); n++)
-            {
-                --it;
-                Image& img = it->second;
-                if (img.format != format || img.resolvePitch != destPitch || (img.guestBytes && img.guestBytes != bytes)) continue;
-                if (g_frameSerial - img.memResolveFrame > 1) continue; // stale: see above
-                uint32_t delta = destBase - it->first, w = img.width / g_scale, h = img.height / g_scale;
-                for (uint32_t y = 0; y + extent.height <= h; y += 32)
-                    for (uint32_t x = 0; x + extent.width <= w; x += 32)
-                        if (tiledOffset2D(x, y, tiledBlocksAligned(destPitch), bytes) == delta)
-                        {
-                            offset = { int32_t(x), int32_t(y) };
-                            return &img;
-                        }
-            }
-            return nullptr;
+            uint32_t x = 0, y = 0;
+            auto usable = [&](const Image& img, uint32_t& w, uint32_t& h) {
+                if (img.format != format || img.resolvePitch != destPitch || (img.guestBytes && img.guestBytes != bytes)) return false;
+                if (g_frameSerial - img.memResolveFrame > 1) return false; // stale: see above
+                w = img.width / g_scale;
+                h = img.height / g_scale;
+                return true;
+            };
+            auto it = tiles::find(g_resolved, destBase, destPitch, bytes, extent.width, extent.height, g_resolvedSpan, usable, x, y);
+            if (it == g_resolved.end()) return nullptr;
+            offset = { int32_t(x), int32_t(y) };
+            return &it->second;
         }
 
         // Depth resolves: the depth of `src` within `hostRect` goes to an R32_SFLOAT image at the

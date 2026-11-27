@@ -516,6 +516,16 @@ their guest address, and the presenter shows the image resolved to the front buf
   and resolved as 1_5_5_5, each row 256 KB further on. Counted in 4-byte pixels that was 64 rows
   instead of 128, so every row of fans landed on the legs of the row before and the stands showed
   torsos beside their legs and fans sunk to the shoulders.
+  The image is looked for among every destination at a lower address that is near enough to contain
+  the tile, nearest first (`runtime/gpu/resolve_tiles.h`), and only among those resolved this frame
+  or the last. It used to be the four just below and no further, while destinations stay listed
+  after the game has freed their memory. In an Exhibition game started after a Tackle Alley game in
+  the same session (#198) the scene's texture lies where Tackle Alley's loading resolved cube map
+  mips: ten old destinations between the first 320x720 strip of the scene and the second, 80 KB on,
+  and four more below the third. Those strips got images of their own, the texture the game samples
+  had only its left quarter, and the rest of the field was black under the interface and the
+  controlled player's outline. The log shows it: one `resolve destination ...: 1280x720` line for
+  each strip, 0x14000 apart, where a match has one.
 - A resolve copies the rectangle its vertices span (Xenia's GetResolveInfo), within the scissor -
   which is often a power of two or whole EDRAM tile rows bigger - and within the destination the
   game declared (`RB_COPY_DEST_PITCH`), so a resolve image is exactly as big as the textures that
